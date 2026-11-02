@@ -72,3 +72,19 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+// file_picker 8.x hardcodes compileSdk 34 in its own build script, while
+// its flutter_plugin_android_lifecycle dependency requires everything to
+// compile against API 36; the app module's compileSdk does not propagate
+// to plugin modules. Registering this from the root script is too late
+// (":app" is force-evaluated first via evaluationDependsOn, after which
+// afterEvaluate registration throws), but this module is evaluated
+// before the plugin modules, so the hook still lands in time here.
+rootProject.subprojects {
+    afterEvaluate {
+        val androidExt = extensions.findByName("android")
+        if (androidExt is com.android.build.gradle.LibraryExtension) {
+            androidExt.compileSdk = 36
+        }
+    }
+}
