@@ -367,8 +367,8 @@ class _Lens extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: const BorderRadius.all(Radius.circular(26)),
             border: Border.all(
-              color: color.withValues(alpha: 0.30 + press * 0.25),
-              width: 1.1,
+              color: color.withValues(alpha: 0.22 + press * 0.25),
+              width: 0.9,
             ),
           ),
         ),
@@ -406,9 +406,9 @@ class _Lens extends StatelessWidget {
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.white.withValues(alpha: dark ? 0.16 : 0.28),
-                  _accent.withValues(alpha: (dark ? 0.15 : 0.09) + press * 0.06),
-                  Colors.white.withValues(alpha: dark ? 0.05 : 0.10),
+                  Colors.white.withValues(alpha: dark ? 0.13 : 0.22),
+                  _accent.withValues(alpha: (dark ? 0.12 : 0.07) + press * 0.06),
+                  Colors.white.withValues(alpha: dark ? 0.04 : 0.08),
                 ],
                 stops: const [0, 0.55, 1],
               ),
@@ -479,8 +479,8 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
   static const _horizontalPadding = 5.0;
   static final _spring = SpringDescription.withDampingRatio(
     mass: 1,
-    stiffness: 260,
-    ratio: 0.86,
+    stiffness: 320,
+    ratio: 1.0,
   );
 
   late final AnimationController _springController;
@@ -561,9 +561,9 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                 final itemWidth =
                     (contentWidth - _horizontalPadding * 2) /
                         widget.destinations.length;
-                final stretch = (_velocity.abs() * 0.05).clamp(0.0, 0.38);
-                // FlClash-style lens: noticeably wider than one item slot.
-                final pillWidth = itemWidth * 1.44 * (1 + stretch);
+                final stretch = (_velocity.abs() * 0.03).clamp(0.0, 0.10);
+                // Lens: only slightly wider than one item slot.
+                final pillWidth = itemWidth * 1.22 * (1 + stretch);
                 final itemCenter = _horizontalPadding +
                     _pos * itemWidth +
                     itemWidth / 2;
@@ -604,8 +604,8 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                     children: [
                       Positioned(
                         left: pillLeft,
-                        top: 5,
-                        bottom: 5,
+                        top: 8,
+                        bottom: 8,
                         width: pillWidth,
                         child: Transform.scale(
                           scale: 1 + press * 0.13,
