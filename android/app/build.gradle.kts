@@ -21,7 +21,10 @@ if (!flboxJks.exists()) {
 
 android {
     namespace = "com.kaixin886.flbox"
-    compileSdk = flutter.compileSdkVersion
+    // file_picker 8.x is compiled against API 36 and requires consumers
+    // to compile against it too; flutter.compileSdkVersion resolves to
+    // 34 in this project's setup, so pin 36 explicitly.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
