@@ -286,7 +286,7 @@ class _HomeShellState extends State<HomeShell> {
             profileName: _profileName,
             onImport: _importProfile,
           ),
-          const LogsPage(),
+          LogsPage(),
         ],
       ),
       bottomNavigationBar: switch (_navStyle) {
@@ -907,8 +907,15 @@ class ProfilesPage extends StatelessWidget {
   }
 }
 
-class LogsPage extends StatelessWidget {
+class LogsPage extends StatefulWidget {
   const LogsPage({super.key});
+
+  @override
+  State<LogsPage> createState() => _LogsPageState();
+}
+
+class _LogsPageState extends State<LogsPage> {
+  String? _status;
 
   @override
   Widget build(BuildContext context) {
@@ -918,7 +925,27 @@ class LogsPage extends StatelessWidget {
         .withValues(alpha: 0.5);
     return _PageFrame(
       title: '日志',
-      child: Text('内核日志将实时显示在这里。', style: TextStyle(color: muted)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('内核日志将实时显示在这里。', style: TextStyle(color: muted)),
+          const SizedBox(height: 24),
+          FilledButton.tonal(
+            onPressed: () {
+              try {
+                setState(() => _status = CoreBridge().xrayStatus());
+              } catch (e) {
+                setState(() => _status = '自检失败：$e');
+              }
+            },
+            child: const Text('内核自检'),
+          ),
+          if (_status != null) ...[
+            const SizedBox(height: 16),
+            SelectableText(_status!),
+          ],
+        ],
+      ),
     );
   }
 }

@@ -54,6 +54,7 @@ class CoreBridge {
         lib.lookupFunction<_OneArg, _OneArg>('FlboxXrayTranslate');
     _xrayStart = lib.lookupFunction<_OneArg, _OneArg>('FlboxXrayStart');
     _xrayStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStop');
+    _xrayStatus = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStatus');
     _lastError = lib.lookupFunction<_NoArg, _NoArg>('FlboxLastError');
     _free = lib.lookupFunction<_FreeNative, void Function(Pointer<Utf8>)>(
       'FlboxFree',
@@ -68,6 +69,7 @@ class CoreBridge {
   late final _OneArg _xrayTranslate;
   late final _OneArg _xrayStart;
   late final _NoArg _xrayStop;
+  late final _NoArg _xrayStatus;
   late final _NoArg _lastError;
   late final void Function(Pointer<Utf8>) _free;
 
@@ -126,6 +128,8 @@ class CoreBridge {
     final err = _take(_xrayStop());
     if (err != null) throw CoreException(err);
   }
+
+  String xrayStatus() => _take(_xrayStatus()) ?? '(no status)';
 }
 
 /// Reads a picked profile file as text.

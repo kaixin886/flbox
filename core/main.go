@@ -145,6 +145,11 @@ func FlboxXrayStop() *C.char {
 	return recordErr(xrayStop())
 }
 
+//export FlboxXrayStatus
+func FlboxXrayStatus() *C.char {
+	return C.CString(xrayStatus())
+}
+
 //export FlboxFree
 func FlboxFree(ptr *C.char) {
 	C.free(unsafe.Pointer(ptr))
