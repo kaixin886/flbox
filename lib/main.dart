@@ -78,15 +78,77 @@ const _destinations = [
 ];
 
 // Navigation bar appearance, switchable on the dashboard. Dynamic liquid
-// glass is the default.
+// glass is the default. Values are appended only: the stored index in
+// SharedPreferences must keep pointing at the same style.
 enum NavStyle {
   plain('普通导航栏'),
   glass('液态玻璃'),
-  dynamicGlass('动态液态玻璃');
+  dynamicGlass('动态液态玻璃'),
+  slidingGlass('液态玻璃（滑动）');
 
   const NavStyle(this.label);
 
   final String label;
+}
+
+// Display order on the dashboard (storage order above stays untouched).
+const _navStyleDisplayOrder = [
+  NavStyle.plain,
+  NavStyle.glass,
+  NavStyle.slidingGlass,
+  NavStyle.dynamicGlass,
+];
+
+// Tunable parameters of the dynamic lens, adjustable on the dashboard
+// with sliders and applied live.
+class LensParams {
+  const LensParams({
+    required this.widthFactor,
+    required this.stretchMax,
+    required this.stiffness,
+    required this.dampingRatio,
+    required this.fringeAlpha,
+    required this.fillScale,
+    required this.pressScale,
+  });
+
+  final double widthFactor;
+  final double stretchMax;
+  final double stiffness;
+  final double dampingRatio;
+  final double fringeAlpha;
+  final double fillScale;
+  final double pressScale;
+
+  static const defaults = LensParams(
+    widthFactor: 1.22,
+    stretchMax: 0.10,
+    stiffness: 320,
+    dampingRatio: 1.0,
+    fringeAlpha: 0.22,
+    fillScale: 1.0,
+    pressScale: 0.13,
+  );
+
+  LensParams copyWith({
+    double? widthFactor,
+    double? stretchMax,
+    double? stiffness,
+    double? dampingRatio,
+    double? fringeAlpha,
+    double? fillScale,
+    double? pressScale,
+  }) {
+    return LensParams(
+      widthFactor: widthFactor ?? this.widthFactor,
+      stretchMax: stretchMax ?? this.stretchMax,
+      stiffness: stiffness ?? this.stiffness,
+      dampingRatio: dampingRatio ?? this.dampingRatio,
+      fringeAlpha: fringeAlpha ?? this.fringeAlpha,
+      fillScale: fillScale ?? this.fillScale,
+      pressScale: pressScale ?? this.pressScale,
+    );
+  }
 }
 
 class HomeShell extends StatefulWidget {
@@ -100,15 +162,44 @@ class _HomeShellState extends State<HomeShell> {
   final _pageController = PageController();
   int _index = 0;
   NavStyle _navStyle = NavStyle.dynamicGlass;
+  LensParams _lensParams = LensParams.defaults;
 
   @override
   void initState() {
     super.initState();
     SharedPreferences.getInstance().then((prefs) {
       final saved = prefs.getInt('nav_style');
-      if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
-        setState(() => _navStyle = NavStyle.values[saved]);
-      }
+      var params = LensParams.defaults;
+      double read(String key, double fallback) =>
+          prefs.getDouble(key) ?? fallback;
+      params = LensParams(
+        widthFactor: read('lens_width', params.widthFactor),
+        stretchMax: read('lens_stretch', params.stretchMax),
+        stiffness: read('lens_stiffness', params.stiffness),
+        dampingRatio: read('lens_damping', params.dampingRatio),
+        fringeAlpha: read('lens_fringe', params.fringeAlpha),
+        fillScale: read('lens_fill', params.fillScale),
+        pressScale: read('lens_press', params.pressScale),
+      );
+      setState(() {
+        if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
+          _navStyle = NavStyle.values[saved];
+        }
+        _lensParams = params;
+      });
+    });
+  }
+
+  void _setLensParams(LensParams params) {
+    setState(() => _lensParams = params);
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setDouble('lens_width', params.widthFactor);
+      prefs.setDouble('lens_stretch', params.stretchMax);
+      prefs.setDouble('lens_stiffness', params.stiffness);
+      prefs.setDouble('lens_damping', params.dampingRatio);
+      prefs.setDouble('lens_fringe', params.fringeAlpha);
+      prefs.setDouble('lens_fill', params.fillScale);
+      prefs.setDouble('lens_press', params.pressScale);
     });
   }
 
@@ -142,7 +233,12 @@ class _HomeShellState extends State<HomeShell> {
         controller: _pageController,
         onPageChanged: (index) => setState(() => _index = index),
         children: [
-          DashboardPage(navStyle: _navStyle, onNavStyleChanged: _setNavStyle),
+          DashboardPage(
+            navStyle: _navStyle,
+            onNavStyleChanged: _setNavStyle,
+            lensParams: _lensParams,
+            onLensParamsChanged: _setLensParams,
+          ),
           const ProxiesPage(),
           const ProfilesPage(),
           const LogsPage(),
@@ -155,10 +251,16 @@ class _HomeShellState extends State<HomeShell> {
             destinations: _destinations,
             onTap: _select,
           ),
+        NavStyle.slidingGlass => _SlidingGlassNavBar(
+            index: _index,
+            destinations: _destinations,
+            onTap: _select,
+          ),
         NavStyle.dynamicGlass => _DynamicGlassNavBar(
             index: _index,
             destinations: _destinations,
             onTap: _select,
+            params: _lensParams,
           ),
       },
     );
@@ -333,14 +435,190 @@ class _GlassNavBar extends StatelessWidget {
   }
 }
 
+// Sliding glass: looks exactly like the static glass bar, but the pill
+// can be dragged between items and swells while pressed.
+class _SlidingGlassNavBar extends StatefulWidget {
+  const _SlidingGlassNavBar({
+    required this.index,
+    required this.destinations,
+    required this.onTap,
+  });
+
+  final int index;
+  final List<_Destination> destinations;
+  final ValueChanged<int> onTap;
+
+  @override
+  State<_SlidingGlassNavBar> createState() => _SlidingGlassNavBarState();
+}
+
+class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
+    with TickerProviderStateMixin {
+  static const _horizontalPadding = 5.0;
+
+  late final AnimationController _slideController;
+  late final AnimationController _pressController;
+  late final CurvedAnimation _slideCurve;
+  Tween<double>? _tween;
+  double _pos = 0;
+  bool _dragging = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pos = widget.index.toDouble();
+    _slideController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    _slideCurve = CurvedAnimation(
+      parent: _slideController,
+      curve: Curves.easeOutCubic,
+    );
+    _slideController.addListener(() {
+      final tween = _tween;
+      if (tween != null) {
+        setState(() => _pos = tween.evaluate(_slideCurve));
+      }
+    });
+    _pressController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 160),
+    );
+  }
+
+  @override
+  void didUpdateWidget(_SlidingGlassNavBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_dragging && widget.index != oldWidget.index) {
+      _slideTo(widget.index.toDouble());
+    }
+  }
+
+  @override
+  void dispose() {
+    _slideCurve.dispose();
+    _slideController.dispose();
+    _pressController.dispose();
+    super.dispose();
+  }
+
+  void _slideTo(double target) {
+    _tween = Tween<double>(begin: _pos, end: target);
+    _slideController
+      ..reset()
+      ..forward();
+  }
+
+  int get _nearest =>
+      _pos.round().clamp(0, widget.destinations.length - 1);
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).colorScheme.brightness == Brightness.dark;
+    return AnimatedBuilder(
+      animation: _pressController,
+      builder: (context, _) {
+        final press = Curves.easeOut.transform(_pressController.value);
+        return _GlassShell(
+          pressGlow: press,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final itemWidth =
+                  (constraints.maxWidth - _horizontalPadding * 2) /
+                      widget.destinations.length;
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onHorizontalDragStart: (_) {
+                  _dragging = true;
+                  _slideController.stop();
+                  _pressController.forward();
+                },
+                onHorizontalDragUpdate: (details) {
+                  setState(() {
+                    _pos = (_pos + details.delta.dx / itemWidth)
+                        .clamp(-0.15, widget.destinations.length - 0.85);
+                  });
+                },
+                onHorizontalDragEnd: (_) {
+                  _dragging = false;
+                  _pressController.reverse();
+                  final target = _nearest;
+                  _slideTo(target.toDouble());
+                  if (target != widget.index) {
+                    HapticFeedback.selectionClick();
+                    widget.onTap(target);
+                  }
+                },
+                onLongPressStart: (_) {
+                  HapticFeedback.selectionClick();
+                  _pressController.forward();
+                },
+                onLongPressEnd: (_) => _pressController.reverse(),
+                onLongPressCancel: () => _pressController.reverse(),
+                child: Stack(
+                  children: [
+                    Positioned(
+                      left: _horizontalPadding + _pos * itemWidth,
+                      top: 5,
+                      bottom: 5,
+                      width: itemWidth,
+                      child: Transform.scale(
+                        scale: 1 + press * 0.10,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: _accent.withValues(
+                              alpha: (dark ? 0.26 : 0.15) + press * 0.07,
+                            ),
+                            borderRadius: BorderRadius.circular(26),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        for (var i = 0; i < widget.destinations.length; i++)
+                          Expanded(
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTapDown: (_) => _pressController.forward(),
+                              onTapUp: (_) => _pressController.reverse(),
+                              onTapCancel: () => _pressController.reverse(),
+                              onTap: () => widget.onTap(i),
+                              child: _NavItemContent(
+                                destination: widget.destinations[i],
+                                selected: _nearest == i,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+}
+
 // The FlClash-style lens: a wide glass capsule with chromatic fringes on
 // its left and right edges (red and cyan peeking out from under the main
 // capsule), a specular sheen across the top, and an accent tint wash.
 class _Lens extends StatelessWidget {
-  const _Lens({required this.dark, required this.press});
+  const _Lens({
+    required this.dark,
+    required this.press,
+    required this.fringeAlpha,
+    required this.fillScale,
+  });
 
   final bool dark;
   final double press;
+  final double fringeAlpha;
+  final double fillScale;
 
   // Fringes fade out toward the top and bottom so the color split reads
   // as refraction at the lens ends, not a full colored outline.
@@ -367,7 +645,7 @@ class _Lens extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: const BorderRadius.all(Radius.circular(26)),
             border: Border.all(
-              color: color.withValues(alpha: 0.22 + press * 0.25),
+              color: color.withValues(alpha: fringeAlpha + press * 0.25),
               width: 0.9,
             ),
           ),
@@ -406,9 +684,12 @@ class _Lens extends StatelessWidget {
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.white.withValues(alpha: dark ? 0.13 : 0.22),
-                  _accent.withValues(alpha: (dark ? 0.12 : 0.07) + press * 0.06),
-                  Colors.white.withValues(alpha: dark ? 0.04 : 0.08),
+                  Colors.white.withValues(
+                      alpha: (dark ? 0.13 : 0.22) * fillScale),
+                  _accent.withValues(
+                      alpha: ((dark ? 0.12 : 0.07) + press * 0.06) * fillScale),
+                  Colors.white.withValues(
+                      alpha: (dark ? 0.04 : 0.08) * fillScale),
                 ],
                 stops: const [0, 0.55, 1],
               ),
@@ -464,11 +745,13 @@ class _DynamicGlassNavBar extends StatefulWidget {
     required this.index,
     required this.destinations,
     required this.onTap,
+    required this.params,
   });
 
   final int index;
   final List<_Destination> destinations;
   final ValueChanged<int> onTap;
+  final LensParams params;
 
   @override
   State<_DynamicGlassNavBar> createState() => _DynamicGlassNavBarState();
@@ -477,11 +760,12 @@ class _DynamicGlassNavBar extends StatefulWidget {
 class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
     with TickerProviderStateMixin {
   static const _horizontalPadding = 5.0;
-  static final _spring = SpringDescription.withDampingRatio(
-    mass: 1,
-    stiffness: 320,
-    ratio: 1.0,
-  );
+
+  SpringDescription get _spring => SpringDescription.withDampingRatio(
+        mass: 1,
+        stiffness: widget.params.stiffness,
+        ratio: widget.params.dampingRatio,
+      );
 
   late final AnimationController _springController;
   late final AnimationController _pressController;
@@ -561,9 +845,11 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                 final itemWidth =
                     (contentWidth - _horizontalPadding * 2) /
                         widget.destinations.length;
-                final stretch = (_velocity.abs() * 0.03).clamp(0.0, 0.10);
-                // Lens: only slightly wider than one item slot.
-                final pillWidth = itemWidth * 1.22 * (1 + stretch);
+                final stretch = (_velocity.abs() * 0.03)
+                    .clamp(0.0, widget.params.stretchMax);
+                // Lens width is user-tunable.
+                final pillWidth =
+                    itemWidth * widget.params.widthFactor * (1 + stretch);
                 final itemCenter = _horizontalPadding +
                     _pos * itemWidth +
                     itemWidth / 2;
@@ -608,8 +894,13 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                         bottom: 8,
                         width: pillWidth,
                         child: Transform.scale(
-                          scale: 1 + press * 0.13,
-                          child: _Lens(dark: dark, press: press),
+                          scale: 1 + press * widget.params.pressScale,
+                          child: _Lens(
+                            dark: dark,
+                            press: press,
+                            fringeAlpha: widget.params.fringeAlpha,
+                            fillScale: widget.params.fillScale,
+                          ),
                         ),
                       ),
                       Row(
@@ -662,7 +953,7 @@ class _PageFrame extends StatelessWidget {
           children: [
             Text(title, style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 24),
-            child,
+            Expanded(child: child),
           ],
         ),
       ),
@@ -675,10 +966,14 @@ class DashboardPage extends StatelessWidget {
     super.key,
     required this.navStyle,
     required this.onNavStyleChanged,
+    required this.lensParams,
+    required this.onLensParamsChanged,
   });
 
   final NavStyle navStyle;
   final ValueChanged<NavStyle> onNavStyleChanged;
+  final LensParams lensParams;
+  final ValueChanged<LensParams> onLensParamsChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -686,28 +981,161 @@ class DashboardPage extends StatelessWidget {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
+    final p = lensParams;
     return _PageFrame(
       title: '仪表盘',
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('未启动', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            Text('内核状态与流量概览将显示在这里。', style: TextStyle(color: muted)),
+            const SizedBox(height: 32),
+            FilledButton(onPressed: () {}, child: const Text('启动')),
+            const SizedBox(height: 48),
+            Text('导航栏样式', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            for (final style in _navStyleDisplayOrder)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(style.label),
+                trailing: navStyle == style
+                    ? const Icon(Icons.check, color: _accent)
+                    : null,
+                onTap: () => onNavStyleChanged(style),
+              ),
+            if (navStyle == NavStyle.dynamicGlass) ...[
+              const SizedBox(height: 32),
+              Row(
+                children: [
+                  Text('透镜调参',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () =>
+                        onLensParamsChanged(LensParams.defaults),
+                    child: const Text('恢复默认'),
+                  ),
+                ],
+              ),
+              _ParamSlider(
+                label: '透镜宽度',
+                valueText: '${p.widthFactor.toStringAsFixed(2)}×',
+                value: p.widthFactor,
+                min: 1.0,
+                max: 1.6,
+                onChanged: (v) =>
+                    onLensParamsChanged(p.copyWith(widthFactor: v)),
+              ),
+              _ParamSlider(
+                label: '滑动拉伸',
+                valueText: '${(p.stretchMax * 100).round()}%',
+                value: p.stretchMax,
+                min: 0,
+                max: 0.4,
+                onChanged: (v) =>
+                    onLensParamsChanged(p.copyWith(stretchMax: v)),
+              ),
+              _ParamSlider(
+                label: '弹簧硬度',
+                valueText: '${p.stiffness.round()}',
+                value: p.stiffness,
+                min: 140,
+                max: 420,
+                onChanged: (v) =>
+                    onLensParamsChanged(p.copyWith(stiffness: v)),
+              ),
+              _ParamSlider(
+                label: '阻尼',
+                valueText: p.dampingRatio.toStringAsFixed(2),
+                value: p.dampingRatio,
+                min: 0.7,
+                max: 1.1,
+                onChanged: (v) =>
+                    onLensParamsChanged(p.copyWith(dampingRatio: v)),
+              ),
+              _ParamSlider(
+                label: '色散强度',
+                valueText: '${(p.fringeAlpha * 100).round()}%',
+                value: p.fringeAlpha,
+                min: 0,
+                max: 0.5,
+                onChanged: (v) =>
+                    onLensParamsChanged(p.copyWith(fringeAlpha: v)),
+              ),
+              _ParamSlider(
+                label: '填充浓度',
+                valueText: '${p.fillScale.toStringAsFixed(2)}×',
+                value: p.fillScale,
+                min: 0.4,
+                max: 1.6,
+                onChanged: (v) =>
+                    onLensParamsChanged(p.copyWith(fillScale: v)),
+              ),
+              _ParamSlider(
+                label: '膨胀幅度',
+                valueText: '${(p.pressScale * 100).round()}%',
+                value: p.pressScale,
+                min: 0,
+                max: 0.25,
+                onChanged: (v) =>
+                    onLensParamsChanged(p.copyWith(pressScale: v)),
+              ),
+              const SizedBox(height: 24),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ParamSlider extends StatelessWidget {
+  const _ParamSlider({
+    required this.label,
+    required this.valueText,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String valueText;
+  final double value;
+  final double min;
+  final double max;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('未启动', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text('内核状态与流量概览将显示在这里。', style: TextStyle(color: muted)),
-          const SizedBox(height: 32),
-          FilledButton(onPressed: () {}, child: const Text('启动')),
-          const SizedBox(height: 48),
-          Text('导航栏样式', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          for (final style in NavStyle.values)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(style.label),
-              trailing: navStyle == style
-                  ? const Icon(Icons.check, color: _accent)
-                  : null,
-              onTap: () => onNavStyleChanged(style),
-            ),
+          Row(
+            children: [
+              Text(label),
+              const Spacer(),
+              Text(
+                valueText,
+                style: TextStyle(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurface
+                      .withValues(alpha: 0.5),
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            onChanged: onChanged,
+          ),
         ],
       ),
     );

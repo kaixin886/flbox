@@ -4,6 +4,19 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Fixed dev signing key: the keystore ships base64-encoded in the repo
+// (flbox.jks.b64) and is materialized here on first use, so every CI
+// build signs identically and new versions install over old ones.
+val flboxJks = file("flbox.jks")
+if (!flboxJks.exists()) {
+    val flboxB64 = file("flbox.jks.b64")
+    if (flboxB64.exists()) {
+        flboxJks.writeBytes(
+            java.util.Base64.getMimeDecoder().decode(flboxB64.readText())
+        )
+    }
+}
+
 android {
     namespace = "com.kaixin886.flbox"
     compileSdk = flutter.compileSdkVersion
@@ -29,11 +42,18 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("flbox") {
+            storeFile = file("flbox.jks")
+            storePassword = "flbox-dev"
+            keyAlias = "flbox"
+            keyPassword = "flbox-dev"
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("flbox")
         }
     }
 }
