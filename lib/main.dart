@@ -1,7 +1,6 @@
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -77,78 +76,16 @@ const _destinations = [
   _Destination(Icons.terminal, '日志'),
 ];
 
-// Navigation bar appearance, switchable on the dashboard. Dynamic liquid
-// glass is the default. Values are appended only: the stored index in
-// SharedPreferences must keep pointing at the same style.
+// Navigation bar appearance, switchable in Settings. The sliding glass
+// bar is the default.
 enum NavStyle {
   plain('普通导航栏'),
   glass('液态玻璃'),
-  dynamicGlass('动态液态玻璃'),
   slidingGlass('液态玻璃（滑动）');
 
   const NavStyle(this.label);
 
   final String label;
-}
-
-// Display order on the dashboard (storage order above stays untouched).
-const _navStyleDisplayOrder = [
-  NavStyle.plain,
-  NavStyle.glass,
-  NavStyle.slidingGlass,
-  NavStyle.dynamicGlass,
-];
-
-// Tunable parameters of the dynamic lens, adjustable on the dashboard
-// with sliders and applied live.
-class LensParams {
-  const LensParams({
-    required this.widthFactor,
-    required this.stretchMax,
-    required this.stiffness,
-    required this.dampingRatio,
-    required this.fringeAlpha,
-    required this.fillScale,
-    required this.pressScale,
-  });
-
-  final double widthFactor;
-  final double stretchMax;
-  final double stiffness;
-  final double dampingRatio;
-  final double fringeAlpha;
-  final double fillScale;
-  final double pressScale;
-
-  static const defaults = LensParams(
-    widthFactor: 1.22,
-    stretchMax: 0.10,
-    stiffness: 320,
-    dampingRatio: 1.0,
-    fringeAlpha: 0.22,
-    fillScale: 1.0,
-    pressScale: 0.13,
-  );
-
-  LensParams copyWith({
-    double? widthFactor,
-    double? stretchMax,
-    double? stiffness,
-    double? dampingRatio,
-    double? fringeAlpha,
-    double? fillScale,
-    double? pressScale,
-  }) {
-    return LensParams(
-      widthFactor: widthFactor ?? this.widthFactor,
-      stretchMax: stretchMax ?? this.stretchMax,
-      stiffness: stiffness ?? this.stiffness,
-      dampingRatio: dampingRatio ?? this.dampingRatio,
-      fringeAlpha: fringeAlpha ?? this.fringeAlpha,
-      fillScale: fillScale ?? this.fillScale,
-      pressScale: pressScale ?? this.pressScale,
-    );
-  }
 }
 
 class HomeShell extends StatefulWidget {
@@ -161,46 +98,28 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   final _pageController = PageController();
   int _index = 0;
-  NavStyle _navStyle = NavStyle.dynamicGlass;
-  LensParams _lensParams = LensParams.defaults;
+  NavStyle _navStyle = NavStyle.slidingGlass;
 
   @override
   void initState() {
     super.initState();
     SharedPreferences.getInstance().then((prefs) {
       final saved = prefs.getInt('nav_style');
-      var params = LensParams.defaults;
-      double read(String key, double fallback) =>
-          prefs.getDouble(key) ?? fallback;
-      params = LensParams(
-        widthFactor: read('lens_width', params.widthFactor),
-        stretchMax: read('lens_stretch', params.stretchMax),
-        stiffness: read('lens_stiffness', params.stiffness),
-        dampingRatio: read('lens_damping', params.dampingRatio),
-        fringeAlpha: read('lens_fringe', params.fringeAlpha),
-        fillScale: read('lens_fill', params.fillScale),
-        pressScale: read('lens_press', params.pressScale),
-      );
-      setState(() {
-        if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
-          _navStyle = NavStyle.values[saved];
-        }
-        _lensParams = params;
-      });
+      if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
+        setState(() => _navStyle = NavStyle.values[saved]);
+      }
     });
   }
 
-  void _setLensParams(LensParams params) {
-    setState(() => _lensParams = params);
-    SharedPreferences.getInstance().then((prefs) {
-      prefs.setDouble('lens_width', params.widthFactor);
-      prefs.setDouble('lens_stretch', params.stretchMax);
-      prefs.setDouble('lens_stiffness', params.stiffness);
-      prefs.setDouble('lens_damping', params.dampingRatio);
-      prefs.setDouble('lens_fringe', params.fringeAlpha);
-      prefs.setDouble('lens_fill', params.fillScale);
-      prefs.setDouble('lens_press', params.pressScale);
-    });
+  void _openSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _SettingsPage(
+          navStyle: _navStyle,
+          onNavStyleChanged: _setNavStyle,
+        ),
+      ),
+    );
   }
 
   @override
@@ -233,12 +152,7 @@ class _HomeShellState extends State<HomeShell> {
         controller: _pageController,
         onPageChanged: (index) => setState(() => _index = index),
         children: [
-          DashboardPage(
-            navStyle: _navStyle,
-            onNavStyleChanged: _setNavStyle,
-            lensParams: _lensParams,
-            onLensParamsChanged: _setLensParams,
-          ),
+          DashboardPage(onOpenSettings: _openSettings),
           const ProxiesPage(),
           const ProfilesPage(),
           const LogsPage(),
@@ -255,12 +169,6 @@ class _HomeShellState extends State<HomeShell> {
             index: _index,
             destinations: _destinations,
             onTap: _select,
-          ),
-        NavStyle.dynamicGlass => _DynamicGlassNavBar(
-            index: _index,
-            destinations: _destinations,
-            onTap: _select,
-            params: _lensParams,
           ),
       },
     );
@@ -604,342 +512,12 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
   }
 }
 
-// The FlClash-style lens: a wide glass capsule with chromatic fringes on
-// its left and right edges (red and cyan peeking out from under the main
-// capsule), a specular sheen across the top, and an accent tint wash.
-class _Lens extends StatelessWidget {
-  const _Lens({
-    required this.dark,
-    required this.press,
-    required this.fringeAlpha,
-    required this.fillScale,
-  });
-
-  final bool dark;
-  final double press;
-  final double fringeAlpha;
-  final double fillScale;
-
-  // Fringes fade out toward the top and bottom so the color split reads
-  // as refraction at the lens ends, not a full colored outline.
-  Widget _fringe(Color color, double shift) {
-    return Positioned(
-      left: shift,
-      right: -shift,
-      top: 0,
-      bottom: 0,
-      child: ShaderMask(
-        blendMode: BlendMode.dstIn,
-        shaderCallback: (rect) => const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.transparent,
-            Colors.white,
-            Colors.white,
-            Colors.transparent,
-          ],
-          stops: [0, 0.3, 0.7, 1],
-        ).createShader(rect),
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: const BorderRadius.all(Radius.circular(26)),
-            border: Border.all(
-              color: color.withValues(alpha: fringeAlpha + press * 0.25),
-              width: 0.9,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    const radius = BorderRadius.all(Radius.circular(26));
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        Positioned.fill(
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: radius,
-              boxShadow: [
-                BoxShadow(
-                  color: _accent.withValues(alpha: 0.06 + press * 0.22),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-          ),
-        ),
-        _fringe(const Color(0xFFFF453A), -1.1),
-        _fringe(const Color(0xFF32ADE6), 1.1),
-        Positioned.fill(
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: radius,
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.white.withValues(
-                      alpha: (dark ? 0.13 : 0.22) * fillScale),
-                  _accent.withValues(
-                      alpha: ((dark ? 0.12 : 0.07) + press * 0.06) * fillScale),
-                  Colors.white.withValues(
-                      alpha: (dark ? 0.04 : 0.08) * fillScale),
-                ],
-                stops: const [0, 0.55, 1],
-              ),
-              border: Border.all(
-                color: Colors.white.withValues(alpha: 0.40 + press * 0.35),
-                width: 1,
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: radius,
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: FractionallySizedBox(
-                  heightFactor: 0.5,
-                  widthFactor: 1,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.white.withValues(alpha: 0.30),
-                          Colors.white.withValues(alpha: 0),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: radius,
-                color: Colors.white.withValues(alpha: press * 0.14),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// Dynamic liquid glass: the pill rides a spring, stretches along its
-// travel direction, follows horizontal drags, and swells with a glow
-// while the bar is long-pressed.
-class _DynamicGlassNavBar extends StatefulWidget {
-  const _DynamicGlassNavBar({
-    required this.index,
-    required this.destinations,
-    required this.onTap,
-    required this.params,
-  });
-
-  final int index;
-  final List<_Destination> destinations;
-  final ValueChanged<int> onTap;
-  final LensParams params;
-
-  @override
-  State<_DynamicGlassNavBar> createState() => _DynamicGlassNavBarState();
-}
-
-class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
-    with TickerProviderStateMixin {
-  static const _horizontalPadding = 5.0;
-
-  SpringDescription get _spring => SpringDescription.withDampingRatio(
-        mass: 1,
-        stiffness: widget.params.stiffness,
-        ratio: widget.params.dampingRatio,
-      );
-
-  late final AnimationController _springController;
-  late final AnimationController _pressController;
-  double _pos = 0;
-  double _velocity = 0;
-  double _lastPos = 0;
-  int? _lastTick;
-  bool _dragging = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _pos = widget.index.toDouble();
-    _lastPos = _pos;
-    _springController = AnimationController.unbounded(vsync: this)
-      ..addListener(_onSpringTick);
-    _pressController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 160),
-    );
-  }
-
-  @override
-  void didUpdateWidget(_DynamicGlassNavBar oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!_dragging && widget.index != oldWidget.index) {
-      _springTo(widget.index.toDouble());
-    }
-  }
-
-  @override
-  void dispose() {
-    _springController.dispose();
-    _pressController.dispose();
-    super.dispose();
-  }
-
-  void _onSpringTick() {
-    final now = DateTime.now().microsecondsSinceEpoch;
-    setState(() {
-      _pos = _springController.value;
-      if (_lastTick != null) {
-        final dt = (now - _lastTick!) / 1e6;
-        if (dt > 0) {
-          final v = (_pos - _lastPos) / dt;
-          _velocity = _velocity * 0.6 + v * 0.4;
-        }
-      }
-      _lastPos = _pos;
-      _lastTick = now;
-    });
-  }
-
-  void _springTo(double target) {
-    _springController.animateWith(
-      SpringSimulation(_spring, _pos, target, _velocity),
-    );
-  }
-
-  int get _nearest =>
-      _pos.round().clamp(0, widget.destinations.length - 1);
-
-  @override
-  Widget build(BuildContext context) {
-    final dark = Theme.of(context).colorScheme.brightness == Brightness.dark;
-    return AnimatedBuilder(
-      animation: _pressController,
-      builder: (context, _) {
-        final press = Curves.easeOut.transform(_pressController.value);
-        return Transform.scale(
-          scale: 1 + press * 0.02,
-          child: _GlassShell(
-            pressGlow: press,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final contentWidth = constraints.maxWidth;
-                final itemWidth =
-                    (contentWidth - _horizontalPadding * 2) /
-                        widget.destinations.length;
-                final stretch = (_velocity.abs() * 0.03)
-                    .clamp(0.0, widget.params.stretchMax);
-                // Lens width is user-tunable.
-                final pillWidth =
-                    itemWidth * widget.params.widthFactor * (1 + stretch);
-                final itemCenter = _horizontalPadding +
-                    _pos * itemWidth +
-                    itemWidth / 2;
-                final pillLeft = (itemCenter - pillWidth / 2)
-                    .clamp(2.0, contentWidth - pillWidth - 2);
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onHorizontalDragStart: (_) {
-                    _dragging = true;
-                    _springController.stop();
-                    _pressController.forward();
-                  },
-                  onHorizontalDragUpdate: (details) {
-                    setState(() {
-                      _pos = (_pos + details.delta.dx / itemWidth)
-                          .clamp(-0.15, widget.destinations.length - 0.85);
-                      _velocity = 0;
-                      _lastPos = _pos;
-                    });
-                  },
-                  onHorizontalDragEnd: (details) {
-                    _dragging = false;
-                    _pressController.reverse();
-                    final target = _nearest;
-                    _springTo(target.toDouble());
-                    if (target != widget.index) {
-                      HapticFeedback.selectionClick();
-                      widget.onTap(target);
-                    }
-                  },
-                  onLongPressStart: (_) {
-                    HapticFeedback.selectionClick();
-                    _pressController.forward();
-                  },
-                  onLongPressEnd: (_) => _pressController.reverse(),
-                  onLongPressCancel: () => _pressController.reverse(),
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        left: pillLeft,
-                        top: 8,
-                        bottom: 8,
-                        width: pillWidth,
-                        child: Transform.scale(
-                          scale: 1 + press * widget.params.pressScale,
-                          child: _Lens(
-                            dark: dark,
-                            press: press,
-                            fringeAlpha: widget.params.fringeAlpha,
-                            fillScale: widget.params.fillScale,
-                          ),
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          for (var i = 0;
-                              i < widget.destinations.length;
-                              i++)
-                            Expanded(
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onTapDown: (_) => _pressController.forward(),
-                                onTapUp: (_) => _pressController.reverse(),
-                                onTapCancel: () => _pressController.reverse(),
-                                onTap: () => widget.onTap(i),
-                                child: _NavItemContent(
-                                  destination: widget.destinations[i],
-                                  selected: _nearest == i,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _PageFrame extends StatelessWidget {
-  const _PageFrame({required this.title, required this.child});
+  const _PageFrame({required this.title, required this.child, this.action});
 
   final String title;
   final Widget child;
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -951,7 +529,13 @@ class _PageFrame extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(title, style: Theme.of(context).textTheme.headlineSmall),
+            Row(
+              children: [
+                Text(title, style: Theme.of(context).textTheme.headlineSmall),
+                const Spacer(),
+                ?action,
+              ],
+            ),
             const SizedBox(height: 24),
             Expanded(child: child),
           ],
@@ -962,18 +546,9 @@ class _PageFrame extends StatelessWidget {
 }
 
 class DashboardPage extends StatelessWidget {
-  const DashboardPage({
-    super.key,
-    required this.navStyle,
-    required this.onNavStyleChanged,
-    required this.lensParams,
-    required this.onLensParamsChanged,
-  });
+  const DashboardPage({super.key, required this.onOpenSettings});
 
-  final NavStyle navStyle;
-  final ValueChanged<NavStyle> onNavStyleChanged;
-  final LensParams lensParams;
-  final ValueChanged<LensParams> onLensParamsChanged;
+  final VoidCallback onOpenSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -981,161 +556,76 @@ class DashboardPage extends StatelessWidget {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
-    final p = lensParams;
     return _PageFrame(
       title: '仪表盘',
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('未启动', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Text('内核状态与流量概览将显示在这里。', style: TextStyle(color: muted)),
-            const SizedBox(height: 32),
-            FilledButton(onPressed: () {}, child: const Text('启动')),
-            const SizedBox(height: 48),
-            Text('导航栏样式', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            for (final style in _navStyleDisplayOrder)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(style.label),
-                trailing: navStyle == style
-                    ? const Icon(Icons.check, color: _accent)
-                    : null,
-                onTap: () => onNavStyleChanged(style),
-              ),
-            if (navStyle == NavStyle.dynamicGlass) ...[
-              const SizedBox(height: 32),
-              Row(
-                children: [
-                  Text('透镜调参',
-                      style: Theme.of(context).textTheme.titleMedium),
-                  const Spacer(),
-                  TextButton(
-                    onPressed: () =>
-                        onLensParamsChanged(LensParams.defaults),
-                    child: const Text('恢复默认'),
-                  ),
-                ],
-              ),
-              _ParamSlider(
-                label: '透镜宽度',
-                valueText: '${p.widthFactor.toStringAsFixed(2)}×',
-                value: p.widthFactor,
-                min: 1.0,
-                max: 1.6,
-                onChanged: (v) =>
-                    onLensParamsChanged(p.copyWith(widthFactor: v)),
-              ),
-              _ParamSlider(
-                label: '滑动拉伸',
-                valueText: '${(p.stretchMax * 100).round()}%',
-                value: p.stretchMax,
-                min: 0,
-                max: 0.4,
-                onChanged: (v) =>
-                    onLensParamsChanged(p.copyWith(stretchMax: v)),
-              ),
-              _ParamSlider(
-                label: '弹簧硬度',
-                valueText: '${p.stiffness.round()}',
-                value: p.stiffness,
-                min: 140,
-                max: 420,
-                onChanged: (v) =>
-                    onLensParamsChanged(p.copyWith(stiffness: v)),
-              ),
-              _ParamSlider(
-                label: '阻尼',
-                valueText: p.dampingRatio.toStringAsFixed(2),
-                value: p.dampingRatio,
-                min: 0.7,
-                max: 1.1,
-                onChanged: (v) =>
-                    onLensParamsChanged(p.copyWith(dampingRatio: v)),
-              ),
-              _ParamSlider(
-                label: '色散强度',
-                valueText: '${(p.fringeAlpha * 100).round()}%',
-                value: p.fringeAlpha,
-                min: 0,
-                max: 0.5,
-                onChanged: (v) =>
-                    onLensParamsChanged(p.copyWith(fringeAlpha: v)),
-              ),
-              _ParamSlider(
-                label: '填充浓度',
-                valueText: '${p.fillScale.toStringAsFixed(2)}×',
-                value: p.fillScale,
-                min: 0.4,
-                max: 1.6,
-                onChanged: (v) =>
-                    onLensParamsChanged(p.copyWith(fillScale: v)),
-              ),
-              _ParamSlider(
-                label: '膨胀幅度',
-                valueText: '${(p.pressScale * 100).round()}%',
-                value: p.pressScale,
-                min: 0,
-                max: 0.25,
-                onChanged: (v) =>
-                    onLensParamsChanged(p.copyWith(pressScale: v)),
-              ),
-              const SizedBox(height: 24),
-            ],
-          ],
-        ),
+      action: IconButton(
+        icon: const Icon(Icons.settings_outlined),
+        tooltip: '设置',
+        onPressed: onOpenSettings,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('未启动', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Text('内核状态与流量概览将显示在这里。', style: TextStyle(color: muted)),
+          const SizedBox(height: 32),
+          FilledButton(onPressed: () {}, child: const Text('启动')),
+        ],
       ),
     );
   }
 }
 
-class _ParamSlider extends StatelessWidget {
-  const _ParamSlider({
-    required this.label,
-    required this.valueText,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.onChanged,
+// Settings live on their own page, reached from the dashboard gear, so
+// the main pages stay free of configuration controls.
+class _SettingsPage extends StatefulWidget {
+  const _SettingsPage({
+    required this.navStyle,
+    required this.onNavStyleChanged,
   });
 
-  final String label;
-  final String valueText;
-  final double value;
-  final double min;
-  final double max;
-  final ValueChanged<double> onChanged;
+  final NavStyle navStyle;
+  final ValueChanged<NavStyle> onNavStyleChanged;
+
+  @override
+  State<_SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<_SettingsPage> {
+  late NavStyle _navStyle = widget.navStyle;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return Scaffold(
+      appBar: AppBar(title: const Text('设置')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
         children: [
-          Row(
-            children: [
-              Text(label),
-              const Spacer(),
-              Text(
-                valueText,
-                style: TextStyle(
-                  color: Theme.of(context)
-                      .colorScheme
-                      .onSurface
-                      .withValues(alpha: 0.5),
-                ),
-              ),
-            ],
+          Text('外观', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Text(
+            '导航栏样式',
+            style: TextStyle(
+              color: Theme.of(context)
+                  .colorScheme
+                  .onSurface
+                  .withValues(alpha: 0.5),
+            ),
           ),
-          Slider(
-            value: value.clamp(min, max),
-            min: min,
-            max: max,
-            onChanged: onChanged,
-          ),
+          const SizedBox(height: 8),
+          for (final style in NavStyle.values)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(style.label),
+              trailing: _navStyle == style
+                  ? const Icon(Icons.check, color: _accent)
+                  : null,
+              onTap: () {
+                setState(() => _navStyle = style);
+                widget.onNavStyleChanged(style);
+              },
+            ),
         ],
       ),
     );
