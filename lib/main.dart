@@ -1,8 +1,13 @@
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'core_bridge.dart';
 
 void main() {
   runApp(const FlboxApp());
@@ -99,16 +104,125 @@ class _HomeShellState extends State<HomeShell> {
   final _pageController = PageController();
   int _index = 0;
   NavStyle _navStyle = NavStyle.slidingGlass;
+  XrayProfile? _profile;
+  String? _profileName;
+  String? _selectedNode;
+  bool _running = false;
+  bool _busy = false;
 
   @override
   void initState() {
     super.initState();
-    SharedPreferences.getInstance().then((prefs) {
-      final saved = prefs.getInt('nav_style');
-      if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
-        setState(() => _navStyle = NavStyle.values[saved]);
+    _restore();
+  }
+
+  Future<void> _restore() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getInt('nav_style');
+    if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
+      setState(() => _navStyle = NavStyle.values[saved]);
+    }
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final file = File('${docs.path}/profile.yaml');
+      if (await file.exists()) {
+        final profile = CoreBridge().translateXray(await file.readAsString());
+        final stored = prefs.getString('selected_node');
+        setState(() {
+          _profile = profile;
+          _profileName = prefs.getString('profile_name') ?? '已保存的配置';
+          _selectedNode =
+              profile.nodes.any((n) => n.name == stored)
+                  ? stored
+                  : profile.nodes.first.name;
+        });
       }
-    });
+    } catch (_) {
+      // A stale or corrupt saved profile must not block startup.
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _importProfile() async {
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['yaml', 'yml', 'txt'],
+    );
+    if (picked == null || picked.files.single.path == null) return;
+    final file = File(picked.files.single.path!);
+    try {
+      final text = await file.readAsString();
+      final profile = CoreBridge().translateXray(text);
+      final docs = await getApplicationDocumentsDirectory();
+      await File('${docs.path}/profile.yaml').writeAsString(text);
+      final prefs = await SharedPreferences.getInstance();
+      final name = picked.files.single.name;
+      final selected =
+          profile.nodes.any((n) => n.name == _selectedNode)
+              ? _selectedNode!
+              : profile.nodes.first.name;
+      await prefs.setString('profile_name', name);
+      await prefs.setString('selected_node', selected);
+      setState(() {
+        _profile = profile;
+        _profileName = name;
+        _selectedNode = selected;
+      });
+      _toast('已导入 ${profile.nodes.length} 个可用节点');
+    } on CoreException catch (e) {
+      _toast('导入失败：${e.message}');
+    } catch (e) {
+      _toast('导入失败：$e');
+    }
+  }
+
+  Future<void> _toggleCore() async {
+    if (_busy) return;
+    if (_running) {
+      try {
+        CoreBridge().xrayStop();
+        setState(() => _running = false);
+      } on CoreException catch (e) {
+        _toast('停止失败：${e.message}');
+      }
+      return;
+    }
+    final config = _profile?.configs[_selectedNode];
+    if (config == null) {
+      _toast('先到「配置」页导入一个 Clash 配置');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      CoreBridge().xrayStart(config);
+      setState(() => _running = true);
+    } on CoreException catch (e) {
+      _toast('启动失败：${e.message}');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _selectNode(String name) async {
+    if (name == _selectedNode) return;
+    setState(() => _selectedNode = name);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('selected_node', name);
+    if (_running) {
+      final config = _profile?.configs[name];
+      if (config == null) return;
+      try {
+        CoreBridge().xrayStart(config);
+        _toast('已切换到 $name');
+      } on CoreException catch (e) {
+        setState(() => _running = false);
+        _toast('切换失败：${e.message}');
+      }
+    }
   }
 
   void _openSettings() {
@@ -152,9 +266,24 @@ class _HomeShellState extends State<HomeShell> {
         controller: _pageController,
         onPageChanged: (index) => setState(() => _index = index),
         children: [
-          DashboardPage(onOpenSettings: _openSettings),
-          const ProxiesPage(),
-          const ProfilesPage(),
+          DashboardPage(
+            onOpenSettings: _openSettings,
+            running: _running,
+            busy: _busy,
+            hasProfile: _profile != null,
+            currentNode: _selectedNode,
+            onToggle: _toggleCore,
+          ),
+          ProxiesPage(
+            profile: _profile,
+            selectedNode: _selectedNode,
+            onSelect: _selectNode,
+          ),
+          ProfilesPage(
+            profile: _profile,
+            profileName: _profileName,
+            onImport: _importProfile,
+          ),
           const LogsPage(),
         ],
       ),
@@ -546,9 +675,22 @@ class _PageFrame extends StatelessWidget {
 }
 
 class DashboardPage extends StatelessWidget {
-  const DashboardPage({super.key, required this.onOpenSettings});
+  const DashboardPage({
+    super.key,
+    required this.onOpenSettings,
+    required this.running,
+    required this.busy,
+    required this.hasProfile,
+    required this.currentNode,
+    required this.onToggle,
+  });
 
   final VoidCallback onOpenSettings;
+  final bool running;
+  final bool busy;
+  final bool hasProfile;
+  final String? currentNode;
+  final VoidCallback onToggle;
 
   @override
   Widget build(BuildContext context) {
@@ -556,6 +698,14 @@ class DashboardPage extends StatelessWidget {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
+    final String detail;
+    if (running) {
+      detail = '当前节点：${currentNode ?? '-'} · Xray 内核 · 普通模式 127.0.0.1:7890';
+    } else if (!hasProfile) {
+      detail = '先到「配置」页导入一个 Clash 配置。';
+    } else {
+      detail = '已就绪，节点：${currentNode ?? '-'}';
+    }
     return _PageFrame(
       title: '仪表盘',
       action: IconButton(
@@ -566,11 +716,17 @@ class DashboardPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('未启动', style: Theme.of(context).textTheme.titleMedium),
+          Text(
+            running ? '运行中' : '未启动',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
           const SizedBox(height: 8),
-          Text('内核状态与流量概览将显示在这里。', style: TextStyle(color: muted)),
+          Text(detail, style: TextStyle(color: muted)),
           const SizedBox(height: 32),
-          FilledButton(onPressed: () {}, child: const Text('启动')),
+          FilledButton(
+            onPressed: busy ? null : onToggle,
+            child: Text(busy ? '处理中…' : (running ? '停止' : '启动')),
+          ),
         ],
       ),
     );
@@ -597,6 +753,10 @@ class _SettingsPageState extends State<_SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final muted = Theme.of(context)
+        .colorScheme
+        .onSurface
+        .withValues(alpha: 0.5);
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: ListView(
@@ -604,15 +764,7 @@ class _SettingsPageState extends State<_SettingsPage> {
         children: [
           Text('外观', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
-          Text(
-            '导航栏样式',
-            style: TextStyle(
-              color: Theme.of(context)
-                  .colorScheme
-                  .onSurface
-                  .withValues(alpha: 0.5),
-            ),
-          ),
+          Text('导航栏样式', style: TextStyle(color: muted)),
           const SizedBox(height: 8),
           for (final style in NavStyle.values)
             ListTile(
@@ -626,6 +778,21 @@ class _SettingsPageState extends State<_SettingsPage> {
                 widget.onNavStyleChanged(style);
               },
             ),
+          const SizedBox(height: 24),
+          Text('内核', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          const ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('Xray（试用中）'),
+            trailing: Icon(Icons.check, color: _accent),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(
+              'sing-box（待接入）',
+              style: TextStyle(color: muted),
+            ),
+          ),
         ],
       ),
     );
@@ -633,7 +800,16 @@ class _SettingsPageState extends State<_SettingsPage> {
 }
 
 class ProxiesPage extends StatelessWidget {
-  const ProxiesPage({super.key});
+  const ProxiesPage({
+    super.key,
+    required this.profile,
+    required this.selectedNode,
+    required this.onSelect,
+  });
+
+  final XrayProfile? profile;
+  final String? selectedNode;
+  final ValueChanged<String> onSelect;
 
   @override
   Widget build(BuildContext context) {
@@ -641,23 +817,27 @@ class ProxiesPage extends StatelessWidget {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
+    final profile = this.profile;
+    if (profile == null) {
+      return _PageFrame(
+        title: '代理',
+        child: Text('还没有配置，先到「配置」页导入。', style: TextStyle(color: muted)),
+      );
+    }
     return _PageFrame(
       title: '代理',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: ListView(
+        padding: EdgeInsets.zero,
         children: [
-          Text('导入配置后，节点组与测速结果显示在这里。', style: TextStyle(color: muted)),
-          const SizedBox(height: 16),
-          for (final name in ['示例节点 A', '示例节点 B'])
-            Column(
-              children: [
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(name),
-                  trailing: Text('-- ms', style: TextStyle(color: muted)),
-                ),
-                const Divider(),
-              ],
+          for (final node in profile.nodes)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(node.name),
+              subtitle: Text(node.type, style: TextStyle(color: muted)),
+              trailing: node.name == selectedNode
+                  ? const Icon(Icons.check_circle, color: _accent)
+                  : null,
+              onTap: () => onSelect(node.name),
             ),
         ],
       ),
@@ -666,7 +846,16 @@ class ProxiesPage extends StatelessWidget {
 }
 
 class ProfilesPage extends StatelessWidget {
-  const ProfilesPage({super.key});
+  const ProfilesPage({
+    super.key,
+    required this.profile,
+    required this.profileName,
+    required this.onImport,
+  });
+
+  final XrayProfile? profile;
+  final String? profileName;
+  final VoidCallback onImport;
 
   @override
   Widget build(BuildContext context) {
@@ -674,16 +863,42 @@ class ProfilesPage extends StatelessWidget {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
+    final profile = this.profile;
     return _PageFrame(
       title: '配置',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('暂无配置', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text('支持导入 Clash YAML 配置文件。', style: TextStyle(color: muted)),
+          if (profile == null)
+            Text('暂无配置。导入 Clash 配置文件后，用 Xray 内核启动。',
+                style: TextStyle(color: muted))
+          else ...[
+            Text(
+              profileName ?? '已导入配置',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${profile.nodes.length} 个可用节点 · ${profile.skipped.length} 个已跳过',
+              style: TextStyle(color: muted),
+            ),
+            if (profile.skipped.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              for (final s in profile.skipped)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    '跳过：${s.name}（${s.type}）${s.reason}',
+                    style: TextStyle(color: muted, fontSize: 13),
+                  ),
+                ),
+            ],
+          ],
           const SizedBox(height: 32),
-          OutlinedButton(onPressed: () {}, child: const Text('导入配置')),
+          FilledButton(
+            onPressed: onImport,
+            child: Text(profile == null ? '导入配置' : '重新导入'),
+          ),
         ],
       ),
     );

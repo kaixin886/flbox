@@ -120,6 +120,31 @@ func FlboxLastError() *C.char {
 	return C.CString(lastErr)
 }
 
+//export FlboxXrayVersion
+func FlboxXrayVersion() *C.char {
+	return C.CString("Xray " + xrayVersion())
+}
+
+//export FlboxXrayTranslate
+func FlboxXrayTranslate(clashYAML *C.char) *C.char {
+	out, err := xrayTranslate(C.GoString(clashYAML))
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
+}
+
+//export FlboxXrayStart
+func FlboxXrayStart(configJSON *C.char) *C.char {
+	return recordErr(xrayStart(C.GoString(configJSON)))
+}
+
+//export FlboxXrayStop
+func FlboxXrayStop() *C.char {
+	return recordErr(xrayStop())
+}
+
 //export FlboxFree
 func FlboxFree(ptr *C.char) {
 	C.free(unsafe.Pointer(ptr))
