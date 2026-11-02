@@ -333,6 +333,99 @@ class _GlassNavBar extends StatelessWidget {
   }
 }
 
+// The FlClash-style lens: a wide glass capsule with chromatic fringes on
+// its left and right edges (red and cyan peeking out from under the main
+// capsule), a specular sheen across the top, and an accent tint wash.
+class _Lens extends StatelessWidget {
+  const _Lens({required this.dark, required this.press});
+
+  final bool dark;
+  final double press;
+
+  @override
+  Widget build(BuildContext context) {
+    const radius = BorderRadius.all(Radius.circular(26));
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned(
+          left: -1.4,
+          right: 1.4,
+          top: 0,
+          bottom: 0,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(
+                color: const Color(0xFFFF453A).withValues(alpha: 0.5),
+                width: 1.4,
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 1.4,
+          right: -1.4,
+          top: 0,
+          bottom: 0,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(
+                color: const Color(0xFF32ADE6).withValues(alpha: 0.5),
+                width: 1.4,
+              ),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.white.withValues(alpha: dark ? 0.22 : 0.38),
+                  _accent.withValues(alpha: (dark ? 0.20 : 0.13) + press * 0.05),
+                  Colors.white.withValues(alpha: dark ? 0.08 : 0.16),
+                ],
+                stops: const [0, 0.55, 1],
+              ),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.45 + press * 0.3),
+                width: 1,
+              ),
+            ),
+            child: ClipRRect(
+              borderRadius: radius,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: FractionallySizedBox(
+                  heightFactor: 0.5,
+                  widthFactor: 1,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.white.withValues(alpha: 0.30),
+                          Colors.white.withValues(alpha: 0),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 // Dynamic liquid glass: the pill rides a spring, stretches along its
 // travel direction, follows horizontal drags, and swells with a glow
 // while the bar is long-pressed.
@@ -356,8 +449,8 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
   static const _horizontalPadding = 5.0;
   static final _spring = SpringDescription.withDampingRatio(
     mass: 1,
-    stiffness: 210,
-    ratio: 0.82,
+    stiffness: 260,
+    ratio: 0.86,
   );
 
   late final AnimationController _springController;
@@ -438,11 +531,14 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                 final itemWidth =
                     (contentWidth - _horizontalPadding * 2) /
                         widget.destinations.length;
-                final stretch = (_velocity.abs() * 0.045).clamp(0.0, 0.30);
-                final pillWidth = itemWidth * (1 + stretch);
-                final pillLeft = _horizontalPadding +
-                    _pos * itemWidth -
-                    (pillWidth - itemWidth) / 2;
+                final stretch = (_velocity.abs() * 0.05).clamp(0.0, 0.38);
+                // FlClash-style lens: noticeably wider than one item slot.
+                final pillWidth = itemWidth * 1.52 * (1 + stretch);
+                final itemCenter = _horizontalPadding +
+                    _pos * itemWidth +
+                    itemWidth / 2;
+                final pillLeft = (itemCenter - pillWidth / 2)
+                    .clamp(2.0, contentWidth - pillWidth - 2);
                 return GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onHorizontalDragStart: (_) {
@@ -483,19 +579,7 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                         width: pillWidth,
                         child: Transform.scale(
                           scale: 1 + press * 0.07,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: _accent.withValues(
-                                alpha: (dark ? 0.26 : 0.15) + press * 0.06,
-                              ),
-                              borderRadius: BorderRadius.circular(26),
-                              border: Border.all(
-                                color: Colors.white
-                                    .withValues(alpha: 0.25 + press * 0.3),
-                                width: 0.8,
-                              ),
-                            ),
-                          ),
+                          child: _Lens(dark: dark, press: press),
                         ),
                       ),
                       Row(
