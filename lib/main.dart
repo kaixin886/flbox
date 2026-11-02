@@ -148,9 +148,11 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _importProfile() async {
+    // FileType.any on purpose: Android's picker filters by MIME type,
+    // and .yaml files carry no consistent MIME on many ROMs, which left
+    // them greyed out. Content is validated by the translator instead.
     final picked = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['yaml', 'yml', 'txt'],
+      type: FileType.any,
     );
     if (picked == null || picked.files.single.path == null) return;
     final file = File(picked.files.single.path!);
