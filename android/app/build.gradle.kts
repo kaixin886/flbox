@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -12,7 +14,7 @@ if (!flboxJks.exists()) {
     val flboxB64 = file("flbox.jks.b64")
     if (flboxB64.exists()) {
         flboxJks.writeBytes(
-            java.util.Base64.getMimeDecoder().decode(flboxB64.readText())
+            Base64.getMimeDecoder().decode(flboxB64.readText())
         )
     }
 }
