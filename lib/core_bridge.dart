@@ -5,7 +5,13 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 
 typedef _NoArg = Pointer<Utf8> Function();
-typedef _OneArg = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef _TranslateNative = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
+typedef _StartDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
 typedef _FreeNative = Void Function(Pointer<Utf8>);
 
 class CoreException implements Exception {
@@ -50,9 +56,12 @@ class CoreBridge {
   CoreBridge._() {
     final lib = DynamicLibrary.open('libflbox.so');
     _xrayVersion = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayVersion');
-    _xrayTranslate =
-        lib.lookupFunction<_OneArg, _OneArg>('FlboxXrayTranslate');
-    _xrayStart = lib.lookupFunction<_OneArg, _OneArg>('FlboxXrayStart');
+    _xrayTranslate = lib.lookupFunction<_TranslateNative, _TranslateNative>(
+      'FlboxXrayTranslate',
+    );
+    _xrayStart = lib.lookupFunction<_StartNative, _StartDart>(
+      'FlboxXrayStart',
+    );
     _xrayStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStop');
     _xrayStatus = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStatus');
     _lastError = lib.lookupFunction<_NoArg, _NoArg>('FlboxLastError');
@@ -66,8 +75,8 @@ class CoreBridge {
   factory CoreBridge() => _instance ??= CoreBridge._();
 
   late final _NoArg _xrayVersion;
-  late final _OneArg _xrayTranslate;
-  late final _OneArg _xrayStart;
+  late final _TranslateNative _xrayTranslate;
+  late final _StartDart _xrayStart;
   late final _NoArg _xrayStop;
   late final _NoArg _xrayStatus;
   late final _NoArg _lastError;
@@ -84,10 +93,18 @@ class CoreBridge {
 
   String xrayVersion() => _take(_xrayVersion()) ?? 'Xray (unknown)';
 
-  XrayProfile translateXray(String clashYaml) {
+  XrayProfile translateXray(
+    String clashYaml, {
+    required bool vpn,
+    required String logPath,
+  }) {
     final arg = clashYaml.toNativeUtf8();
-    final out = _take(_xrayTranslate(arg));
+    final mode = (vpn ? 'vpn' : 'local').toNativeUtf8();
+    final log = logPath.toNativeUtf8();
+    final out = _take(_xrayTranslate(arg, mode, log));
     malloc.free(arg);
+    malloc.free(mode);
+    malloc.free(log);
     if (out == null) {
       throw CoreException(_lastErrorText() ?? 'translate failed');
     }
@@ -117,9 +134,9 @@ class CoreBridge {
 
   /// Throws CoreException on failure. Starting replaces any running
   /// instance, which doubles as node switching.
-  void xrayStart(String configJson) {
+  void xrayStart(String configJson, int tunFd) {
     final arg = configJson.toNativeUtf8();
-    final err = _take(_xrayStart(arg));
+    final err = _take(_xrayStart(arg, tunFd));
     malloc.free(arg);
     if (err != null) throw CoreException(err);
   }

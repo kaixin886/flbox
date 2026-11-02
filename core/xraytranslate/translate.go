@@ -218,25 +218,53 @@ func nodeOutbound(p clashProxy) (map[string]any, error) {
 	return nil, fmt.Errorf("unsupported in xray trial")
 }
 
-func buildConfig(p clashProxy) (string, error) {
+type Options struct {
+	VPN     bool
+	LogPath string
+}
+
+func buildConfig(p clashProxy, opts Options) (string, error) {
 	outbound, err := nodeOutbound(p)
 	if err != nil {
 		return "", err
 	}
-	cfg := map[string]any{
-		"log": map[string]any{"loglevel": "warning"},
-		"inbounds": []any{
-			map[string]any{
-				"tag":      "in",
-				"listen":   "127.0.0.1",
-				"port":     7890,
-				"protocol": "mixed",
-				"sniffing": map[string]any{
-					"enabled":      true,
-					"destOverride": []string{"http", "tls"},
-				},
+	logCfg := map[string]any{"loglevel": "warning", "access": "none"}
+	if opts.LogPath != "" {
+		logCfg["loglevel"] = "info"
+		logCfg["error"] = opts.LogPath
+	}
+	inbounds := []any{
+		map[string]any{
+			"tag":      "in",
+			"listen":   "127.0.0.1",
+			"port":     7890,
+			"protocol": "mixed",
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls"},
 			},
 		},
+	}
+	if opts.VPN {
+		// The Android VpnService owns the TUN device; its fd reaches
+		// the core through the xray.tun.fd environment variable, which
+		// the tun inbound reads when the instance is created.
+		inbounds = append(inbounds, map[string]any{
+			"tag":      "tun",
+			"protocol": "tun",
+			"settings": map[string]any{
+				"name": "xray0",
+				"MTU":  1500,
+			},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls"},
+			},
+		})
+	}
+	cfg := map[string]any{
+		"log":      logCfg,
+		"inbounds": inbounds,
 		"outbounds": []any{
 			outbound,
 			map[string]any{"tag": "direct", "protocol": "freedom"},
@@ -252,7 +280,7 @@ func buildConfig(p clashProxy) (string, error) {
 				},
 				map[string]any{
 					"type":        "field",
-					"inboundTag":  []string{"in"},
+					"inboundTag":  []string{"in", "tun"},
 					"outboundTag": "proxy",
 				},
 			},
@@ -267,7 +295,7 @@ func buildConfig(p clashProxy) (string, error) {
 
 // Translate parses a Clash profile and builds one standalone Xray
 // config per supported node (global mode, that node as the exit).
-func Translate(clashYAML []byte) (*Result, error) {
+func Translate(clashYAML []byte, opts Options) (*Result, error) {
 	var cfg clashConfig
 	if err := yaml.Unmarshal(clashYAML, &cfg); err != nil {
 		return nil, fmt.Errorf("parse clash yaml: %w", err)
@@ -281,7 +309,7 @@ func Translate(clashYAML []byte) (*Result, error) {
 		Configs: map[string]string{},
 	}
 	for _, p := range cfg.Proxies {
-		nodeCfg, err := buildConfig(p)
+		nodeCfg, err := buildConfig(p, opts)
 		if err != nil {
 			reason := err.Error()
 			if strings.Contains(reason, "unsupported") {

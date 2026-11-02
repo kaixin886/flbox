@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/xtls/xray-core/common/platform"
 	xcore "github.com/xtls/xray-core/core"
 	_ "github.com/xtls/xray-core/main/distro/all"
 
@@ -25,8 +28,11 @@ func xrayVersion() string {
 	return xcore.Version()
 }
 
-func xrayTranslate(clashYAML string) (string, error) {
-	result, err := xraytranslate.Translate([]byte(clashYAML))
+func xrayTranslate(clashYAML, mode, logPath string) (string, error) {
+	result, err := xraytranslate.Translate([]byte(clashYAML), xraytranslate.Options{
+		VPN:     mode == "vpn",
+		LogPath: logPath,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -42,13 +48,21 @@ var xReport string
 // xrayStart starts the instance (StartInstance already starts it; an
 // extra Start call is a second start of every feature) and then probes
 // its own inbound from inside the process, so the log page can show
-// whether the listener is actually reachable in-process.
-func xrayStart(configJSON string) error {
+// whether the listener is actually reachable in-process. For VPN
+// configs the TUN fd from the Android VpnService is handed to the tun
+// inbound through its environment variable before the instance is
+// created (the inbound reads it at construction time).
+func xrayStart(configJSON string, tunFd int) error {
 	xMu.Lock()
 	defer xMu.Unlock()
 	if xInst != nil {
 		xInst.Close()
 		xInst = nil
+	}
+	if tunFd > 0 {
+		os.Setenv(platform.TunFdKey, strconv.Itoa(tunFd))
+	} else {
+		os.Unsetenv(platform.TunFdKey)
 	}
 	inst, err := xcore.StartInstance("json", []byte(configJSON))
 	if err != nil {

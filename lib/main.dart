@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
 
@@ -109,24 +110,50 @@ class _HomeShellState extends State<HomeShell> {
   String? _selectedNode;
   bool _running = false;
   bool _busy = false;
+  bool _modeVpn = true;
+  int _tunFd = 0;
+  String _logPath = '';
+  String? _profileYaml;
+  Map<String, int?> _delays = {};
+  bool _testing = false;
+  Completer<int>? _tunReady;
+
+  static const _vpnChannel = MethodChannel('flbox/vpn');
 
   @override
   void initState() {
     super.initState();
+    _vpnChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onTunReady') {
+        final fd = call.arguments as int;
+        if (_tunReady != null && !_tunReady!.isCompleted) {
+          _tunReady!.complete(fd);
+        }
+      }
+      return null;
+    });
     _restore();
   }
 
   Future<void> _restore() async {
     final prefs = await SharedPreferences.getInstance();
+    _modeVpn = prefs.getBool('mode_vpn') ?? true;
     final saved = prefs.getInt('nav_style');
     if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
       setState(() => _navStyle = NavStyle.values[saved]);
     }
     try {
       final docs = await getApplicationDocumentsDirectory();
+      _logPath = '${docs.path}/xray-error.log';
       final file = File('${docs.path}/profile.yaml');
       if (await file.exists()) {
-        final profile = CoreBridge().translateXray(await file.readAsString());
+        final yaml = await file.readAsString();
+        _profileYaml = yaml;
+        final profile = CoreBridge().translateXray(
+          yaml,
+          vpn: _modeVpn,
+          logPath: _logPath,
+        );
         final stored = prefs.getString('selected_node');
         setState(() {
           _profile = profile;
@@ -158,8 +185,14 @@ class _HomeShellState extends State<HomeShell> {
     final file = File(picked.files.single.path!);
     try {
       final text = await file.readAsString();
-      final profile = CoreBridge().translateXray(text);
       final docs = await getApplicationDocumentsDirectory();
+      _logPath = '${docs.path}/xray-error.log';
+      _profileYaml = text;
+      final profile = CoreBridge().translateXray(
+        text,
+        vpn: _modeVpn,
+        logPath: _logPath,
+      );
       await File('${docs.path}/profile.yaml').writeAsString(text);
       final prefs = await SharedPreferences.getInstance();
       final name = picked.files.single.name;
@@ -187,26 +220,136 @@ class _HomeShellState extends State<HomeShell> {
     if (_running) {
       try {
         CoreBridge().xrayStop();
-        setState(() => _running = false);
-      } on CoreException catch (e) {
-        _toast('停止失败：${e.message}');
+      } catch (_) {}
+      if (_modeVpn) {
+        await _vpnChannel.invokeMethod('stopVpn');
+        _tunFd = 0;
       }
+      setState(() => _running = false);
       return;
     }
     final config = _profile?.configs[_selectedNode];
     if (config == null) {
-      _toast('先到「配置」页导入一个 Clash 配置');
+      _toast('先到「代理」页选一个节点');
       return;
     }
     setState(() => _busy = true);
     try {
-      CoreBridge().xrayStart(config);
+      var fd = 0;
+      if (_modeVpn) {
+        final prep = await _vpnChannel.invokeMethod<String>('prepare');
+        if (prep != 'granted') {
+          _toast('未授予 VPN 权限');
+          return;
+        }
+        _tunReady = Completer<int>();
+        await _vpnChannel.invokeMethod('startVpn');
+        fd = await _tunReady!.future.timeout(const Duration(seconds: 15));
+        _tunFd = fd;
+      }
+      CoreBridge().xrayStart(config, fd);
       setState(() => _running = true);
-    } on CoreException catch (e) {
-      _toast('启动失败：${e.message}');
+    } catch (e) {
+      if (_modeVpn) {
+        try {
+          await _vpnChannel.invokeMethod('stopVpn');
+        } catch (_) {}
+        _tunFd = 0;
+      }
+      _toast('启动失败：$e');
     } finally {
-      setState(() => _busy = false);
+      if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _setModeVpn(bool vpn) async {
+    if (_running) {
+      _toast('先停止再切换模式');
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('mode_vpn', vpn);
+    setState(() => _modeVpn = vpn);
+    final yaml = _profileYaml;
+    if (yaml != null) {
+      try {
+        final profile = CoreBridge().translateXray(
+          yaml,
+          vpn: vpn,
+          logPath: _logPath,
+        );
+        setState(() => _profile = profile);
+      } catch (e) {
+        _toast('切换模式失败：$e');
+      }
+    }
+  }
+
+  Future<void> _testAll() async {
+    if (_testing || _profile == null || _profileYaml == null) return;
+    // When idle, the profile configs may carry a tun inbound that
+    // needs a real VpnService fd, so measure with local-mode configs.
+    XrayProfile testProfile;
+    var fd = 0;
+    if (_running) {
+      testProfile = _profile!;
+      fd = _modeVpn ? _tunFd : 0;
+    } else {
+      try {
+        testProfile = CoreBridge().translateXray(
+          _profileYaml!,
+          vpn: false,
+          logPath: '',
+        );
+      } catch (e) {
+        _toast('测速准备失败：$e');
+        return;
+      }
+    }
+    final wasRunning = _running;
+    final prevNode = _selectedNode;
+    setState(() {
+      _testing = true;
+      _delays = {};
+    });
+    for (final node in testProfile.nodes) {
+      if (!mounted || !_testing) break;
+      final cfg = testProfile.configs[node.name];
+      if (cfg == null) continue;
+      int? ms;
+      HttpClient? client;
+      try {
+        CoreBridge().xrayStart(cfg, fd);
+        final sw = Stopwatch()..start();
+        client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 5);
+        client.findProxy = (_) => 'PROXY 127.0.0.1:7890';
+        final req = await client
+            .getUrl(Uri.parse('http://www.gstatic.com/generate_204'))
+            .timeout(const Duration(seconds: 5));
+        final resp = await req.close().timeout(const Duration(seconds: 5));
+        await resp.drain<void>();
+        sw.stop();
+        ms = (resp.statusCode == 204 || resp.statusCode == 200)
+            ? sw.elapsedMilliseconds
+            : null;
+      } catch (_) {
+        ms = null;
+      } finally {
+        client?.close(force: true);
+      }
+      if (mounted) {
+        setState(() => _delays = {..._delays, node.name: ms});
+      }
+    }
+    try {
+      if (wasRunning && prevNode != null) {
+        CoreBridge().xrayStart(_profile!.configs[prevNode]!, fd);
+      } else if (!wasRunning) {
+        CoreBridge().xrayStop();
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _testing = false);
   }
 
   Future<void> _selectNode(String name) async {
@@ -218,7 +361,7 @@ class _HomeShellState extends State<HomeShell> {
       final config = _profile?.configs[name];
       if (config == null) return;
       try {
-        CoreBridge().xrayStart(config);
+        CoreBridge().xrayStart(config, _modeVpn ? _tunFd : 0);
         _toast('已切换到 $name');
       } on CoreException catch (e) {
         setState(() => _running = false);
@@ -233,6 +376,8 @@ class _HomeShellState extends State<HomeShell> {
         builder: (_) => _SettingsPage(
           navStyle: _navStyle,
           onNavStyleChanged: _setNavStyle,
+          modeVpn: _modeVpn,
+          onModeChanged: _setModeVpn,
         ),
       ),
     );
@@ -275,11 +420,15 @@ class _HomeShellState extends State<HomeShell> {
             hasProfile: _profile != null,
             currentNode: _selectedNode,
             onToggle: _toggleCore,
+            modeVpn: _modeVpn,
           ),
           ProxiesPage(
             profile: _profile,
             selectedNode: _selectedNode,
             onSelect: _selectNode,
+            delays: _delays,
+            testing: _testing,
+            onTestAll: _profile == null ? null : _testAll,
           ),
           ProfilesPage(
             profile: _profile,
@@ -685,6 +834,7 @@ class DashboardPage extends StatelessWidget {
     required this.hasProfile,
     required this.currentNode,
     required this.onToggle,
+    required this.modeVpn,
   });
 
   final VoidCallback onOpenSettings;
@@ -693,6 +843,7 @@ class DashboardPage extends StatelessWidget {
   final bool hasProfile;
   final String? currentNode;
   final VoidCallback onToggle;
+  final bool modeVpn;
 
   @override
   Widget build(BuildContext context) {
@@ -702,7 +853,9 @@ class DashboardPage extends StatelessWidget {
         .withValues(alpha: 0.5);
     final String detail;
     if (running) {
-      detail = '当前节点：${currentNode ?? '-'} · Xray 内核 · 普通模式 127.0.0.1:7890';
+      detail = modeVpn
+          ? '当前节点：${currentNode ?? '-'} · Xray 内核 · VPN 模式（系统代理）'
+          : '当前节点：${currentNode ?? '-'} · Xray 内核 · 普通模式 127.0.0.1:7890';
     } else if (!hasProfile) {
       detail = '先到「配置」页导入一个 Clash 配置。';
     } else {
@@ -741,10 +894,14 @@ class _SettingsPage extends StatefulWidget {
   const _SettingsPage({
     required this.navStyle,
     required this.onNavStyleChanged,
+    required this.modeVpn,
+    required this.onModeChanged,
   });
 
   final NavStyle navStyle;
   final ValueChanged<NavStyle> onNavStyleChanged;
+  final bool modeVpn;
+  final ValueChanged<bool> onModeChanged;
 
   @override
   State<_SettingsPage> createState() => _SettingsPageState();
@@ -752,6 +909,7 @@ class _SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<_SettingsPage> {
   late NavStyle _navStyle = widget.navStyle;
+  late bool _modeVpn = widget.modeVpn;
 
   @override
   Widget build(BuildContext context) {
@@ -781,6 +939,35 @@ class _SettingsPageState extends State<_SettingsPage> {
               },
             ),
           const SizedBox(height: 24),
+          Text('模式', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('系统代理（VPN）'),
+            subtitle: Text('接管全机流量，需要授予 VPN 权限',
+                style: TextStyle(color: muted)),
+            trailing: _modeVpn
+                ? const Icon(Icons.check, color: _accent)
+                : null,
+            onTap: () {
+              setState(() => _modeVpn = true);
+              widget.onModeChanged(true);
+            },
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('普通模式'),
+            subtitle: Text('只在本机 127.0.0.1:7890 提供代理',
+                style: TextStyle(color: muted)),
+            trailing: !_modeVpn
+                ? const Icon(Icons.check, color: _accent)
+                : null,
+            onTap: () {
+              setState(() => _modeVpn = false);
+              widget.onModeChanged(false);
+            },
+          ),
+          const SizedBox(height: 24),
           Text('内核', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           const ListTile(
@@ -807,11 +994,17 @@ class ProxiesPage extends StatelessWidget {
     required this.profile,
     required this.selectedNode,
     required this.onSelect,
+    required this.delays,
+    required this.testing,
+    required this.onTestAll,
   });
 
   final XrayProfile? profile;
   final String? selectedNode;
   final ValueChanged<String> onSelect;
+  final Map<String, int?> delays;
+  final bool testing;
+  final VoidCallback? onTestAll;
 
   @override
   Widget build(BuildContext context) {
@@ -828,19 +1021,59 @@ class ProxiesPage extends StatelessWidget {
     }
     return _PageFrame(
       title: '代理',
-      child: ListView(
-        padding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          for (final node in profile.nodes)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(node.name),
-              subtitle: Text(node.type, style: TextStyle(color: muted)),
-              trailing: node.name == selectedNode
-                  ? const Icon(Icons.check_circle, color: _accent)
-                  : null,
-              onTap: () => onSelect(node.name),
+          Row(
+            children: [
+              Text(
+                '${profile.nodes.length} 个节点',
+                style: TextStyle(color: muted),
+              ),
+              const Spacer(),
+              FilledButton.tonal(
+                onPressed: testing ? null : onTestAll,
+                child: Text(testing
+                    ? '测速中 ${delays.length}/${profile.nodes.length}'
+                    : '全部测速'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                for (final node in profile.nodes)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(node.name),
+                    subtitle: Text(node.type, style: TextStyle(color: muted)),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (delays.containsKey(node.name))
+                          Text(
+                            delays[node.name] == null
+                                ? '超时'
+                                : '${delays[node.name]} ms',
+                            style: TextStyle(
+                              color: delays[node.name] == null
+                                  ? Colors.redAccent
+                                  : muted,
+                            ),
+                          ),
+                        if (node.name == selectedNode) ...[
+                          const SizedBox(width: 8),
+                          const Icon(Icons.check_circle, color: _accent),
+                        ],
+                      ],
+                    ),
+                    onTap: () => onSelect(node.name),
+                  ),
+              ],
             ),
+          ),
         ],
       ),
     );
@@ -916,6 +1149,34 @@ class LogsPage extends StatefulWidget {
 
 class _LogsPageState extends State<LogsPage> {
   String? _status;
+  String _logTail = '';
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLog();
+  }
+
+  Future<void> _loadLog() async {
+    setState(() => _loading = true);
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final file = File('${docs.path}/xray-error.log');
+      if (await file.exists()) {
+        final lines = await file.readAsLines();
+        final tail = lines.length > 200
+            ? lines.sublist(lines.length - 200)
+            : lines;
+        _logTail = tail.join('\n');
+      } else {
+        _logTail = '';
+      }
+    } catch (_) {
+      _logTail = '';
+    }
+    if (mounted) setState(() => _loading = false);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -928,22 +1189,41 @@ class _LogsPageState extends State<LogsPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('内核日志将实时显示在这里。', style: TextStyle(color: muted)),
-          const SizedBox(height: 24),
-          FilledButton.tonal(
-            onPressed: () {
-              try {
-                setState(() => _status = CoreBridge().xrayStatus());
-              } catch (e) {
-                setState(() => _status = '自检失败：$e');
-              }
-            },
-            child: const Text('内核自检'),
+          Row(
+            children: [
+              FilledButton.tonal(
+                onPressed: () {
+                  try {
+                    setState(() => _status = CoreBridge().xrayStatus());
+                  } catch (e) {
+                    setState(() => _status = '自检失败：$e');
+                  }
+                },
+                child: const Text('内核自检'),
+              ),
+              const SizedBox(width: 12),
+              FilledButton.tonal(
+                onPressed: _loading ? null : _loadLog,
+                child: Text(_loading ? '刷新中…' : '刷新日志'),
+              ),
+            ],
           ),
           if (_status != null) ...[
             const SizedBox(height: 16),
             SelectableText(_status!),
           ],
+          const SizedBox(height: 16),
+          Expanded(
+            child: _logTail.isEmpty
+                ? Text('暂无日志。启动一次内核后，Xray 的运行日志会写到这里。',
+                    style: TextStyle(color: muted))
+                : SingleChildScrollView(
+                    child: SelectableText(
+                      _logTail,
+                      style: const TextStyle(fontSize: 12, height: 1.5),
+                    ),
+                  ),
+          ),
         ],
       ),
     );
