@@ -342,42 +342,62 @@ class _Lens extends StatelessWidget {
   final bool dark;
   final double press;
 
+  // Fringes fade out toward the top and bottom so the color split reads
+  // as refraction at the lens ends, not a full colored outline.
+  Widget _fringe(Color color, double shift) {
+    return Positioned(
+      left: shift,
+      right: -shift,
+      top: 0,
+      bottom: 0,
+      child: ShaderMask(
+        blendMode: BlendMode.dstIn,
+        shaderCallback: (rect) => const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.transparent,
+            Colors.white,
+            Colors.white,
+            Colors.transparent,
+          ],
+          stops: [0, 0.3, 0.7, 1],
+        ).createShader(rect),
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: const BorderRadius.all(Radius.circular(26)),
+            border: Border.all(
+              color: color.withValues(alpha: 0.30 + press * 0.25),
+              width: 1.1,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     const radius = BorderRadius.all(Radius.circular(26));
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        Positioned(
-          left: -1.4,
-          right: 1.4,
-          top: 0,
-          bottom: 0,
+        Positioned.fill(
           child: Container(
             decoration: BoxDecoration(
               borderRadius: radius,
-              border: Border.all(
-                color: const Color(0xFFFF453A).withValues(alpha: 0.5),
-                width: 1.4,
-              ),
+              boxShadow: [
+                BoxShadow(
+                  color: _accent.withValues(alpha: 0.06 + press * 0.22),
+                  blurRadius: 16,
+                  offset: const Offset(0, 4),
+                ),
+              ],
             ),
           ),
         ),
-        Positioned(
-          left: 1.4,
-          right: -1.4,
-          top: 0,
-          bottom: 0,
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: radius,
-              border: Border.all(
-                color: const Color(0xFF32ADE6).withValues(alpha: 0.5),
-                width: 1.4,
-              ),
-            ),
-          ),
-        ),
+        _fringe(const Color(0xFFFF453A), -1.1),
+        _fringe(const Color(0xFF32ADE6), 1.1),
         Positioned.fill(
           child: Container(
             decoration: BoxDecoration(
@@ -386,14 +406,14 @@ class _Lens extends StatelessWidget {
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.white.withValues(alpha: dark ? 0.22 : 0.38),
-                  _accent.withValues(alpha: (dark ? 0.20 : 0.13) + press * 0.05),
-                  Colors.white.withValues(alpha: dark ? 0.08 : 0.16),
+                  Colors.white.withValues(alpha: dark ? 0.16 : 0.28),
+                  _accent.withValues(alpha: (dark ? 0.15 : 0.09) + press * 0.06),
+                  Colors.white.withValues(alpha: dark ? 0.05 : 0.10),
                 ],
                 stops: const [0, 0.55, 1],
               ),
               border: Border.all(
-                color: Colors.white.withValues(alpha: 0.45 + press * 0.3),
+                color: Colors.white.withValues(alpha: 0.40 + press * 0.35),
                 width: 1,
               ),
             ),
@@ -417,6 +437,16 @@ class _Lens extends StatelessWidget {
                     ),
                   ),
                 ),
+              ),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: radius,
+                color: Colors.white.withValues(alpha: press * 0.14),
               ),
             ),
           ),
@@ -522,7 +552,7 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
       builder: (context, _) {
         final press = Curves.easeOut.transform(_pressController.value);
         return Transform.scale(
-          scale: 1 + press * 0.015,
+          scale: 1 + press * 0.02,
           child: _GlassShell(
             pressGlow: press,
             child: LayoutBuilder(
@@ -533,7 +563,7 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                         widget.destinations.length;
                 final stretch = (_velocity.abs() * 0.05).clamp(0.0, 0.38);
                 // FlClash-style lens: noticeably wider than one item slot.
-                final pillWidth = itemWidth * 1.52 * (1 + stretch);
+                final pillWidth = itemWidth * 1.44 * (1 + stretch);
                 final itemCenter = _horizontalPadding +
                     _pos * itemWidth +
                     itemWidth / 2;
@@ -578,7 +608,7 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                         bottom: 5,
                         width: pillWidth,
                         child: Transform.scale(
-                          scale: 1 + press * 0.07,
+                          scale: 1 + press * 0.13,
                           child: _Lens(dark: dark, press: press),
                         ),
                       ),
@@ -590,6 +620,9 @@ class _DynamicGlassNavBarState extends State<_DynamicGlassNavBar>
                             Expanded(
                               child: GestureDetector(
                                 behavior: HitTestBehavior.opaque,
+                                onTapDown: (_) => _pressController.forward(),
+                                onTapUp: (_) => _pressController.reverse(),
+                                onTapCancel: () => _pressController.reverse(),
                                 onTap: () => widget.onTap(i),
                                 child: _NavItemContent(
                                   destination: widget.destinations[i],
