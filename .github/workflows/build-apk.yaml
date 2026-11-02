@@ -1,0 +1,76 @@
+name: build-apk
+
+on:
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: '3.47.6'
+  GO_VERSION: '1.27'
+  NDK_VERSION: r28c
+  GRADLE_VERSION: '9.3.1'
+
+jobs:
+  android-arm64:
+    name: Android arm64 APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+          link-to-sdk: true
+
+      - name: Bootstrap Gradle wrapper jar
+        run: |
+          curl -sL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /tmp
+          cd android && "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" wrapper --gradle-version "${GRADLE_VERSION}" --no-daemon -q
+          ls -la gradle/wrapper/
+
+      - name: Build Go core (libflbox.so, android/arm64)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cd core
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+            CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" \
+            go build -tags with_gvisor,with_quic,with_utls \
+              -buildmode=c-shared \
+              -ldflags '-checklinkname=0 -s -w' \
+              -o ../android/app/src/main/jniLibs/arm64-v8a/libflbox.so .
+
+      - name: Get Flutter Dependency
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: flbox-android-arm64
+          path: build/app/outputs/flutter-apk/app-release.apk
+          overwrite: true
