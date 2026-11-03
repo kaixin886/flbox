@@ -192,6 +192,7 @@ class _HomeShellState extends State<HomeShell> {
   final _traffic = ValueNotifier<_Traffic>(const _Traffic());
   DateTime? _startedAt;
   Timer? _pollTimer;
+  DateTime? _lastCoreRestart;
 
   static const _vpnChannel = MethodChannel('flbox/vpn');
 
@@ -204,6 +205,8 @@ class _HomeShellState extends State<HomeShell> {
         if (_tunReady != null && !_tunReady!.isCompleted) {
           _tunReady!.complete(fd);
         }
+      } else if (call.method == 'onNetworkChanged') {
+        _onNetworkChanged();
       }
       return null;
     });
@@ -362,8 +365,98 @@ class _HomeShellState extends State<HomeShell> {
         await _fetchSubscription(sub.url!, updateSub: sub);
       }
     }
+    await _resyncCoreState();
     if (_autoConnect && _profile != null && !_running && mounted) {
       await _toggleCore();
+    }
+  }
+
+  /// Appends a lifecycle line to the core log file, so the log page
+  /// can show why a session was adopted, cleaned up, or restarted.
+  void _logEvent(String msg) {
+    try {
+      if (_logPath.isEmpty) return;
+      File(_logPath).writeAsStringSync(
+        '${DateTime.now().toIso8601String()} [flbox] $msg\n',
+        mode: FileMode.append,
+      );
+    } catch (_) {}
+  }
+
+  /// Reconciles Dart's session state with reality at startup. After
+  /// the task is swiped away or MIUI kills the process, the VPN
+  /// service and the Go core can have survived (or not)
+  /// independently of this fresh Dart state: adopt a session that is
+  /// fully alive, tear down half-dead leftovers (a tunnel with no
+  /// core black-holes all traffic and looks un-stoppable).
+  Future<void> _resyncCoreState() async {
+    try {
+      final coreRunning = CoreBridge().xrayStatus().contains('running=true');
+      if (_modeVpn) {
+        final vpnActive =
+            await _vpnChannel.invokeMethod<bool>('vpnActive') ?? false;
+        if (vpnActive && coreRunning) {
+          final fd = await _vpnChannel.invokeMethod<int>('tunFd') ?? -1;
+          if (fd > 0) _tunFd = fd;
+          _logEvent('resync: adopted live VPN session');
+          setState(() {
+            _running = true;
+            _startedAt = DateTime.now();
+          });
+          _startPolling();
+        } else if (vpnActive) {
+          _logEvent('resync: tunnel without core (zombie), tearing down');
+          await _vpnChannel.invokeMethod('stopVpn');
+          _toast('已清理上次残留的 VPN 隧道');
+        } else if (coreRunning) {
+          _logEvent('resync: core without tunnel, stopping core');
+          try {
+            CoreBridge().xrayStop();
+          } catch (_) {}
+        }
+      } else {
+        final hostActive =
+            await _vpnChannel.invokeMethod<bool>('coreActive') ?? false;
+        if (coreRunning) {
+          _logEvent('resync: adopted live local core');
+          if (!hostActive) {
+            await _vpnChannel.invokeMethod('startCoreService');
+          }
+          setState(() {
+            _running = true;
+            _startedAt = DateTime.now();
+          });
+          _startPolling();
+        } else if (hostActive) {
+          _logEvent('resync: core host without core, stopping host');
+          await _vpnChannel.invokeMethod('stopCoreService');
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// The default network changed under a running core (Wi-Fi to
+  /// mobile and back): its outbound sockets rot silently and pages
+  /// load a little, then stall. Restart the core in place on the
+  /// same tunnel, which is what a manual stop/start did, but
+  /// automatically. Debounced: network flaps settle first.
+  Future<void> _onNetworkChanged() async {
+    if (!_running || _busy || _testing) return;
+    final last = _lastCoreRestart;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 15)) {
+      return;
+    }
+    _lastCoreRestart = DateTime.now();
+    final config = _profile?.configs[_selectedNode];
+    if (config == null) return;
+    _logEvent('network changed: restarting core in place');
+    try {
+      CoreBridge().xrayStop();
+      CoreBridge().xrayStart(config, _modeVpn ? _tunFd : 0);
+      _startedAt = DateTime.now();
+    } catch (e) {
+      _logEvent('network-change restart failed: $e');
     }
   }
 
@@ -840,6 +933,16 @@ class _HomeShellState extends State<HomeShell> {
         if (prep != 'granted') {
           _toast('未授予 VPN 权限');
           return;
+        }
+        // A tunnel left over from a previous engine or process
+        // (its stop never landed) would make the service's start a
+        // no-op and hang the fd wait below forever. Clear it first.
+        final stale =
+            await _vpnChannel.invokeMethod<bool>('vpnActive') ?? false;
+        if (stale) {
+          _logEvent('start: clearing stale VPN tunnel first');
+          await _vpnChannel.invokeMethod('stopVpn');
+          await Future<void>.delayed(const Duration(milliseconds: 300));
         }
         _tunReady = Completer<int>();
         await _vpnChannel.invokeMethod('startVpn', {
@@ -2082,7 +2185,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.18.0 · app.flbox · Xray 内核',
+              'FlBox 0.19.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

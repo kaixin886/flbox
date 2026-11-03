@@ -64,6 +64,15 @@ class MainActivity : FlutterActivity() {
                     )
                     result.success(null)
                 }
+                "vpnActive" -> {
+                    result.success(FlboxVpnService.active)
+                }
+                "tunFd" -> {
+                    result.success(FlboxVpnService.tunFd)
+                }
+                "coreActive" -> {
+                    result.success(FlboxCoreService.active)
+                }
                 "stopCoreService" -> {
                     startService(
                         Intent(this, FlboxCoreService::class.java)

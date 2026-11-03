@@ -115,3 +115,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.18 订阅拉取排除本地代理（2026-11-03 晚，用户定）
 
 - **要求**：自动更新要排除本地代理。落地为双重排除——① 对象排除：本地文件配置本来就不参与自动更新（无 URL、无开关、启动检查跳过，0.17 已如此）；② 通道排除：_fetchSubscription（手动更新与自动更新共用同一拉取路径）给 HttpClient 显式设 `findProxy = DIRECT`，订阅流量不走 FlBox 自己的本地代理口、不吃系统代理设置；应用本身也已在自家 VPN 隧道里被排除（addDisallowedApplication），故拉取全程直连。意义：节点全挂时恰恰最需要更新订阅，此时绝不能依赖代理通道。
+
+## 0.19 会话生命周期修复（2026-11-03 晚，真机反馈）
+
+- **反馈一**：开着代理划掉后台，VPN 还在；再进软件点关闭关不掉，只能强停。**病根**：FlboxVpnService 原为 START_STICKY——进程被划掉/MIUI 杀死后系统以 null intent 复活服务，旧代码走 else 分支重新 establish 一条新隧道，却把 fd 发给已死的引擎通道，核心根本没起：僵尸隧道全网黑洞；且 Dart 新状态 _running=false，仪表盘按钮只会走启动路径，服务里 tun 已存在又使启动变 no-op、fd 等待永挂，关不掉只能强停。
+- **反馈二**：用一段时间后网页加载一点就断、反复重开才好。主嫌疑：默认网络切换（Wi-Fi/移动）后核心出站 socket 静默腐烂，实例不自知；与进程被冻/杀后会话半死同属生命周期问题。
+- **改法**：① 两个服务改 START_NOT_STICKY，null intent 直接 stopSelf——会话随进程生灭，不复活无核心隧道；② 服务 companion 暴露 active 与 tunFd，MainActivity 加 vpnActive/coreActive/tunFd 查询；③ Dart 启动时 _resyncCoreState 对账：隧道与核心都活→认领会话（含找回 tunFd、恢复轮询），只剩一半→拆掉残留并记日志、toast 提示；④ _toggleCore 启动前先查并清掉残留隧道（自愈），避免 fd 等待永挂；⑤ 两服务注册默认网络回调，网络真切换时通知 Dart 在原隧道上重启核心（15 秒去抖），即「手动重开」的自动化；⑥ 生命周期事件以 [flbox] 前缀追加进核心日志，日志页可复盘。

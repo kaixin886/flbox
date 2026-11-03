@@ -5,16 +5,33 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 
 // Establishes the system TUN device and hands its fd to the Go core,
 // which reads packets through Xray's tun inbound. The service keeps
 // ownership of the fd (Xray's Android tun never closes it); closing
 // it here is what tears the tunnel down.
+//
+// Lifecycle rule: a session belongs to the process that started it.
+// The service is NOT sticky: if the process dies (task swiped away,
+// MIUI background kill), the tunnel dies with it instead of being
+// resurrected by the system as a coreless zombie that black-holes
+// all traffic and cannot be stopped from the UI.
 class FlboxVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastNetwork: Network? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        registerNetworkWatcher()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return when (intent?.action) {
@@ -22,9 +39,16 @@ class FlboxVpnService : VpnService() {
                 stopVpn()
                 START_NOT_STICKY
             }
-            else -> {
+            ACTION_START -> {
                 startVpn(intent?.getStringArrayListExtra(EXTRA_BYPASS) ?: emptyList())
-                START_STICKY
+                START_NOT_STICKY
+            }
+            else -> {
+                // Null intent = system restart after process death.
+                // The core that owned the old tunnel is gone; never
+                // resurrect a tunnel with nothing behind it.
+                stopSelf()
+                START_NOT_STICKY
             }
         }
     }
@@ -72,10 +96,14 @@ class FlboxVpnService : VpnService() {
             return
         }
         tun = pfd
+        tunFd = pfd.fd
+        active = true
         VpnBridge.channel?.invokeMethod("onTunReady", pfd.fd)
     }
 
     private fun stopVpn() {
+        active = false
+        tunFd = -1
         try {
             tun?.close()
         } catch (_: Exception) {
@@ -86,6 +114,9 @@ class FlboxVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        active = false
+        tunFd = -1
+        unregisterNetworkWatcher()
         try {
             tun?.close()
         } catch (_: Exception) {
@@ -96,6 +127,50 @@ class FlboxVpnService : VpnService() {
 
     override fun onRevoke() {
         stopVpn()
+    }
+
+    // The core's outbound sockets are bound to whatever network was
+    // default when it started; after a Wi-Fi to mobile switch they
+    // silently rot (pages load a little, then stall) until the core
+    // is restarted. Watch the default network and tell Dart to
+    // restart the core in place when it actually changes. This app
+    // is disallowed from its own tunnel, so the callback tracks the
+    // underlying network, which is the one the core dials on.
+    private fun registerNetworkWatcher() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java) ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val prev = lastNetwork
+                    lastNetwork = network
+                    if (prev != null && prev != network) {
+                        Handler(Looper.getMainLooper()).post {
+                            VpnBridge.channel?.invokeMethod("onNetworkChanged", null)
+                        }
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    if (lastNetwork == network) lastNetwork = null
+                }
+            }
+            netCallback = cb
+            cm.registerDefaultNetworkCallback(cb)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun unregisterNetworkWatcher() {
+        try {
+            netCallback?.let {
+                getSystemService(ConnectivityManager::class.java)
+                    ?.unregisterNetworkCallback(it)
+            }
+        } catch (_: Exception) {
+        }
+        netCallback = null
+        lastNetwork = null
     }
 
     private fun buildNotification(): Notification {
@@ -128,5 +203,15 @@ class FlboxVpnService : VpnService() {
         const val EXTRA_BYPASS = "com.kaixin886.flbox.EXTRA_BYPASS"
         private const val CHANNEL_ID = "flbox_vpn"
         private const val NOTIF_ID = 1
+
+        // True while this process holds an established tunnel. Dart
+        // reads it at startup to reconcile its state with reality.
+        @Volatile
+        var active: Boolean = false
+
+        // The established tunnel's fd, so a recreated Dart engine
+        // in the same process can adopt the live session.
+        @Volatile
+        var tunFd: Int = -1
     }
 }
