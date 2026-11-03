@@ -1,8 +1,13 @@
 package com.kaixin886.flbox
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -68,6 +73,47 @@ class MainActivity : FlutterActivity() {
                 "listApps" -> {
                     result.success(listLaunchableApps())
                 }
+                "appSettings" -> {
+                    // Deep-link to this app's system info page, where the
+                    // per-app "allow network access" switch lives on ROMs
+                    // that enforce one (a REJECT_ALL uid policy otherwise
+                    // silently kills all of the app's traffic).
+                    val intent = Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                    result.success(null)
+                }
+                "requestNotifications" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        @Suppress("DEPRECATION")
+                        requestPermissions(
+                            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                            REQUEST_NOTIFICATIONS
+                        )
+                    }
+                    result.success(null)
+                }
+                "batteryState" -> {
+                    val pm = getSystemService(PowerManager::class.java)
+                    result.success(pm.isIgnoringBatteryOptimizations(packageName))
+                }
+                "openBatterySettings" -> {
+                    try {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    } catch (e: Exception) {
+                        startActivity(
+                            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                        )
+                    }
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -106,5 +152,6 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val REQUEST_VPN = 4242
+        private const val REQUEST_NOTIFICATIONS = 4243
     }
 }

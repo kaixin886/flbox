@@ -120,6 +120,8 @@ class _HomeShellState extends State<HomeShell> {
   Completer<int>? _tunReady;
   String? _profileUrl;
   Set<String> _bypassPkgs = {};
+  bool _netBlocked = false;
+  bool _batteryIgnored = false;
   int _upBytes = 0;
   int _downBytes = 0;
   double _speedUp = 0;
@@ -142,6 +144,35 @@ class _HomeShellState extends State<HomeShell> {
       return null;
     });
     _restore();
+    _checkNetwork();
+    _askNotifications();
+  }
+
+  Future<void> _askNotifications() async {
+    try {
+      await _vpnChannel.invokeMethod('requestNotifications');
+    } catch (_) {}
+  }
+
+  /// Detects the system-level per-app network block (a REJECT_ALL uid
+  /// policy: DNS stops resolving and every connection is silently
+  /// dropped while listeners still bind). When detected, the dashboard
+  /// shows a banner that deep-links to the system switch instead of
+  /// letting the user chase phantom core bugs.
+  Future<void> _checkNetwork() async {
+    try {
+      final result = await InternetAddress.lookup('www.gstatic.com')
+          .timeout(const Duration(seconds: 4));
+      if (mounted) setState(() => _netBlocked = result.isEmpty);
+    } catch (_) {
+      if (mounted) setState(() => _netBlocked = true);
+    }
+  }
+
+  Future<void> _openNetSettings() async {
+    try {
+      await _vpnChannel.invokeMethod('appSettings');
+    } catch (_) {}
   }
 
   Future<void> _restore() async {
@@ -564,8 +595,13 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
-  void _openSettings() {
-    Navigator.of(context).push(
+  Future<void> _openSettings() async {
+    try {
+      _batteryIgnored =
+          await _vpnChannel.invokeMethod<bool>('batteryState') ?? false;
+    } catch (_) {}
+    if (!mounted) return;
+    await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => _SettingsPage(
           navStyle: _navStyle,
@@ -574,9 +610,16 @@ class _HomeShellState extends State<HomeShell> {
           onModeChanged: _setModeVpn,
           bypassPkgs: _bypassPkgs,
           onBypassChanged: _setBypassPkgs,
+          batteryIgnored: _batteryIgnored,
+          onOpenBatterySettings: () async {
+            try {
+              await _vpnChannel.invokeMethod('openBatterySettings');
+            } catch (_) {}
+          },
         ),
       ),
     );
+    _checkNetwork();
   }
 
   @override
@@ -623,6 +666,9 @@ class _HomeShellState extends State<HomeShell> {
             speedUp: _speedUp,
             speedDown: _speedDown,
             startedAt: _startedAt,
+            netBlocked: _netBlocked,
+            onOpenNetSettings: _openNetSettings,
+            onRecheckNetwork: _checkNetwork,
           ),
           ProxiesPage(
             profile: _profile,
@@ -1069,6 +1115,9 @@ class DashboardPage extends StatelessWidget {
     required this.speedUp,
     required this.speedDown,
     required this.startedAt,
+    required this.netBlocked,
+    required this.onOpenNetSettings,
+    required this.onRecheckNetwork,
   });
 
   final VoidCallback onOpenSettings;
@@ -1083,6 +1132,9 @@ class DashboardPage extends StatelessWidget {
   final double speedUp;
   final double speedDown;
   final DateTime? startedAt;
+  final bool netBlocked;
+  final VoidCallback onOpenNetSettings;
+  final VoidCallback onRecheckNetwork;
 
   @override
   Widget build(BuildContext context) {
@@ -1110,6 +1162,47 @@ class DashboardPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (netBlocked) ...[
+            Container(
+              decoration: BoxDecoration(
+                color: Theme.of(context)
+                    .colorScheme
+                    .error
+                    .withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'FlBox 当前无法联网',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '域名解析失败、所有连接都会超时——通常是系统的分应用联网开关把 FlBox 关了'
+                    '（或是设备暂时离线）。去系统设置里确认「允许网络访问」已打开。',
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      FilledButton(
+                        onPressed: onOpenNetSettings,
+                        child: const Text('去打开联网开关'),
+                      ),
+                      const SizedBox(width: 12),
+                      TextButton(
+                        onPressed: onRecheckNetwork,
+                        child: const Text('重新检测'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
           Container(
             decoration: BoxDecoration(
               color: _cardColor(context),
@@ -1224,6 +1317,8 @@ class _SettingsPage extends StatefulWidget {
     required this.onModeChanged,
     required this.bypassPkgs,
     required this.onBypassChanged,
+    required this.batteryIgnored,
+    required this.onOpenBatterySettings,
   });
 
   final NavStyle navStyle;
@@ -1232,6 +1327,8 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<bool> onModeChanged;
   final Set<String> bypassPkgs;
   final ValueChanged<Set<String>> onBypassChanged;
+  final bool batteryIgnored;
+  final VoidCallback onOpenBatterySettings;
 
   @override
   State<_SettingsPage> createState() => _SettingsPageState();
@@ -1320,6 +1417,21 @@ class _SettingsPageState extends State<_SettingsPage> {
                 ),
               );
             },
+          ),
+          const SizedBox(height: 24),
+          Text('系统', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('电池优化'),
+            subtitle: Text(
+              widget.batteryIgnored
+                  ? '已豁免，后台运行不受限'
+                  : '未豁免，切后台久了可能被系统杀掉',
+              style: TextStyle(color: muted),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: widget.onOpenBatterySettings,
           ),
           const SizedBox(height: 24),
           Text('内核', style: Theme.of(context).textTheme.titleMedium),
