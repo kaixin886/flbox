@@ -224,84 +224,17 @@ func nodeOutbound(p clashProxy) (map[string]any, error) {
 type Options struct {
 	VPN     bool
 	LogPath string
-	// Rules enables rule mode: the profile's own Clash rules are
-	// translated into Xray routing rules (unsupported types dropped).
-	// Without usable profile rules it falls back to the classic
-	// bypass-mainland set (geosite:cn / geoip:cn direct). Rule mode
+	// Rules enables rule mode: the original v2ray bypass-mainland
+	// preset (domainStrategy IPIfNonMatch, geosite:cn and geoip:cn
+	// direct, everything else proxied, split DNS). The profile's own
+	// Clash rules are NOT translated: Clash rule sets lean on
+	// RULE-SET providers and Clash DNS semantics, and the lossy
+	// translation left domestic apps without network. Rule mode
 	// needs geoip.dat and geosite.dat in the Xray asset directory.
 	Rules bool
 }
 
-// translateRule converts one Clash rule line into an Xray field rule.
-// ok=false for rule types with no equivalent in this client. Named
-// proxy groups collapse onto the single selected node's outbound.
-func translateRule(line string) (map[string]any, bool) {
-	parts := strings.Split(line, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	if len(parts) < 2 {
-		return nil, false
-	}
-	outboundFor := func(target string) string {
-		switch strings.ToUpper(target) {
-		case "DIRECT":
-			return "direct"
-		case "REJECT":
-			return "block"
-		default:
-			return "proxy"
-		}
-	}
-	rule := map[string]any{"type": "field"}
-	switch strings.ToUpper(parts[0]) {
-	case "MATCH", "FINAL":
-		// A field rule needs at least one effective field, or Xray
-		// rejects the whole config at Start ("this rule has no
-		// effective fields"). network tcp,udp matches everything,
-		// which is exactly MATCH semantics, and keeps the target.
-		rule["network"] = "tcp,udp"
-		rule["outboundTag"] = outboundFor(parts[1])
-		return rule, true
-	case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "GEOSITE":
-		if len(parts) < 3 {
-			return nil, false
-		}
-		prefix := map[string]string{
-			"DOMAIN":         "full:",
-			"DOMAIN-SUFFIX":  "domain:",
-			"DOMAIN-KEYWORD": "keyword:",
-			"GEOSITE":        "geosite:",
-		}[strings.ToUpper(parts[0])]
-		rule["domain"] = []string{prefix + parts[1]}
-		rule["outboundTag"] = outboundFor(parts[2])
-		return rule, true
-	case "IP-CIDR", "IP-CIDR6":
-		if len(parts) < 3 {
-			return nil, false
-		}
-		rule["ip"] = []string{parts[1]}
-		rule["outboundTag"] = outboundFor(parts[2])
-		return rule, true
-	case "GEOIP":
-		if len(parts) < 3 {
-			return nil, false
-		}
-		rule["ip"] = []string{"geoip:" + strings.ToLower(parts[1])}
-		rule["outboundTag"] = outboundFor(parts[2])
-		return rule, true
-	case "DST-PORT":
-		if len(parts) < 3 {
-			return nil, false
-		}
-		rule["port"] = parts[1]
-		rule["outboundTag"] = outboundFor(parts[2])
-		return rule, true
-	}
-	return nil, false
-}
-
-func buildConfig(p clashProxy, profileRules []string, opts Options) (string, error) {
+func buildConfig(p clashProxy, opts Options) (string, error) {
 	outbound, err := nodeOutbound(p)
 	if err != nil {
 		return "", err
@@ -319,7 +252,7 @@ func buildConfig(p clashProxy, profileRules []string, opts Options) (string, err
 			"protocol": "mixed",
 			"sniffing": map[string]any{
 				"enabled":      true,
-				"destOverride": []string{"http", "tls"},
+				"destOverride": []string{"http", "tls", "quic"},
 			},
 		},
 	}
@@ -336,34 +269,32 @@ func buildConfig(p clashProxy, profileRules []string, opts Options) (string, err
 			},
 			"sniffing": map[string]any{
 				"enabled":      true,
-				"destOverride": []string{"http", "tls"},
+				"destOverride": []string{"http", "tls", "quic"},
 			},
 		})
 	}
+	domainStrategy := "AsIs"
 	routingRules := []any{}
 	if opts.Rules {
-		applied := 0
-		for _, line := range profileRules {
-			if r, ok := translateRule(line); ok {
-				routingRules = append(routingRules, r)
-				applied++
-			}
-		}
-		if applied == 0 {
-			// No usable rules in the profile: classic bypass-mainland.
-			routingRules = append(routingRules,
-				map[string]any{
-					"type":        "field",
-					"domain":      []string{"geosite:cn"},
-					"outboundTag": "direct",
-				},
-				map[string]any{
-					"type":        "field",
-					"ip":          []string{"geoip:cn"},
-					"outboundTag": "direct",
-				},
-			)
-		}
+		// The v2ray preset: IPIfNonMatch is the load-bearing part.
+		// With AsIs, a domain destination never reaches the IP
+		// rules, so geoip:cn only fires for raw-IP traffic and most
+		// domestic apps (domain-first) fall through to the proxy.
+		// IPIfNonMatch resolves domains that matched no domain rule
+		// and retries them against the IP rules, like stock v2ray.
+		domainStrategy = "IPIfNonMatch"
+		routingRules = append(routingRules,
+			map[string]any{
+				"type":        "field",
+				"domain":      []string{"geosite:cn"},
+				"outboundTag": "direct",
+			},
+			map[string]any{
+				"type":        "field",
+				"ip":          []string{"geoip:cn"},
+				"outboundTag": "direct",
+			},
+		)
 	}
 	routingRules = append(routingRules,
 		map[string]any{
@@ -393,9 +324,26 @@ func buildConfig(p clashProxy, profileRules []string, opts Options) (string, err
 			map[string]any{"tag": "block", "protocol": "blackhole"},
 		},
 		"routing": map[string]any{
-			"domainStrategy": "AsIs",
+			"domainStrategy": domainStrategy,
 			"rules":          routingRules,
 		},
+	}
+	if opts.Rules {
+		// Split DNS, v2rayNG-style: CN domains resolve locally
+		// (and must come back with CN IPs), the rest through the
+		// proxied resolver. IPIfNonMatch's internal resolutions
+		// go through this client too, so routing and DNS agree.
+		cfg["dns"] = map[string]any{
+			"queryStrategy": "UseIP",
+			"servers": []any{
+				map[string]any{
+					"address":     "223.5.5.5",
+					"domains":     []string{"geosite:cn"},
+					"expectedIPs": []string{"geoip:cn"},
+				},
+				"8.8.8.8",
+			},
+		}
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
@@ -420,16 +368,12 @@ func Translate(clashYAML []byte, opts Options) (*Result, error) {
 		Configs: map[string]string{},
 	}
 	if opts.Rules {
-		for _, line := range cfg.Rules {
-			if _, ok := translateRule(line); ok {
-				result.RulesApplied++
-			} else {
-				result.RulesSkipped++
-			}
-		}
+		// Rule mode is the fixed v2ray preset (geosite:cn +
+		// geoip:cn); the profile's own rules are not translated.
+		result.RulesApplied = 2
 	}
 	for _, p := range cfg.Proxies {
-		nodeCfg, err := buildConfig(p, cfg.Rules, opts)
+		nodeCfg, err := buildConfig(p, opts)
 		if err != nil {
 			reason := err.Error()
 			if strings.Contains(reason, "unsupported") {
@@ -491,7 +435,7 @@ func TranslateAll(clashYAML []byte, logPath string) (*AllResult, error) {
 			"protocol": "mixed",
 			"sniffing": map[string]any{
 				"enabled":      true,
-				"destOverride": []string{"http", "tls"},
+				"destOverride": []string{"http", "tls", "quic"},
 			},
 		})
 		rules = append(rules, map[string]any{

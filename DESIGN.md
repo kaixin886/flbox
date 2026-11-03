@@ -99,3 +99,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 
 - **规则模式启动失败修复**：真机 0.13/0.14 规则模式必挂（`app/router: this rule has no effective fields`、全局正常）。病根：xraytranslate 把 Clash 的 MATCH/FINAL 翻成只有 outboundTag、零条件字段的 field 规则，Xray 26.x 在实例创建时整表拒绝（订阅必带 MATCH 收尾故必挂）。修法：MATCH 规则补 `network: "tcp,udp"` 作有效字段（全匹配语义不变、保留 target 指向）。新增真启动回归测试 core/xray_rules_start_test.go（StartInstance 实启，沙箱已验：去修复必红、带修复通过）——rules_check_test 只验翻译映射、没真启内核，是漏检原因，延续「校验在 Start 阶段」教训。
 - **排序改非模态**：代理页排序原为 PopupMenuButton 弹出菜单，模态层吞掉全部手势、菜单开着时网格不能滑动，必须点一项才能继续（真机反馈）。改：排序图标点按在页头下方内联展开一行 ChoiceChip（智能排序/按延迟/按名称，AnimatedSize 150ms），选中即应用并收起，全程无遮罩、滑动不受影响。
+
+## 0.16 规则模式改 v2ray 原版预设（2026-11-03 晚，真机反馈）
+
+- **反馈**：0.15 规则模式（订阅 Clash 规则翻译版）「很一般，有的国内软件会没有网络」，用户定：移植原版 v2ray 规则模式。
+- **病根分析**：① 翻译器 domainStrategy 为 AsIs——域名型流量永远走不到 IP 规则，GEOIP,CN 只对裸 IP 连接生效，国内 App 多为域名先行，未命中域名规则就落 MATCH 进代理；② 机场 Clash 规则重度依赖 RULE-SET 规则集与 Clash 的 DNS 语义，翻译器整段跳过 RULE-SET，分流表残缺。两者叠加即「国内软件没网/绕远」。
+- **改法**：规则模式不再翻译订阅规则，改为 v2ray 原版绕过大陆预设——domainStrategy 改 IPIfNonMatch（域名未命中先解析、再用 IP 规则复判，这是原版的关键）、geosite:cn 直连、geoip:cn 直连、私有段直连、其余走代理；配套分流 DNS（geosite:cn 域名走 223.5.5.5 且 expectedIPs 限定 geoip:cn，其余走 8.8.8.8，v2rayNG 同款）；嗅探 destOverride 补 quic。translateRule 及计数逻辑删除，rules_check_test 改为预设断言；真启动测试拆为全局（常开）＋预设（FLBOX_TEST_ASSETS 指向 geodata 目录时启用），本地已用 Loyalsoldier 全量 dat 实测 Start 通过。
+- **文案**：设置页规则模式副标题与切换 toast 改为「v2ray 原版绕过大陆」。

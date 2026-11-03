@@ -440,7 +440,7 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
     }
-    _toast(rules ? '已切换到规则模式（按订阅分流）' : '已切换到全局模式');
+    _toast(rules ? '已切换到规则模式（v2ray 绕过大陆）' : '已切换到全局模式');
   }
 
   Future<void> _setAutoConnect(bool value) async {
@@ -1969,7 +1969,7 @@ class _SettingsPageState extends State<_SettingsPage> {
             contentPadding: EdgeInsets.zero,
             title: const Text('规则模式（分流）'),
             subtitle:
-                Text('按订阅自带规则分流，国内站点直连', style: TextStyle(color: muted)),
+                Text('v2ray 原版绕过大陆：国内域名与 IP 直连，其余走代理', style: TextStyle(color: muted)),
             trailing: widget.rulesMode
                 ? const Icon(Icons.check, color: _accent)
                 : null,
@@ -2036,7 +2036,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.15.0 · app.flbox · Xray 内核',
+              'FlBox 0.16.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

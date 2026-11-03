@@ -24,33 +24,47 @@ rules:
   - MATCH,PROXY
 `
 
-func TestRulesModeTranslation(t *testing.T) {
+// Rule mode is the original v2ray bypass-mainland preset, not a
+// translation of the profile's Clash rules (that translation was
+// lossy and left domestic apps without network).
+func TestRulesModePreset(t *testing.T) {
 	res, err := Translate([]byte(sampleRulesYAML), Options{Rules: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RulesApplied != 7 || res.RulesSkipped != 1 {
-		t.Fatalf("applied=%d skipped=%d, want 7/1", res.RulesApplied, res.RulesSkipped)
+	if res.RulesApplied != 2 {
+		t.Fatalf("applied=%d, want 2 (preset entries)", res.RulesApplied)
 	}
 	cfg := res.Configs["n1"]
 	for _, want := range []string{
-		`"domain:google.com"`,
-		`"full:api.example.com"`,
+		`"domainStrategy":"IPIfNonMatch"`,
+		`"geosite:cn"`,
 		`"geoip:cn"`,
-		`"geosite:category-ads-all"`,
-		`"1.2.3.0/24"`,
-		`"port":"443"`,
-		`"outboundTag":"block"`,
+		`"223.5.5.5"`,
+		`"expectedIPs":["geoip:cn"]`,
 	} {
 		if !strings.Contains(cfg, want) {
-			t.Fatalf("config missing %s\n%s", want, cfg)
+			t.Fatalf("rules-mode config missing %s\n%s", want, cfg)
+		}
+	}
+	for _, notWant := range []string{
+		`"domain:google.com"`, // profile rules must NOT be translated
+		`"full:api.example.com"`,
+		`"geosite:category-ads-all"`,
+	} {
+		if strings.Contains(cfg, notWant) {
+			t.Fatalf("rules-mode config must not contain %s\n%s", notWant, cfg)
 		}
 	}
 	res2, err := Translate([]byte(sampleRulesYAML), Options{Rules: false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(res2.Configs["n1"], "geosite:") {
-		t.Fatal("global mode must not contain geosite rules")
+	cfg2 := res2.Configs["n1"]
+	if !strings.Contains(cfg2, `"domainStrategy":"AsIs"`) {
+		t.Fatalf("global mode must stay AsIs\n%s", cfg2)
+	}
+	if strings.Contains(cfg2, "geosite:cn") || strings.Contains(cfg2, "223.5.5.5") {
+		t.Fatalf("global mode must not contain the preset\n%s", cfg2)
 	}
 }
