@@ -32,6 +32,9 @@ ThemeData _theme(Brightness brightness) {
     onPrimary: Colors.white,
     secondary: _accent,
     onSecondary: Colors.white,
+    secondaryContainer:
+        dark ? const Color(0xFF2B4A7A) : const Color(0xFFD9E6FD),
+    onSecondaryContainer: dark ? const Color(0xFFD9E6FD) : const Color(0xFF0B53CE),
     surface: background,
     onSurface: dark ? const Color(0xFFF2F2F4) : const Color(0xFF1B1B1E),
     error: const Color(0xFFD93025),
@@ -46,6 +49,26 @@ ThemeData _theme(Brightness brightness) {
       elevation: 0,
       scrolledUnderElevation: 0,
       foregroundColor: scheme.onSurface,
+    ),
+    navigationBarTheme: NavigationBarThemeData(
+      iconTheme: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.selected)) {
+          return const IconThemeData(color: _accent, size: 24);
+        }
+        return IconThemeData(
+          color: scheme.onSurface.withValues(alpha: 0.55),
+          size: 24,
+        );
+      }),
+      labelTextStyle: WidgetStateProperty.resolveWith((states) {
+        final selected = states.contains(WidgetState.selected);
+        return TextStyle(
+          fontSize: 12,
+          fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+          color:
+              selected ? _accent : scheme.onSurface.withValues(alpha: 0.55),
+        );
+      }),
     ),
     dividerTheme: DividerThemeData(
       color: scheme.onSurface.withValues(alpha: 0.08),
@@ -1274,7 +1297,11 @@ class _PlainNavBar extends StatelessWidget {
       indicatorColor: _accent.withValues(alpha: 0.15),
       destinations: [
         for (final d in _destinations)
-          NavigationDestination(icon: Icon(d.icon), label: d.label),
+          NavigationDestination(
+            icon: Icon(d.icon),
+            selectedIcon: Icon(d.icon, color: _accent),
+            label: d.label,
+          ),
       ],
     );
   }
@@ -2185,7 +2212,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.19.0 · app.flbox · Xray 内核',
+              'FlBox 0.20.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
