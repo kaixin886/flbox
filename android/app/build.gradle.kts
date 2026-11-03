@@ -117,6 +117,16 @@ android {
             signingConfig = signingConfigs.getByName("flbox")
         }
     }
+
+    // APK size: store the native libraries compressed in the APK
+    // (legacy packaging) instead of uncompressed-and-aligned. The Go
+    // core .so is most of the APK; it compresses well, and Android
+    // extracts it at install time as it always did pre-AGP-9-defaults.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 kotlin {

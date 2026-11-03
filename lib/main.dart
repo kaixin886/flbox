@@ -1047,10 +1047,8 @@ class _HomeShellState extends State<HomeShell> {
           _DashboardPage(
             onOpenSettings: _openSettings,
             running: _running,
-            busy: _busy,
             hasProfile: _profile != null,
             currentNode: _selectedNode,
-            onToggle: _toggleCore,
             modeVpn: _modeVpn,
             traffic: _traffic,
             startedAt: _startedAt,
@@ -1060,6 +1058,9 @@ class _HomeShellState extends State<HomeShell> {
             profileName: _profileName,
             currentDelay:
                 _selectedNode != null ? _delays[_selectedNode] : null,
+            rulesMode: _rulesMode,
+            onRulesModeChanged: _setRulesMode,
+            onShowProxies: () => _select(1),
           ),
           ProxiesPage(
             profile: _profile,
@@ -1101,6 +1102,24 @@ class _HomeShellState extends State<HomeShell> {
           ),
         },
       ),
+      floatingActionButton: _index == 0
+          ? FloatingActionButton(
+              onPressed: _busy ? null : _toggleCore,
+              backgroundColor: _accent,
+              foregroundColor: Colors.white,
+              shape: const CircleBorder(),
+              child: _busy
+                  ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Icon(_running ? Icons.stop : Icons.play_arrow, size: 30),
+            )
+          : null,
     );
   }
 }
@@ -1453,7 +1472,7 @@ class _PageFrame extends StatelessWidget {
       bottom: false,
       child: Padding(
         // Bottom padding clears the floating navigation bar.
-        padding: const EdgeInsets.fromLTRB(24, 28, 24, 120),
+        padding: const EdgeInsets.fromLTRB(16, 24, 16, 120),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1464,7 +1483,7 @@ class _PageFrame extends StatelessWidget {
                 ?action,
               ],
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
             Expanded(child: child),
           ],
         ),
@@ -1499,10 +1518,8 @@ class _DashboardPage extends StatelessWidget {
   const _DashboardPage({
     required this.onOpenSettings,
     required this.running,
-    required this.busy,
     required this.hasProfile,
     required this.currentNode,
-    required this.onToggle,
     required this.modeVpn,
     required this.traffic,
     required this.startedAt,
@@ -1511,14 +1528,15 @@ class _DashboardPage extends StatelessWidget {
     required this.onRecheckNetwork,
     required this.profileName,
     required this.currentDelay,
+    required this.rulesMode,
+    required this.onRulesModeChanged,
+    required this.onShowProxies,
   });
 
   final VoidCallback onOpenSettings;
   final bool running;
-  final bool busy;
   final bool hasProfile;
   final String? currentNode;
-  final VoidCallback onToggle;
   final bool modeVpn;
   final ValueListenable<_Traffic> traffic;
   final DateTime? startedAt;
@@ -1527,6 +1545,81 @@ class _DashboardPage extends StatelessWidget {
   final VoidCallback onRecheckNetwork;
   final String? profileName;
   final int? currentDelay;
+  final bool rulesMode;
+  final ValueChanged<bool> onRulesModeChanged;
+  final VoidCallback onShowProxies;
+
+  Widget _card(BuildContext context, {required Widget child, VoidCallback? onTap}) {
+    return Material(
+      color: _cardColor(context),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(padding: const EdgeInsets.all(16), child: child),
+      ),
+    );
+  }
+
+  Widget _speedCard(
+    BuildContext context, {
+    required String label,
+    required String speed,
+    required String total,
+    required Color muted,
+  }) {
+    return _card(
+      context,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(color: muted, fontSize: 13)),
+          const SizedBox(height: 8),
+          Text(
+            speed,
+            style: Theme.of(context).textTheme.titleLarge,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 4),
+          Text(total, style: TextStyle(color: muted, fontSize: 12.5)),
+        ],
+      ),
+    );
+  }
+
+  Widget _modeChip(
+    BuildContext context, {
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: Material(
+        color: selected
+            ? _accent.withValues(alpha: 0.16)
+            : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: selected
+                    ? _accent
+                    : Theme.of(context).colorScheme.onSurface,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1534,16 +1627,15 @@ class _DashboardPage extends StatelessWidget {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
-    final String detail;
+    final String statusDetail;
     if (running) {
-      final delayText = currentDelay != null ? ' · $currentDelay ms' : '';
-      detail = modeVpn
-          ? '当前节点：${currentNode ?? '-'}$delayText · Xray 内核 · VPN 模式（系统代理）\n订阅：${profileName ?? '-'}'
-          : '当前节点：${currentNode ?? '-'}$delayText · Xray 内核 · 普通模式 127.0.0.1:7890\n订阅：${profileName ?? '-'}';
+      statusDetail = modeVpn
+          ? 'Xray 内核 · VPN 模式（系统代理）'
+          : 'Xray 内核 · 普通模式 127.0.0.1:7890';
     } else if (!hasProfile) {
-      detail = '先到「配置」页导入一个 Clash 配置。';
+      statusDetail = '先到「配置」页导入一个 Clash 配置';
     } else {
-      detail = '已就绪，节点：${currentNode ?? '-'} · 订阅：${profileName ?? '-'}';
+      statusDetail = '已就绪，点右下角按钮启动';
     }
     return _PageFrame(
       title: '仪表盘',
@@ -1552,157 +1644,183 @@ class _DashboardPage extends StatelessWidget {
         tooltip: '设置',
         onPressed: onOpenSettings,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (netBlocked) ...[
-            Container(
-              decoration: BoxDecoration(
-                color: Theme.of(context)
-                    .colorScheme
-                    .error
-                    .withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(16),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (netBlocked) ...[
+              Container(
+                decoration: BoxDecoration(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .error
+                      .withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'FlBox 当前无法联网',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      '域名解析失败、所有连接都会超时——通常是系统的分应用联网开关把 FlBox 关了'
+                      '（或是设备暂时离线）。去系统设置里确认「允许网络访问」已打开。',
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        FilledButton(
+                          onPressed: onOpenNetSettings,
+                          child: const Text('去打开联网开关'),
+                        ),
+                        const SizedBox(width: 12),
+                        TextButton(
+                          onPressed: onRecheckNetwork,
+                          child: const Text('重新检测'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-              padding: const EdgeInsets.all(20),
+              const SizedBox(height: 12),
+            ],
+            ValueListenableBuilder<_Traffic>(
+              valueListenable: traffic,
+              builder: (context, traffic, _) => Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _card(
+                    context,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: running
+                                    ? const Color(0xFF34A853)
+                                    : muted,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              running ? '运行中' : '未启动',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            if (running && startedAt != null) ...[
+                              const Spacer(),
+                              Text(
+                                _fmtDuration(
+                                    DateTime.now().difference(startedAt!)),
+                                style: TextStyle(color: muted),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(statusDetail, style: TextStyle(color: muted)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: _speedCard(
+                          context,
+                          label: '↑ 上行',
+                          speed: _fmtSpeed(traffic.speedUp),
+                          total: '共 ${_fmtBytes(traffic.up)}',
+                          muted: muted,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _speedCard(
+                          context,
+                          label: '↓ 下行',
+                          speed: _fmtSpeed(traffic.speedDown),
+                          total: '共 ${_fmtBytes(traffic.down)}',
+                          muted: muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            _card(
+              context,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'FlBox 当前无法联网',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    '域名解析失败、所有连接都会超时——通常是系统的分应用联网开关把 FlBox 关了'
-                    '（或是设备暂时离线）。去系统设置里确认「允许网络访问」已打开。',
-                  ),
-                  const SizedBox(height: 16),
+                  Text('出站模式', style: TextStyle(color: muted, fontSize: 13)),
+                  const SizedBox(height: 10),
                   Row(
                     children: [
-                      FilledButton(
-                        onPressed: onOpenNetSettings,
-                        child: const Text('去打开联网开关'),
+                      _modeChip(
+                        context,
+                        label: '全局模式',
+                        selected: !rulesMode,
+                        onTap: () => onRulesModeChanged(false),
                       ),
-                      const SizedBox(width: 12),
-                      TextButton(
-                        onPressed: onRecheckNetwork,
-                        child: const Text('重新检测'),
+                      const SizedBox(width: 10),
+                      _modeChip(
+                        context,
+                        label: '规则模式',
+                        selected: rulesMode,
+                        onTap: () => onRulesModeChanged(true),
                       ),
                     ],
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 16),
-          ],
-          ValueListenableBuilder<_Traffic>(
-            valueListenable: traffic,
-            builder: (context, traffic, _) => Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-          Container(
-            decoration: BoxDecoration(
-              color: _cardColor(context),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: running
-                            ? const Color(0xFF34A853)
-                            : muted,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      running ? '运行中' : '未启动',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    if (running && startedAt != null) ...[
-                      const Spacer(),
-                      Text(
-                        _fmtDuration(DateTime.now().difference(startedAt!)),
-                        style: TextStyle(color: muted),
-                      ),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Text(detail, style: TextStyle(color: muted)),
-              ],
-            ),
-          ),
-          if (running) ...[
-            const SizedBox(height: 16),
-            Container(
-              decoration: BoxDecoration(
-                color: _cardColor(context),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              padding: const EdgeInsets.all(20),
-              child: Row(
+            const SizedBox(height: 12),
+            _card(
+              context,
+              onTap: onShowProxies,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('↑ 上行', style: TextStyle(color: muted)),
-                        const SizedBox(height: 6),
-                        Text(
-                          _fmtSpeed(traffic.speedUp),
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '共 ${_fmtBytes(traffic.up)}',
-                          style: TextStyle(color: muted, fontSize: 13),
-                        ),
-                      ],
-                    ),
+                  Row(
+                    children: [
+                      Text('当前节点',
+                          style: TextStyle(color: muted, fontSize: 13)),
+                      const Spacer(),
+                      Icon(Icons.chevron_right, size: 18, color: muted),
+                    ],
                   ),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('↓ 下行', style: TextStyle(color: muted)),
-                        const SizedBox(height: 6),
-                        Text(
-                          _fmtSpeed(traffic.speedDown),
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '共 ${_fmtBytes(traffic.down)}',
-                          style: TextStyle(color: muted, fontSize: 13),
-                        ),
-                      ],
-                    ),
+                  const SizedBox(height: 8),
+                  Text(
+                    currentNode ?? '-',
+                    style: Theme.of(context).textTheme.titleMedium,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '订阅：${profileName ?? '-'}${currentDelay != null ? ' · $currentDelay ms' : ''}',
+                    style: TextStyle(color: muted, fontSize: 12.5),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
             ),
           ],
-              ],
-            ),
-          ),
-          const SizedBox(height: 24),
-          SizedBox(
-            height: 48,
-            child: FilledButton(
-              onPressed: busy ? null : onToggle,
-              child: Text(busy ? '处理中…' : (running ? '停止' : '启动')),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -1918,7 +2036,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.13.0 · app.flbox · Xray 内核',
+              'FlBox 0.14.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2077,8 +2195,14 @@ class _ProxiesPageState extends State<ProxiesPage> {
             // Builder, not a children list: with 30+ nodes the eager
             // list built every tile on every page rebuild (search
             // keystrokes, delay updates), which visibly hitched.
-            child: ListView.builder(
+            child: GridView.builder(
               padding: EdgeInsets.zero,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 10,
+                mainAxisExtent: 104,
+              ),
               itemCount: nodes.length,
               itemBuilder: (context, i) {
                 final node = nodes[i];
@@ -2102,8 +2226,9 @@ class _ProxiesPageState extends State<ProxiesPage> {
   }
 }
 
-/// One node row on the proxies page, split out so list rebuilds can
-/// reuse unchanged rows instead of re-creating every tile inline.
+/// One node card in the proxies grid (FlClash-style): name on top,
+/// type and latency along the bottom, selected card tinted and
+/// outlined with the accent color.
 class _NodeTile extends StatelessWidget {
   const _NodeTile({
     required this.node,
@@ -2129,43 +2254,80 @@ class _NodeTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Container(
-        decoration: BoxDecoration(
-          color: _cardColor(context),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: ListTile(
-          title: Text(node.name),
-          subtitle: Text(node.type, style: TextStyle(color: muted)),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
+    return Material(
+      color: selected
+          ? _accent.withValues(alpha: 0.12)
+          : _cardColor(context),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: selected
+                ? Border.all(color: _accent, width: 1.5)
+                : null,
+          ),
+          padding: const EdgeInsets.fromLTRB(12, 8, 4, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              IconButton(
-                icon: Icon(
-                  favorite ? Icons.star : Icons.star_border,
-                  color: favorite ? _accent : muted,
-                  size: 20,
-                ),
-                tooltip: '收藏',
-                onPressed: onFav,
-              ),
-              if (hasDelay)
-                Text(
-                  delay == null ? '超时' : '$delay ms',
-                  style: TextStyle(
-                    color: delayColor,
-                    fontWeight: FontWeight.w600,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        node.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13.5, height: 1.3),
+                      ),
+                    ),
                   ),
-                ),
-              if (selected) ...[
-                const SizedBox(width: 8),
-                const Icon(Icons.check_circle, color: _accent),
-              ],
+                  IconButton(
+                    icon: Icon(
+                      favorite ? Icons.star : Icons.star_border,
+                      color: favorite ? _accent : muted,
+                      size: 18,
+                    ),
+                    tooltip: '收藏',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    onPressed: onFav,
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  Text(
+                    node.type,
+                    style: TextStyle(color: muted, fontSize: 12),
+                  ),
+                  const Spacer(),
+                  if (hasDelay)
+                    Text(
+                      delay == null ? '超时' : '$delay ms',
+                      style: TextStyle(
+                        color: delayColor,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12.5,
+                      ),
+                    )
+                  else if (selected)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 8),
+                      child: Icon(Icons.check_circle,
+                          color: _accent, size: 16),
+                    ),
+                ],
+              ),
             ],
           ),
-          onTap: onTap,
         ),
       ),
     );

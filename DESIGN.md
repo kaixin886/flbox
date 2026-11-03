@@ -89,3 +89,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 
 - **规则库内置**：geoip.dat/geosite.dat 不再在手机端运行时下载。构建时由 Gradle 任务 `downloadGeoData`（android/app/build.gradle.kts）从 Loyalsoldier 规则库（jsdelivr 优先、GitHub 兜底，>1MB 校验，失败即构建失败）下载进 `src/main/assets/geo/` 打进 APK；运行时 Dart 经 MethodChannel `extractGeoData` 让 Kotlin 从 assets 本地复制到文档目录（后台线程），开规则模式即刻可用。手机端网络下载仅保留为 assets 缺失时的兜底路径；设置页「分流规则库」改为刷新内置版本。代价：APK 体积增加约 15–25MB。
 - **流畅度**：① 流量轮询（2 秒）改走 ValueNotifier，只重绘仪表盘状态/流量卡区域，不再每 tick 整壳四页重绘；② 玻璃导航去掉「模糊＋饱和度矩阵」复合滤镜，改为单个静态缓存的 sigma 16 模糊，导航整体套 RepaintBoundary 隔离重绘；③ 代理页节点列表改 ListView.builder＋独立 _NodeTile，不再整表急切构建。
+
+## 0.14 FlClash 式布局与 APK 瘦身（2026-11-03 晚，用户定）
+
+- **布局模仿 FlClash**：仪表盘改为卡片网格——状态卡（整行）＋上行/下行双卡（速度大字＋总量）＋出站模式卡（全局/规则两段切换，直接调 _setRulesMode）＋当前节点卡（点按跳代理页）；启动/停止改 FlClash 式右下角圆形悬浮钮（FAB，仅仪表盘显示，运行中为停止图标、处理中为转圈）。代理页节点改双列网格卡（高 104，选中卡 accent 描边＋淡底，名称两行省略，底部类型＋延迟）。页面边距 24→16、卡片圆角 20 更紧凑。导航样式设置保留（默认仍滑动玻璃），配色纪律不变。
+- **APK 瘦身**：android.packaging.jniLibs.useLegacyPackaging=true——.so 改回压缩存储（AGP 9 默认不压缩、APK 里是原样大小；Go 核心 .so 占 APK 大头且可压性好），安装时系统照常解出，装机占用不变、下载体积下降。规则库 dat 维持内置全量（assets 内已 deflate）。
