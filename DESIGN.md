@@ -106,3 +106,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **病根分析**：① 翻译器 domainStrategy 为 AsIs——域名型流量永远走不到 IP 规则，GEOIP,CN 只对裸 IP 连接生效，国内 App 多为域名先行，未命中域名规则就落 MATCH 进代理；② 机场 Clash 规则重度依赖 RULE-SET 规则集与 Clash 的 DNS 语义，翻译器整段跳过 RULE-SET，分流表残缺。两者叠加即「国内软件没网/绕远」。
 - **改法**：规则模式不再翻译订阅规则，改为 v2ray 原版绕过大陆预设——domainStrategy 改 IPIfNonMatch（域名未命中先解析、再用 IP 规则复判，这是原版的关键）、geosite:cn 直连、geoip:cn 直连、私有段直连、其余走代理；配套分流 DNS（geosite:cn 域名走 223.5.5.5 且 expectedIPs 限定 geoip:cn，其余走 8.8.8.8，v2rayNG 同款）；嗅探 destOverride 补 quic。translateRule 及计数逻辑删除，rules_check_test 改为预设断言；真启动测试拆为全局（常开）＋预设（FLBOX_TEST_ASSETS 指向 geodata 目录时启用），本地已用 Loyalsoldier 全量 dat 实测 Start 通过。
 - **文案**：设置页规则模式副标题与切换 toast 改为「v2ray 原版绕过大陆」。
+
+## 0.17 订阅自动更新可自选（2026-11-03 晚，用户定）
+
+- **改法**：原全局开关「订阅每天自动更新」（只更当前订阅、固定 24 小时）拆成两层——① **每个订阅单独开关**：SubProfile 新增 autoUpdate 字段，配置页订阅卡片上（仅链接订阅，本地文件无此行）有「自动更新」开关；② **全局间隔可选**：设置页原开关位改为间隔选项行（6/12/24/48/72 小时，prefs sub_auto_interval_hours，默认 24）。启动检查改为遍历全部订阅，开启且超间隔者依次静默拉取（沿用 _fetchSubscription，非当前订阅只更新存储、当前订阅才重新激活）。
+- **迁移**：旧 subs_v2 无 autoUpdate 字段时，以旧全局开关 sub_auto_update 的值作种子（开过全局＝每份订阅默认开启），恢复后回写一次固化。

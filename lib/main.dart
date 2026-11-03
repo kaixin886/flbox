@@ -106,6 +106,7 @@ class SubProfile {
     this.subInfo,
     this.nodeCount = 0,
     required this.updatedAtMs,
+    this.autoUpdate = false,
   });
 
   final String id;
@@ -114,6 +115,7 @@ class SubProfile {
   String? subInfo;
   int nodeCount;
   int updatedAtMs;
+  bool autoUpdate;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -122,15 +124,23 @@ class SubProfile {
         'subInfo': subInfo,
         'nodeCount': nodeCount,
         'updatedAtMs': updatedAtMs,
+        'autoUpdate': autoUpdate,
       };
 
-  factory SubProfile.fromJson(Map<String, dynamic> j) => SubProfile(
+  /// [autoUpdateSeed] migrates profiles saved before the per-sub
+  /// flag existed: they inherit the old global auto-update switch.
+  factory SubProfile.fromJson(
+    Map<String, dynamic> j, {
+    bool autoUpdateSeed = false,
+  }) =>
+      SubProfile(
         id: j['id'] as String,
         name: j['name'] as String? ?? '订阅',
         url: j['url'] as String?,
         subInfo: j['subInfo'] as String?,
         nodeCount: (j['nodeCount'] as num?)?.toInt() ?? 0,
         updatedAtMs: (j['updatedAtMs'] as num?)?.toInt() ?? 0,
+        autoUpdate: (j['autoUpdate'] as bool?) ?? autoUpdateSeed,
       );
 }
 
@@ -175,7 +185,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _geoReady = false;
   Set<String> _favNodes = {};
   bool _autoConnect = false;
-  bool _subAutoUpdate = false;
+  int _subAutoIntervalHours = 24;
   Set<String> _bypassPkgs = {};
   bool _netBlocked = false;
   bool _batteryIgnored = false;
@@ -257,7 +267,8 @@ class _HomeShellState extends State<HomeShell> {
     _modeVpn = prefs.getBool('mode_vpn') ?? true;
     _rulesMode = prefs.getBool('rules_mode') ?? false;
     _autoConnect = prefs.getBool('auto_connect') ?? false;
-    _subAutoUpdate = prefs.getBool('sub_auto_update') ?? false;
+    _subAutoIntervalHours = prefs.getInt('sub_auto_interval_hours') ?? 24;
+    final legacySubAuto = prefs.getBool('sub_auto_update') ?? false;
     final favRaw = prefs.getString('fav_nodes');
     if (favRaw != null) {
       try {
@@ -284,9 +295,14 @@ class _HomeShellState extends State<HomeShell> {
         final list = jsonDecode(subsRaw) as List<dynamic>;
         _subs = [
           for (final e in list)
-            SubProfile.fromJson(e as Map<String, dynamic>),
+            SubProfile.fromJson(
+              e as Map<String, dynamic>,
+              autoUpdateSeed: legacySubAuto,
+            ),
         ];
         _activeSubId = prefs.getString('active_sub');
+        // Bake the autoUpdate migration into storage.
+        await _persistSubs();
       } else {
         // Migration from the single-profile layout (<= 0.10): the one
         // saved profile.yaml becomes the first subscription entry.
@@ -334,12 +350,16 @@ class _HomeShellState extends State<HomeShell> {
     if (_rulesMode && !_geoReady) {
       await _ensureGeoData();
     }
-    if (_subAutoUpdate) {
-      final active = _activeSub;
-      if (active?.url != null &&
-          DateTime.now().millisecondsSinceEpoch - active!.updatedAtMs >
-              86400000) {
-        await _fetchSubscription(active.url!, updateSub: active);
+    // Per-subscription auto-update: each URL subscription opts in
+    // on its own card; the check interval is a global setting.
+    // Runs once at startup, like the old daily check did.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final intervalMs = _subAutoIntervalHours * 3600000;
+    for (final sub in _subs) {
+      if (sub.autoUpdate &&
+          sub.url != null &&
+          nowMs - sub.updatedAtMs > intervalMs) {
+        await _fetchSubscription(sub.url!, updateSub: sub);
       }
     }
     if (_autoConnect && _profile != null && !_running && mounted) {
@@ -449,10 +469,15 @@ class _HomeShellState extends State<HomeShell> {
     setState(() => _autoConnect = value);
   }
 
-  Future<void> _setSubAutoUpdate(bool value) async {
+  Future<void> _setSubAutoInterval(int hours) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('sub_auto_update', value);
-    setState(() => _subAutoUpdate = value);
+    await prefs.setInt('sub_auto_interval_hours', hours);
+    setState(() => _subAutoIntervalHours = hours);
+  }
+
+  Future<void> _toggleSubAutoUpdate(SubProfile sub) async {
+    setState(() => sub.autoUpdate = !sub.autoUpdate);
+    await _persistSubs();
   }
 
   Future<void> _toggleFav(String name) async {
@@ -1004,8 +1029,8 @@ class _HomeShellState extends State<HomeShell> {
           },
           autoConnect: _autoConnect,
           onAutoConnectChanged: _setAutoConnect,
-          subAutoUpdate: _subAutoUpdate,
-          onSubAutoUpdateChanged: _setSubAutoUpdate,
+          autoIntervalHours: _subAutoIntervalHours,
+          onAutoIntervalChanged: _setSubAutoInterval,
         ),
       ),
     );
@@ -1083,6 +1108,7 @@ class _HomeShellState extends State<HomeShell> {
             onSwitch: _switchSub,
             onUpdate: (sub) => _fetchSubscription(sub.url!, updateSub: sub),
             onDelete: _deleteSub,
+            onToggleAutoUpdate: _toggleSubAutoUpdate,
           ),
           LogsPage(),
         ],
@@ -1844,8 +1870,8 @@ class _SettingsPage extends StatefulWidget {
     required this.onUpdateGeo,
     required this.autoConnect,
     required this.onAutoConnectChanged,
-    required this.subAutoUpdate,
-    required this.onSubAutoUpdateChanged,
+    required this.autoIntervalHours,
+    required this.onAutoIntervalChanged,
   });
 
   final NavStyle navStyle;
@@ -1862,8 +1888,8 @@ class _SettingsPage extends StatefulWidget {
   final VoidCallback onUpdateGeo;
   final bool autoConnect;
   final ValueChanged<bool> onAutoConnectChanged;
-  final bool subAutoUpdate;
-  final ValueChanged<bool> onSubAutoUpdateChanged;
+  final int autoIntervalHours;
+  final ValueChanged<int> onAutoIntervalChanged;
 
   @override
   State<_SettingsPage> createState() => _SettingsPageState();
@@ -1872,6 +1898,7 @@ class _SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<_SettingsPage> {
   late NavStyle _navStyle = widget.navStyle;
   late bool _modeVpn = widget.modeVpn;
+  late int _autoIntervalHours = widget.autoIntervalHours;
 
   @override
   Widget build(BuildContext context) {
@@ -1993,15 +2020,28 @@ class _SettingsPageState extends State<_SettingsPage> {
             value: widget.autoConnect,
             onChanged: widget.onAutoConnectChanged,
           ),
-          SwitchListTile(
+          ListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('订阅每天自动更新'),
+            title: const Text('订阅自动更新间隔'),
             subtitle: Text(
-              '当前订阅超过 24 小时未更新时，启动时自动拉取',
+              '启动时检查已开启自动更新的订阅；每个订阅的开关在配置页的订阅卡片上',
               style: TextStyle(color: muted),
             ),
-            value: widget.subAutoUpdate,
-            onChanged: widget.onSubAutoUpdateChanged,
+          ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final h in const [6, 12, 24, 48, 72])
+                ChoiceChip(
+                  label: Text('$h 小时'),
+                  selected: _autoIntervalHours == h,
+                  onSelected: (_) {
+                    setState(() => _autoIntervalHours = h);
+                    widget.onAutoIntervalChanged(h);
+                  },
+                ),
+            ],
           ),
           const SizedBox(height: 24),
           Text('系统', style: Theme.of(context).textTheme.titleMedium),
@@ -2036,7 +2076,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.16.0 · app.flbox · Xray 内核',
+              'FlBox 0.17.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2372,6 +2412,7 @@ class ProfilesPage extends StatelessWidget {
     required this.onSwitch,
     required this.onUpdate,
     required this.onDelete,
+    required this.onToggleAutoUpdate,
   });
 
   final List<SubProfile> subs;
@@ -2382,6 +2423,7 @@ class ProfilesPage extends StatelessWidget {
   final ValueChanged<SubProfile> onSwitch;
   final ValueChanged<SubProfile> onUpdate;
   final ValueChanged<SubProfile> onDelete;
+  final ValueChanged<SubProfile> onToggleAutoUpdate;
 
   String _updatedLabel(int ms) {
     if (ms <= 0) return '';
@@ -2505,6 +2547,17 @@ class ProfilesPage extends StatelessWidget {
             const SizedBox(height: 4),
             Text(sub.subInfo!, style: TextStyle(color: muted)),
           ],
+          if (sub.url != null)
+            Row(
+              children: [
+                Text('自动更新', style: TextStyle(color: muted)),
+                const Spacer(),
+                Switch(
+                  value: sub.autoUpdate,
+                  onChanged: (_) => onToggleAutoUpdate(sub),
+                ),
+              ],
+            ),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
