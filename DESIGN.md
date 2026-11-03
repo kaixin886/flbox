@@ -127,3 +127,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **反馈**：普通导航栏「显示不全」。截图放大＋像素取样实锤：选中的目的地图标渲染为纯白（pill 区域白色像素 700、强调色像素 0），落在浅色 indicator 上等于没画出来，只剩文字标签。
 - **病根**：_theme 手搓 ColorScheme 时未设 secondaryContainer/onSecondaryContainer；Material NavigationBar 的选中图标色取 onSecondaryContainer，未指定时在本工程解析为白色。玻璃导航用自定义 _NavItemContent 显式配色，故只有普通样式中招。
 - **修法**：① ColorScheme 补 secondaryContainer/onSecondaryContainer（浅色底＋深强调色字）；② ThemeData 加 navigationBarTheme，iconTheme/labelTextStyle 按 selected 状态显式解析（选中＝强调色＋半粗）；③ _PlainNavBar 的目的地再带 selectedIcon 强调色，双保险。
+
+## 0.21 日志可靠性（2026-11-04 00:1x，真机反馈）
+
+- **反馈**：规则模式下日志页「暂无日志」（核心 running=true、自检 dial OK 的同时）。助手本地真启动对照实验：同一代码路径下全局/规则两模式均正常写日志（规则模式含 DNS 客户端行），故配置与翻译无罪，问题在设备端文件生命周期。
+- **头号嫌疑（已修）**：日志页「清空」原为删除文件——Xray 整场持有日志文件句柄，路径被删后后续日志全写进已脱链的 inode，页面永远读不到、直到核心重启才恢复，表象与模式无关、只与「在哪种模式下按过清空」有关。改：清空＝截断（writeAsString('')），保留同一文件。
+- **可观测性**：日志页新增文件状态行（不存在/字节数）；每次核心启动成功后由 Dart 追加一条 `[flbox] core started (vpn/rules/node)` 标记——启动后文件必存在且有内容，下次再遇「没日志」可一眼区分是读不到文件还是核心没写。
+- 本版同时包含 0.20 的普通导航栏选中图标修复，未单独构建 0.20 者直接构建本版。

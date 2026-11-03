@@ -982,6 +982,8 @@ class _HomeShellState extends State<HomeShell> {
         await _vpnChannel.invokeMethod('startCoreService');
       }
       CoreBridge().xrayStart(config, fd);
+      _logEvent(
+          'core started (vpn=$_modeVpn, rules=$_rulesMode, node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
       _startPolling();
@@ -2212,7 +2214,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.20.0 · app.flbox · Xray 内核',
+              'FlBox 0.21.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2733,6 +2735,7 @@ class LogsPage extends StatefulWidget {
 class _LogsPageState extends State<LogsPage> {
   String? _status;
   String _logTail = '';
+  String _logMeta = '';
   bool _loading = false;
 
   @override
@@ -2747,12 +2750,15 @@ class _LogsPageState extends State<LogsPage> {
       final docs = await getApplicationDocumentsDirectory();
       final file = File('${docs.path}/xray-error.log');
       if (await file.exists()) {
+        final size = await file.length();
+        _logMeta = '日志文件 $size 字节';
         final lines = await file.readAsLines();
         final tail = lines.length > 200
             ? lines.sublist(lines.length - 200)
             : lines;
         _logTail = tail.join('\n');
       } else {
+        _logMeta = '日志文件尚不存在（核心启动后创建）';
         _logTail = '';
       }
     } catch (_) {
@@ -2765,7 +2771,11 @@ class _LogsPageState extends State<LogsPage> {
     try {
       final docs = await getApplicationDocumentsDirectory();
       final file = File('${docs.path}/xray-error.log');
-      if (await file.exists()) await file.delete();
+      // Truncate, never delete: the core keeps the file open, and
+      // deleting the path would send all later lines to an unlinked
+      // inode (the page would show "no logs" until a core restart).
+      if (await file.exists()) await file.writeAsString('');
+      _logMeta = '日志文件已清空（截断）';
     } catch (_) {}
     if (mounted) setState(() => _logTail = '');
   }
@@ -2805,6 +2815,10 @@ class _LogsPageState extends State<LogsPage> {
               ),
             ],
           ),
+          if (_logMeta.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(_logMeta, style: TextStyle(color: muted, fontSize: 12)),
+          ],
           if (_status != null) ...[
             const SizedBox(height: 16),
             SelectableText(_status!),
