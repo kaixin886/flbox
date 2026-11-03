@@ -1,4 +1,6 @@
 import java.util.Base64
+import java.io.File
+import java.net.URL
 
 plugins {
     id("com.android.application")
@@ -41,13 +43,13 @@ val downloadGeoData by tasks.registering {
         val dir = geoAssetsDir.asFile
         dir.mkdirs()
         for ((name, urls) in sources) {
-            val target = java.io.File(dir, name)
+            val target = File(dir, name)
             if (target.exists() && target.length() > 1_000_000) continue
             var ok = false
             for (url in urls) {
                 try {
-                    val tmp = java.io.File(dir, "$name.tmp")
-                    java.net.URL(url).openStream().use { input ->
+                    val tmp = File(dir, "$name.tmp")
+                    URL(url).openStream().use { input ->
                         tmp.outputStream().use { output -> input.copyTo(output) }
                     }
                     if (tmp.length() > 1_000_000) {
