@@ -59,9 +59,9 @@ type SkippedNode struct {
 }
 
 type Result struct {
-	Nodes   []NodeInfo           `json:"nodes"`
-	Skipped []SkippedNode        `json:"skipped"`
-	Configs map[string]string    `json:"configs"`
+	Nodes   []NodeInfo        `json:"nodes"`
+	Skipped []SkippedNode     `json:"skipped"`
+	Configs map[string]string `json:"configs"`
 }
 
 var privateCIDRs = []string{
@@ -263,8 +263,8 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 		})
 	}
 	cfg := map[string]any{
-		"log":      logCfg,
-		"stats":    map[string]any{},
+		"log":   logCfg,
+		"stats": map[string]any{},
 		"policy": map[string]any{
 			"system": map[string]any{
 				"statsOutboundUplink":   true,
@@ -336,4 +336,82 @@ func Translate(clashYAML []byte, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("no node usable by xray in this profile")
 	}
 	return result, nil
+}
+
+type AllResult struct {
+	Config string         `json:"config"`
+	Ports  map[string]int `json:"ports"`
+}
+
+// TranslateAll builds ONE Xray config holding every supported node as
+// its own outbound, each fronted by a dedicated mixed inbound on
+// 127.0.0.1:20100+i. It exists for parallel latency tests: a single
+// core instance can probe all nodes at once instead of restarting
+// per node.
+func TranslateAll(clashYAML []byte, logPath string) (*AllResult, error) {
+	var cfg clashConfig
+	if err := yaml.Unmarshal(clashYAML, &cfg); err != nil {
+		return nil, fmt.Errorf("parse clash yaml: %w", err)
+	}
+	if len(cfg.Proxies) == 0 {
+		return nil, fmt.Errorf("no proxies in profile")
+	}
+	outbounds := []any{}
+	inbounds := []any{}
+	rules := []any{}
+	ports := map[string]int{}
+	idx := 0
+	for _, p := range cfg.Proxies {
+		outbound, err := nodeOutbound(p)
+		if err != nil {
+			continue
+		}
+		outTag := fmt.Sprintf("proxy-%d", idx)
+		outbound["tag"] = outTag
+		outbounds = append(outbounds, outbound)
+		port := 20100 + idx
+		inTag := fmt.Sprintf("in-%d", idx)
+		inbounds = append(inbounds, map[string]any{
+			"tag":      inTag,
+			"listen":   "127.0.0.1",
+			"port":     port,
+			"protocol": "mixed",
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls"},
+			},
+		})
+		rules = append(rules, map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{inTag},
+			"outboundTag": outTag,
+		})
+		ports[p.Name] = port
+		idx++
+	}
+	if idx == 0 {
+		return nil, fmt.Errorf("no node usable by xray in this profile")
+	}
+	outbounds = append(outbounds,
+		map[string]any{"tag": "direct", "protocol": "freedom"},
+		map[string]any{"tag": "block", "protocol": "blackhole"},
+	)
+	logCfg := map[string]any{"loglevel": "warning", "access": "none"}
+	if logPath != "" {
+		logCfg["error"] = logPath
+	}
+	full := map[string]any{
+		"log":       logCfg,
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
+		"routing": map[string]any{
+			"domainStrategy": "AsIs",
+			"rules":          rules,
+		},
+	}
+	raw, err := json.Marshal(full)
+	if err != nil {
+		return nil, err
+	}
+	return &AllResult{Config: string(raw), Ports: ports}, nil
 }

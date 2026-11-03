@@ -139,6 +139,19 @@ func FlboxXrayTranslate(clashYAML, mode, logPath *C.char) *C.char {
 	return C.CString(out)
 }
 
+//export FlboxXrayTranslateAll
+func FlboxXrayTranslateAll(clashYAML, logPath *C.char) *C.char {
+	out, err := xrayTranslateAll(
+		C.GoString(clashYAML),
+		C.GoString(logPath),
+	)
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
+}
+
 //export FlboxXrayStart
 func FlboxXrayStart(configJSON *C.char, tunFd C.int) *C.char {
 	return recordErr(xrayStart(C.GoString(configJSON), int(tunFd)))

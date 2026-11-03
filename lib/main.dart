@@ -95,6 +95,44 @@ enum NavStyle {
   final String label;
 }
 
+/// One saved subscription / local profile. Several can coexist; one
+/// is active at a time and feeds the core.
+class SubProfile {
+  SubProfile({
+    required this.id,
+    required this.name,
+    this.url,
+    this.subInfo,
+    this.nodeCount = 0,
+    required this.updatedAtMs,
+  });
+
+  final String id;
+  String name;
+  String? url;
+  String? subInfo;
+  int nodeCount;
+  int updatedAtMs;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'url': url,
+        'subInfo': subInfo,
+        'nodeCount': nodeCount,
+        'updatedAtMs': updatedAtMs,
+      };
+
+  factory SubProfile.fromJson(Map<String, dynamic> j) => SubProfile(
+        id: j['id'] as String,
+        name: j['name'] as String? ?? '订阅',
+        url: j['url'] as String?,
+        subInfo: j['subInfo'] as String?,
+        nodeCount: (j['nodeCount'] as num?)?.toInt() ?? 0,
+        updatedAtMs: (j['updatedAtMs'] as num?)?.toInt() ?? 0,
+      );
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -118,7 +156,8 @@ class _HomeShellState extends State<HomeShell> {
   Map<String, int?> _delays = {};
   bool _testing = false;
   Completer<int>? _tunReady;
-  String? _profileUrl;
+  List<SubProfile> _subs = [];
+  String? _activeSubId;
   Set<String> _bypassPkgs = {};
   bool _netBlocked = false;
   bool _batteryIgnored = false;
@@ -175,10 +214,32 @@ class _HomeShellState extends State<HomeShell> {
     } catch (_) {}
   }
 
+  SubProfile? get _activeSub {
+    for (final s in _subs) {
+      if (s.id == _activeSubId) return s;
+    }
+    return null;
+  }
+
+  File _subFile(Directory docs, String id) =>
+      File('${docs.path}/sub_$id.yaml');
+
+  Future<void> _persistSubs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'subs_v2',
+      jsonEncode([for (final s in _subs) s.toJson()]),
+    );
+    if (_activeSubId != null) {
+      await prefs.setString('active_sub', _activeSubId!);
+    } else {
+      await prefs.remove('active_sub');
+    }
+  }
+
   Future<void> _restore() async {
     final prefs = await SharedPreferences.getInstance();
     _modeVpn = prefs.getBool('mode_vpn') ?? true;
-    _profileUrl = prefs.getString('profile_url');
     final bypassRaw = prefs.getString('bypass_pkgs');
     if (bypassRaw != null) {
       try {
@@ -192,24 +253,53 @@ class _HomeShellState extends State<HomeShell> {
     try {
       final docs = await getApplicationDocumentsDirectory();
       _logPath = '${docs.path}/xray-error.log';
-      final file = File('${docs.path}/profile.yaml');
-      if (await file.exists()) {
-        final yaml = await file.readAsString();
-        _profileYaml = yaml;
-        final profile = CoreBridge().translateXray(
-          yaml,
-          vpn: _modeVpn,
-          logPath: _logPath,
-        );
-        final stored = prefs.getString('selected_node');
-        setState(() {
-          _profile = profile;
-          _profileName = prefs.getString('profile_name') ?? '已保存的配置';
-          _selectedNode =
-              profile.nodes.any((n) => n.name == stored)
-                  ? stored
-                  : profile.nodes.first.name;
-        });
+      final subsRaw = prefs.getString('subs_v2');
+      if (subsRaw != null) {
+        final list = jsonDecode(subsRaw) as List<dynamic>;
+        _subs = [
+          for (final e in list)
+            SubProfile.fromJson(e as Map<String, dynamic>),
+        ];
+        _activeSubId = prefs.getString('active_sub');
+      } else {
+        // Migration from the single-profile layout (<= 0.10): the one
+        // saved profile.yaml becomes the first subscription entry.
+        final legacy = File('${docs.path}/profile.yaml');
+        if (await legacy.exists()) {
+          final sub = SubProfile(
+            id: 'legacy',
+            name: prefs.getString('profile_name') ?? '已保存的配置',
+            url: prefs.getString('profile_url'),
+            updatedAtMs: (await legacy.lastModified()).millisecondsSinceEpoch,
+          );
+          await _subFile(docs, sub.id)
+              .writeAsString(await legacy.readAsString());
+          _subs = [sub];
+          _activeSubId = sub.id;
+          await _persistSubs();
+        }
+      }
+      final active = _activeSub;
+      if (active != null) {
+        final file = _subFile(docs, active.id);
+        if (await file.exists()) {
+          final yaml = await file.readAsString();
+          _profileYaml = yaml;
+          final profile = CoreBridge().translateXray(
+            yaml,
+            vpn: _modeVpn,
+            logPath: _logPath,
+          );
+          final stored = prefs.getString('selected_node');
+          setState(() {
+            _profile = profile;
+            _profileName = active.name;
+            _selectedNode =
+                profile.nodes.any((n) => n.name == stored)
+                    ? stored
+                    : profile.nodes.first.name;
+          });
+        }
       }
     } catch (_) {
       // A stale or corrupt saved profile must not block startup.
@@ -221,13 +311,10 @@ class _HomeShellState extends State<HomeShell> {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// Shared landing path for file import and subscription fetch.
-  /// A null [url] means a local file (and clears any stored URL).
-  Future<void> _applyProfileYaml(
-    String text, {
-    required String name,
-    String? url,
-  }) async {
+  /// Translates [text] and makes it the live profile (used whenever a
+  /// subscription becomes active). The node selection survives when
+  /// the new profile has a node with the same name.
+  Future<void> _activateYaml(String text, {required String name}) async {
     final docs = await getApplicationDocumentsDirectory();
     _logPath = '${docs.path}/xray-error.log';
     final profile = CoreBridge().translateXray(
@@ -236,27 +323,110 @@ class _HomeShellState extends State<HomeShell> {
       logPath: _logPath,
     );
     _profileYaml = text;
-    await File('${docs.path}/profile.yaml').writeAsString(text);
     final prefs = await SharedPreferences.getInstance();
     final selected =
         profile.nodes.any((n) => n.name == _selectedNode)
             ? _selectedNode!
             : profile.nodes.first.name;
-    await prefs.setString('profile_name', name);
     await prefs.setString('selected_node', selected);
-    if (url != null) {
-      await prefs.setString('profile_url', url);
-    } else {
-      await prefs.remove('profile_url');
-    }
     setState(() {
       _profile = profile;
       _profileName = name;
       _selectedNode = selected;
-      _profileUrl = url;
       _delays = {};
     });
+  }
+
+  /// Adds a new subscription entry from YAML text and activates it.
+  Future<void> _addSubFromYaml(
+    String text, {
+    required String name,
+    String? url,
+    String? subInfo,
+  }) async {
+    final docs = await getApplicationDocumentsDirectory();
+    _logPath = '${docs.path}/xray-error.log';
+    final profile = CoreBridge().translateXray(
+      text,
+      vpn: _modeVpn,
+      logPath: _logPath,
+    );
+    final sub = SubProfile(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      name: name,
+      url: url,
+      subInfo: subInfo,
+      nodeCount: profile.nodes.length,
+      updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    await _subFile(docs, sub.id).writeAsString(text);
+    _subs = [..._subs, sub];
+    _activeSubId = sub.id;
+    await _persistSubs();
+    await _activateYaml(text, name: name);
     _toast('已导入 ${profile.nodes.length} 个可用节点');
+  }
+
+  Future<void> _switchSub(SubProfile sub) async {
+    if (sub.id == _activeSubId) return;
+    if (_running) {
+      _toast('先停止再切换订阅');
+      return;
+    }
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final text = await _subFile(docs, sub.id).readAsString();
+      _activeSubId = sub.id;
+      await _persistSubs();
+      await _activateYaml(text, name: sub.name);
+      _toast('已切换到 ${sub.name}');
+    } catch (e) {
+      _toast('切换失败：$e');
+    }
+  }
+
+  Future<void> _deleteSub(SubProfile sub) async {
+    if (_running && sub.id == _activeSubId) {
+      _toast('先停止再删除正在用的订阅');
+      return;
+    }
+    final docs = await getApplicationDocumentsDirectory();
+    try {
+      await _subFile(docs, sub.id).delete();
+    } catch (_) {}
+    final wasActive = sub.id == _activeSubId;
+    _subs = [for (final s in _subs) if (s.id != sub.id) s];
+    if (!wasActive) {
+      await _persistSubs();
+      setState(() {});
+      _toast('已删除 ${sub.name}');
+      return;
+    }
+    _activeSubId = _subs.isEmpty ? null : _subs.first.id;
+    await _persistSubs();
+    try {
+      if (_activeSub != null) {
+        final text = await _subFile(docs, _activeSub!.id).readAsString();
+        await _activateYaml(text, name: _activeSub!.name);
+      } else {
+        setState(() {
+          _profile = null;
+          _profileName = null;
+          _profileYaml = null;
+          _selectedNode = null;
+          _delays = {};
+        });
+      }
+    } catch (_) {
+      setState(() {
+        _profile = null;
+        _profileName = null;
+        _profileYaml = null;
+        _selectedNode = null;
+        _delays = {};
+      });
+    }
+    _toast('已删除 ${sub.name}');
   }
 
   Future<void> _importProfile() async {
@@ -270,7 +440,7 @@ class _HomeShellState extends State<HomeShell> {
     final file = File(picked.files.single.path!);
     try {
       final text = await file.readAsString();
-      await _applyProfileYaml(text, name: picked.files.single.name);
+      await _addSubFromYaml(text, name: picked.files.single.name);
     } on CoreException catch (e) {
       _toast('导入失败：${e.message}');
     } catch (e) {
@@ -279,7 +449,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<String?> _askUrl() async {
-    final controller = TextEditingController(text: _profileUrl ?? '');
+    final controller = TextEditingController();
     final value = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -307,7 +477,40 @@ class _HomeShellState extends State<HomeShell> {
     return (value == null || value.isEmpty) ? null : value;
   }
 
-  Future<void> _fetchSubscription(String url) async {
+  /// Formats a subscription-userinfo header (bytes / epoch seconds)
+  /// into a short human line, or null when unusable.
+  String? _formatSubInfo(String? raw) {
+    if (raw == null) return null;
+    final kv = <String, String>{};
+    for (final part in raw.split(';')) {
+      final eq = part.indexOf('=');
+      if (eq > 0) {
+        kv[part.substring(0, eq).trim()] = part.substring(eq + 1).trim();
+      }
+    }
+    final up = double.tryParse(kv['upload'] ?? '');
+    final down = double.tryParse(kv['download'] ?? '');
+    final total = double.tryParse(kv['total'] ?? '');
+    if (up == null || down == null || total == null || total <= 0) {
+      return null;
+    }
+    String gb(double bytes) => (bytes / 1073741824)
+        .toStringAsFixed(2)
+        .replaceFirst(RegExp(r'\.?0+$'), '');
+    var out = '已用 ${gb(up + down)} / 共 ${gb(total)} GB';
+    final expire = int.tryParse(kv['expire'] ?? '');
+    if (expire != null && expire > 0) {
+      final d = DateTime.fromMillisecondsSinceEpoch(expire * 1000);
+      final mm = d.month.toString().padLeft(2, '0');
+      final dd = d.day.toString().padLeft(2, '0');
+      out += ' · 到期 ${d.year}-$mm-$dd';
+    }
+    return out;
+  }
+
+  /// Fetches a subscription URL. With [updateSub] it refreshes that
+  /// entry in place; without, it adds a new entry.
+  Future<void> _fetchSubscription(String url, {SubProfile? updateSub}) async {
     final client = HttpClient();
     try {
       client.userAgent = 'ClashMeta/1.0';
@@ -321,13 +524,38 @@ class _HomeShellState extends State<HomeShell> {
         _toast('拉取失败：HTTP ${response.statusCode}');
         return;
       }
+      final subInfo =
+          _formatSubInfo(response.headers.value('subscription-userinfo'));
       final text = await response.transform(utf8.decoder).join();
-      final host = Uri.parse(url).host;
-      await _applyProfileYaml(
-        text,
-        name: host.isEmpty ? '订阅配置' : host,
-        url: url,
-      );
+      if (updateSub != null) {
+        final docs = await getApplicationDocumentsDirectory();
+        _logPath = '${docs.path}/xray-error.log';
+        final profile = CoreBridge().translateXray(
+          text,
+          vpn: _modeVpn,
+          logPath: _logPath,
+        );
+        await _subFile(docs, updateSub.id).writeAsString(text);
+        updateSub
+          ..subInfo = subInfo ?? updateSub.subInfo
+          ..nodeCount = profile.nodes.length
+          ..updatedAtMs = DateTime.now().millisecondsSinceEpoch;
+        await _persistSubs();
+        if (updateSub.id == _activeSubId) {
+          await _activateYaml(text, name: updateSub.name);
+        } else {
+          setState(() {});
+        }
+        _toast('订阅已更新：${profile.nodes.length} 个节点');
+      } else {
+        final host = Uri.parse(url).host;
+        await _addSubFromYaml(
+          text,
+          name: host.isEmpty ? '订阅配置' : host,
+          url: url,
+          subInfo: subInfo,
+        );
+      }
     } on CoreException catch (e) {
       _toast('订阅内容不可用：${e.message}');
     } catch (e) {
@@ -340,36 +568,6 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _importFromUrl() async {
     final url = await _askUrl();
     if (url != null) await _fetchSubscription(url);
-  }
-
-  Future<void> _updateSubscription() async {
-    final url = _profileUrl;
-    if (url == null) return;
-    await _fetchSubscription(url);
-  }
-
-  Future<void> _deleteProfile() async {
-    if (_running) {
-      _toast('先停止再删除配置');
-      return;
-    }
-    final docs = await getApplicationDocumentsDirectory();
-    try {
-      await File('${docs.path}/profile.yaml').delete();
-    } catch (_) {}
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('profile_name');
-    await prefs.remove('profile_url');
-    await prefs.remove('selected_node');
-    setState(() {
-      _profile = null;
-      _profileName = null;
-      _profileYaml = null;
-      _profileUrl = null;
-      _selectedNode = null;
-      _delays = {};
-    });
-    _toast('已删除配置');
   }
 
   Future<void> _setBypassPkgs(Set<String> pkgs) async {
@@ -510,71 +708,68 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  Future<int?> _probePort(int port) async {
+    HttpClient? client;
+    try {
+      final sw = Stopwatch()..start();
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      client.findProxy = (_) => 'PROXY 127.0.0.1:$port';
+      final req = await client
+          .getUrl(Uri.parse('http://www.gstatic.com/generate_204'))
+          .timeout(const Duration(seconds: 5));
+      final resp = await req.close().timeout(const Duration(seconds: 5));
+      await resp.drain<void>();
+      sw.stop();
+      return (resp.statusCode == 204 || resp.statusCode == 200)
+          ? sw.elapsedMilliseconds
+          : null;
+    } catch (_) {
+      return null;
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  /// Parallel latency test: one temporary instance carries every node
+  /// on its own local port, and six workers probe them concurrently.
+  /// The previously running node (if any) is restored afterwards.
   Future<void> _testAll() async {
     if (_testing || _profile == null || _profileYaml == null) return;
-    // When idle, the profile configs may carry a tun inbound that
-    // needs a real VpnService fd, so measure with local-mode configs.
-    XrayProfile testProfile;
-    var fd = 0;
-    if (_running) {
-      testProfile = _profile!;
-      fd = _modeVpn ? _tunFd : 0;
-    } else {
-      try {
-        testProfile = CoreBridge().translateXray(
-          _profileYaml!,
-          vpn: false,
-          logPath: '',
-        );
-      } catch (e) {
-        _toast('测速准备失败：$e');
-        return;
-      }
-    }
     final wasRunning = _running;
     final prevNode = _selectedNode;
+    final fd = _modeVpn ? _tunFd : 0;
     setState(() {
       _testing = true;
       _delays = {};
     });
-    for (final node in testProfile.nodes) {
-      if (!mounted || !_testing) break;
-      final cfg = testProfile.configs[node.name];
-      if (cfg == null) continue;
-      int? ms;
-      HttpClient? client;
-      try {
-        CoreBridge().xrayStart(cfg, fd);
-        final sw = Stopwatch()..start();
-        client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 5);
-        client.findProxy = (_) => 'PROXY 127.0.0.1:7890';
-        final req = await client
-            .getUrl(Uri.parse('http://www.gstatic.com/generate_204'))
-            .timeout(const Duration(seconds: 5));
-        final resp = await req.close().timeout(const Duration(seconds: 5));
-        await resp.drain<void>();
-        sw.stop();
-        ms = (resp.statusCode == 204 || resp.statusCode == 200)
-            ? sw.elapsedMilliseconds
-            : null;
-      } catch (_) {
-        ms = null;
-      } finally {
-        client?.close(force: true);
-      }
-      if (mounted) {
-        setState(() => _delays = {..._delays, node.name: ms});
-      }
-    }
     try {
-      if (wasRunning && prevNode != null) {
-        CoreBridge().xrayStart(_profile!.configs[prevNode]!, fd);
-      } else if (!wasRunning) {
-        CoreBridge().xrayStop();
+      final all = CoreBridge().translateAllXray(_profileYaml!, logPath: '');
+      CoreBridge().xrayStart(all.config, 0);
+      final entries = all.ports.entries.toList();
+      var next = 0;
+      Future<void> worker() async {
+        while (next < entries.length) {
+          final entry = entries[next++];
+          final ms = await _probePort(entry.value);
+          if (mounted) {
+            setState(() => _delays = {..._delays, entry.key: ms});
+          }
+        }
       }
-    } catch (_) {}
-    if (mounted) setState(() => _testing = false);
+
+      await Future.wait([for (var i = 0; i < 6; i++) worker()]);
+    } catch (e) {
+      _toast('测速失败：$e');
+    } finally {
+      try {
+        if (wasRunning && prevNode != null) {
+          CoreBridge().xrayStart(_profile!.configs[prevNode]!, fd);
+        } else if (!wasRunning) {
+          CoreBridge().xrayStop();
+        }
+      } catch (_) {}
+      if (mounted) setState(() => _testing = false);
+    }
   }
 
   Future<void> _selectNode(String name) async {
@@ -669,9 +864,11 @@ class _HomeShellState extends State<HomeShell> {
             netBlocked: _netBlocked,
             onOpenNetSettings: _openNetSettings,
             onRecheckNetwork: _checkNetwork,
+            profileName: _profileName,
           ),
           ProxiesPage(
             profile: _profile,
+            profileName: _profileName,
             selectedNode: _selectedNode,
             onSelect: _selectNode,
             delays: _delays,
@@ -679,14 +876,14 @@ class _HomeShellState extends State<HomeShell> {
             onTestAll: _profile == null ? null : _testAll,
           ),
           ProfilesPage(
-            profile: _profile,
-            profileName: _profileName,
+            subs: _subs,
+            activeSubId: _activeSubId,
+            activeSkipped: _profile?.skipped ?? const [],
             onImport: _importProfile,
-            profileUrl: _profileUrl,
             onImportUrl: _importFromUrl,
-            onUpdateSubscription:
-                _profileUrl == null ? null : _updateSubscription,
-            onDelete: _profile == null ? null : _deleteProfile,
+            onSwitch: _switchSub,
+            onUpdate: (sub) => _fetchSubscription(sub.url!, updateSub: sub),
+            onDelete: _deleteSub,
           ),
           LogsPage(),
         ],
@@ -1118,6 +1315,7 @@ class DashboardPage extends StatelessWidget {
     required this.netBlocked,
     required this.onOpenNetSettings,
     required this.onRecheckNetwork,
+    required this.profileName,
   });
 
   final VoidCallback onOpenSettings;
@@ -1135,6 +1333,7 @@ class DashboardPage extends StatelessWidget {
   final bool netBlocked;
   final VoidCallback onOpenNetSettings;
   final VoidCallback onRecheckNetwork;
+  final String? profileName;
 
   @override
   Widget build(BuildContext context) {
@@ -1145,12 +1344,12 @@ class DashboardPage extends StatelessWidget {
     final String detail;
     if (running) {
       detail = modeVpn
-          ? '当前节点：${currentNode ?? '-'} · Xray 内核 · VPN 模式（系统代理）'
-          : '当前节点：${currentNode ?? '-'} · Xray 内核 · 普通模式 127.0.0.1:7890';
+          ? '当前节点：${currentNode ?? '-'} · Xray 内核 · VPN 模式（系统代理）\n订阅：${profileName ?? '-'}'
+          : '当前节点：${currentNode ?? '-'} · Xray 内核 · 普通模式 127.0.0.1:7890\n订阅：${profileName ?? '-'}';
     } else if (!hasProfile) {
       detail = '先到「配置」页导入一个 Clash 配置。';
     } else {
-      detail = '已就绪，节点：${currentNode ?? '-'}';
+      detail = '已就绪，节点：${currentNode ?? '-'} · 订阅：${profileName ?? '-'}';
     }
     return _PageFrame(
       title: '仪表盘',
@@ -1448,6 +1647,13 @@ class _SettingsPageState extends State<_SettingsPage> {
               style: TextStyle(color: muted),
             ),
           ),
+          const SizedBox(height: 32),
+          Center(
+            child: Text(
+              'FlBox 0.11.0 · app.flbox · Xray 内核',
+              style: TextStyle(color: muted, fontSize: 12),
+            ),
+          ),
         ],
       ),
     );
@@ -1458,6 +1664,7 @@ class ProxiesPage extends StatefulWidget {
   const ProxiesPage({
     super.key,
     required this.profile,
+    required this.profileName,
     required this.selectedNode,
     required this.onSelect,
     required this.delays,
@@ -1466,6 +1673,7 @@ class ProxiesPage extends StatefulWidget {
   });
 
   final XrayProfile? profile;
+  final String? profileName;
   final String? selectedNode;
   final ValueChanged<String> onSelect;
   final Map<String, int?> delays;
@@ -1478,6 +1686,7 @@ class ProxiesPage extends StatefulWidget {
 
 class _ProxiesPageState extends State<ProxiesPage> {
   String _query = '';
+  int _sortMode = 0; // 0 智能（测速优先）· 1 按延迟 · 2 按名称
 
   Color _delayColor(int? ms) {
     if (ms == null) return Colors.redAccent;
@@ -1509,16 +1718,30 @@ class _ProxiesPageState extends State<ProxiesPage> {
     final indexed = <(int, XrayNode)>[
       for (var i = 0; i < profile.nodes.length; i++) (i, profile.nodes[i]),
     ];
-    indexed.sort((a, b) {
-      final byRank = rank(a.$2).compareTo(rank(b.$2));
-      if (byRank != 0) return byRank;
-      if (rank(a.$2) == 0) {
-        final byDelay =
-            widget.delays[a.$2.name]!.compareTo(widget.delays[b.$2.name]!);
-        if (byDelay != 0) return byDelay;
-      }
-      return a.$1.compareTo(b.$1);
-    });
+    if (_sortMode == 2) {
+      indexed.sort((a, b) => a.$2.name.compareTo(b.$2.name));
+    } else if (_sortMode == 1) {
+      indexed.sort((a, b) {
+        final da = widget.delays[a.$2.name];
+        final db = widget.delays[b.$2.name];
+        if (da == null && db == null) return a.$1.compareTo(b.$1);
+        if (da == null) return 1;
+        if (db == null) return -1;
+        final byDelay = da.compareTo(db);
+        return byDelay != 0 ? byDelay : a.$1.compareTo(b.$1);
+      });
+    } else {
+      indexed.sort((a, b) {
+        final byRank = rank(a.$2).compareTo(rank(b.$2));
+        if (byRank != 0) return byRank;
+        if (rank(a.$2) == 0) {
+          final byDelay =
+              widget.delays[a.$2.name]!.compareTo(widget.delays[b.$2.name]!);
+          if (byDelay != 0) return byDelay;
+        }
+        return a.$1.compareTo(b.$1);
+      });
+    }
     final nodes = <XrayNode>[
       for (final e in indexed)
         if (_query.isEmpty ||
@@ -1533,7 +1756,9 @@ class _ProxiesPageState extends State<ProxiesPage> {
           Row(
             children: [
               Text(
-                '${profile.nodes.length} 个节点',
+                widget.profileName != null
+                    ? '${widget.profileName} · ${profile.nodes.length} 个节点'
+                    : '${profile.nodes.length} 个节点',
                 style: TextStyle(color: muted),
               ),
               const Spacer(),
@@ -1542,6 +1767,17 @@ class _ProxiesPageState extends State<ProxiesPage> {
                 child: Text(widget.testing
                     ? '测速中 ${widget.delays.length}/${profile.nodes.length}'
                     : '全部测速'),
+              ),
+              PopupMenuButton<int>(
+                icon: const Icon(Icons.sort),
+                tooltip: '排序',
+                initialValue: _sortMode,
+                onSelected: (v) => setState(() => _sortMode = v),
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 0, child: Text('智能排序')),
+                  PopupMenuItem(value: 1, child: Text('按延迟')),
+                  PopupMenuItem(value: 2, child: Text('按名称')),
+                ],
               ),
             ],
           ),
@@ -1607,22 +1843,52 @@ class _ProxiesPageState extends State<ProxiesPage> {
 class ProfilesPage extends StatelessWidget {
   const ProfilesPage({
     super.key,
-    required this.profile,
-    required this.profileName,
+    required this.subs,
+    required this.activeSubId,
+    required this.activeSkipped,
     required this.onImport,
-    required this.profileUrl,
     required this.onImportUrl,
-    required this.onUpdateSubscription,
+    required this.onSwitch,
+    required this.onUpdate,
     required this.onDelete,
   });
 
-  final XrayProfile? profile;
-  final String? profileName;
+  final List<SubProfile> subs;
+  final String? activeSubId;
+  final List<SkippedNode> activeSkipped;
   final VoidCallback onImport;
-  final String? profileUrl;
   final VoidCallback onImportUrl;
-  final VoidCallback? onUpdateSubscription;
-  final VoidCallback? onDelete;
+  final ValueChanged<SubProfile> onSwitch;
+  final ValueChanged<SubProfile> onUpdate;
+  final ValueChanged<SubProfile> onDelete;
+
+  String _updatedLabel(int ms) {
+    if (ms <= 0) return '';
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '更新于 ${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
+
+  Future<void> _confirmDelete(BuildContext context, SubProfile sub) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除订阅'),
+        content: Text('删除「${sub.name}」？此操作不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) onDelete(sub);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1630,63 +1896,37 @@ class ProfilesPage extends StatelessWidget {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
-    final profile = this.profile;
     return _PageFrame(
       title: '配置',
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (profile == null)
-              Text('暂无配置。从文件导入，或粘贴机场的订阅链接拉取。',
-                  style: TextStyle(color: muted))
-            else ...[
-              Container(
-                decoration: BoxDecoration(
-                  color: _cardColor(context),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      profileName ?? '已导入配置',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${profile.nodes.length} 个可用节点 · ${profile.skipped.length} 个已跳过',
-                      style: TextStyle(color: muted),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      profileUrl != null
-                          ? '来源：订阅链接'
-                          : '来源：本地文件',
-                      style: TextStyle(color: muted),
-                    ),
-                  ],
-                ),
-              ),
-              if (profile.skipped.isNotEmpty) ...[
-                const SizedBox(height: 16),
-                for (final s in profile.skipped)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Text(
-                      '跳过：${s.name}（${s.type}）${s.reason}',
-                      style: TextStyle(color: muted, fontSize: 13),
-                    ),
-                  ),
-              ],
+            if (subs.isEmpty)
+              Text('暂无订阅。从文件导入，或粘贴订阅链接拉取；可以存多份随时切换。',
+                  style: TextStyle(color: muted)),
+            for (final sub in subs) ...[
+              _subCard(context, sub, muted),
+              const SizedBox(height: 12),
             ],
-            const SizedBox(height: 24),
+            if (activeSkipped.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              for (final s in activeSkipped)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    '跳过：${s.name}（${s.type}）${s.reason}',
+                    style: TextStyle(color: muted, fontSize: 13),
+                  ),
+                ),
+              const SizedBox(height: 8),
+            ],
+            const SizedBox(height: 12),
             SizedBox(
               height: 48,
               child: FilledButton(
                 onPressed: onImport,
-                child: Text(profile == null ? '从文件导入' : '从文件重新导入'),
+                child: const Text('从文件导入'),
               ),
             ),
             const SizedBox(height: 12),
@@ -1697,28 +1937,77 @@ class ProfilesPage extends StatelessWidget {
                 child: const Text('从订阅链接导入'),
               ),
             ),
-            if (onUpdateSubscription != null) ...[
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 48,
-                child: FilledButton.tonal(
-                  onPressed: onUpdateSubscription,
-                  child: const Text('更新订阅'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _subCard(BuildContext context, SubProfile sub, Color muted) {
+    final active = sub.id == activeSubId;
+    final meta = StringBuffer()
+      ..write('${sub.nodeCount} 个节点 · ')
+      ..write(sub.url != null ? '订阅链接' : '本地文件');
+    final updated = _updatedLabel(sub.updatedAtMs);
+    if (updated.isNotEmpty) meta.write(' · $updated');
+    return Container(
+      decoration: BoxDecoration(
+        color: _cardColor(context),
+        borderRadius: BorderRadius.circular(16),
+        border: active ? Border.all(color: _accent, width: 1.5) : null,
+      ),
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  sub.name,
+                  style: Theme.of(context).textTheme.titleMedium,
                 ),
               ),
+              if (active)
+                const Text(
+                  '使用中',
+                  style: TextStyle(
+                    color: _accent,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
             ],
-            if (onDelete != null) ...[
-              const SizedBox(height: 12),
+          ),
+          const SizedBox(height: 8),
+          Text(meta.toString(), style: TextStyle(color: muted)),
+          if (sub.subInfo != null) ...[
+            const SizedBox(height: 4),
+            Text(sub.subInfo!, style: TextStyle(color: muted)),
+          ],
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (!active)
+                TextButton(
+                  onPressed: () => onSwitch(sub),
+                  child: const Text('使用'),
+                ),
+              if (sub.url != null)
+                TextButton(
+                  onPressed: () => onUpdate(sub),
+                  child: const Text('更新'),
+                ),
               TextButton(
-                onPressed: onDelete,
+                onPressed: () => _confirmDelete(context, sub),
                 child: const Text(
-                  '删除配置',
+                  '删除',
                   style: TextStyle(color: Colors.redAccent),
                 ),
               ),
             ],
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -1762,6 +2051,15 @@ class _LogsPageState extends State<LogsPage> {
     if (mounted) setState(() => _loading = false);
   }
 
+  Future<void> _clearLog() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final file = File('${docs.path}/xray-error.log');
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+    if (mounted) setState(() => _logTail = '');
+  }
+
   @override
   Widget build(BuildContext context) {
     final muted = Theme.of(context)
@@ -1789,6 +2087,11 @@ class _LogsPageState extends State<LogsPage> {
               FilledButton.tonal(
                 onPressed: _loading ? null : _loadLog,
                 child: Text(_loading ? '刷新中…' : '刷新日志'),
+              ),
+              const SizedBox(width: 12),
+              TextButton(
+                onPressed: _clearLog,
+                child: const Text('清空'),
               ),
             ],
           ),

@@ -10,6 +10,10 @@ typedef _TranslateNative = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
+typedef _TranslateAllNative = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
 typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
 typedef _StartDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
 typedef _FreeNative = Void Function(Pointer<Utf8>);
@@ -50,6 +54,15 @@ class XrayProfile {
   final Map<String, String> configs;
 }
 
+/// One config holding every node, for parallel latency tests: each
+/// node name maps to the local port that exits through it.
+class XrayAllTest {
+  const XrayAllTest({required this.config, required this.ports});
+
+  final String config;
+  final Map<String, int> ports;
+}
+
 /// FFI bridge to libflbox.so. Xray trial surface only; the sing-box
 /// exports stay unused until that engine is wired up.
 class CoreBridge {
@@ -59,6 +72,10 @@ class CoreBridge {
     _xrayTranslate = lib.lookupFunction<_TranslateNative, _TranslateNative>(
       'FlboxXrayTranslate',
     );
+    _xrayTranslateAll = lib
+        .lookupFunction<_TranslateAllNative, _TranslateAllNative>(
+          'FlboxXrayTranslateAll',
+        );
     _xrayStart = lib.lookupFunction<_StartNative, _StartDart>(
       'FlboxXrayStart',
     );
@@ -77,6 +94,7 @@ class CoreBridge {
 
   late final _NoArg _xrayVersion;
   late final _TranslateNative _xrayTranslate;
+  late final _TranslateAllNative _xrayTranslateAll;
   late final _StartDart _xrayStart;
   late final _NoArg _xrayStop;
   late final _NoArg _xrayStatus;
@@ -132,6 +150,25 @@ class CoreBridge {
         e.key: e.value as String,
     };
     return XrayProfile(nodes: nodes, skipped: skipped, configs: configs);
+  }
+
+  XrayAllTest translateAllXray(String clashYaml, {required String logPath}) {
+    final arg = clashYaml.toNativeUtf8();
+    final log = logPath.toNativeUtf8();
+    final out = _take(_xrayTranslateAll(arg, log));
+    malloc.free(arg);
+    malloc.free(log);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'translate-all failed');
+    }
+    final decoded = jsonDecode(out) as Map<String, dynamic>;
+    return XrayAllTest(
+      config: decoded['config'] as String,
+      ports: <String, int>{
+        for (final e in (decoded['ports'] as Map<String, dynamic>).entries)
+          e.key: e.value as int,
+      },
+    );
   }
 
   /// Throws CoreException on failure. Starting replaces any running

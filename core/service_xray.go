@@ -44,6 +44,18 @@ func xrayTranslate(clashYAML, mode, logPath string) (string, error) {
 	return string(raw), nil
 }
 
+func xrayTranslateAll(clashYAML, logPath string) (string, error) {
+	res, err := xraytranslate.TranslateAll([]byte(clashYAML), logPath)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
 var xReport string
 
 // xrayStart starts the instance (StartInstance already starts it; an
