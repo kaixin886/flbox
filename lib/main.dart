@@ -696,6 +696,12 @@ class _HomeShellState extends State<HomeShell> {
   /// entry in place; without, it adds a new entry.
   Future<void> _fetchSubscription(String url, {SubProfile? updateSub}) async {
     final client = HttpClient();
+    // Subscription traffic never goes through a proxy: not the
+    // core's own local listener, not a system proxy. An update must
+    // still succeed when every node is dead — that is usually when
+    // it is needed most. (The app is also excluded from its own
+    // VPN tunnel, so this fetch is direct end to end.)
+    client.findProxy = (_) => 'DIRECT';
     try {
       client.userAgent = 'ClashMeta/1.0';
       final request = await client
@@ -2076,7 +2082,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.17.0 · app.flbox · Xray 内核',
+              'FlBox 0.18.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
