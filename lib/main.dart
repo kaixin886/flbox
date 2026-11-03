@@ -2036,7 +2036,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.14.0 · app.flbox · Xray 内核',
+              'FlBox 0.15.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2079,6 +2079,7 @@ class ProxiesPage extends StatefulWidget {
 class _ProxiesPageState extends State<ProxiesPage> {
   String _query = '';
   int _sortMode = 0; // 0 智能（测速优先）· 1 按延迟 · 2 按名称
+  bool _sortOpen = false; // 排序选项行是否展开（不用弹出菜单：模态层会挡住滑动）
 
   Color _delayColor(int? ms) {
     if (ms == null) return Colors.redAccent;
@@ -2167,18 +2168,44 @@ class _ProxiesPageState extends State<ProxiesPage> {
                 tooltip: '测速并选最快',
                 onPressed: widget.testing ? null : widget.onPickFastest,
               ),
-              PopupMenuButton<int>(
+              IconButton(
                 icon: const Icon(Icons.sort),
                 tooltip: '排序',
-                initialValue: _sortMode,
-                onSelected: (v) => setState(() => _sortMode = v),
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: 0, child: Text('智能排序')),
-                  PopupMenuItem(value: 1, child: Text('按延迟')),
-                  PopupMenuItem(value: 2, child: Text('按名称')),
-                ],
+                color: _sortOpen
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+                onPressed: () => setState(() => _sortOpen = !_sortOpen),
               ),
             ],
+          ),
+          // Inline sort options, not a popup menu: a modal popup
+          // layer swallows all gestures until an item is tapped, so
+          // the grid could not be scrolled with the menu open. The
+          // chips live in the page itself, scrolling always works.
+          AnimatedSize(
+            duration: const Duration(milliseconds: 150),
+            alignment: Alignment.topCenter,
+            child: !_sortOpen
+                ? const SizedBox(width: double.infinity)
+                : Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Row(
+                      children: [
+                        for (var i = 0; i < 3; i++) ...[
+                          if (i > 0) const SizedBox(width: 8),
+                          ChoiceChip(
+                            label: Text(
+                                const ['智能排序', '按延迟', '按名称'][i]),
+                            selected: _sortMode == i,
+                            onSelected: (_) => setState(() {
+                              _sortMode = i;
+                              _sortOpen = false;
+                            }),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
           ),
           const SizedBox(height: 12),
           TextField(

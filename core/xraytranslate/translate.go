@@ -256,6 +256,11 @@ func translateRule(line string) (map[string]any, bool) {
 	rule := map[string]any{"type": "field"}
 	switch strings.ToUpper(parts[0]) {
 	case "MATCH", "FINAL":
+		// A field rule needs at least one effective field, or Xray
+		// rejects the whole config at Start ("this rule has no
+		// effective fields"). network tcp,udp matches everything,
+		// which is exactly MATCH semantics, and keeps the target.
+		rule["network"] = "tcp,udp"
 		rule["outboundTag"] = outboundFor(parts[1])
 		return rule, true
 	case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "GEOSITE":

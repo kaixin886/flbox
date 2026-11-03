@@ -94,3 +94,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 
 - **布局模仿 FlClash**：仪表盘改为卡片网格——状态卡（整行）＋上行/下行双卡（速度大字＋总量）＋出站模式卡（全局/规则两段切换，直接调 _setRulesMode）＋当前节点卡（点按跳代理页）；启动/停止改 FlClash 式右下角圆形悬浮钮（FAB，仅仪表盘显示，运行中为停止图标、处理中为转圈）。代理页节点改双列网格卡（高 104，选中卡 accent 描边＋淡底，名称两行省略，底部类型＋延迟）。页面边距 24→16、卡片圆角 20 更紧凑。导航样式设置保留（默认仍滑动玻璃），配色纪律不变。
 - **APK 瘦身**：android.packaging.jniLibs.useLegacyPackaging=true——.so 改回压缩存储（AGP 9 默认不压缩、APK 里是原样大小；Go 核心 .so 占 APK 大头且可压性好），安装时系统照常解出，装机占用不变、下载体积下降。规则库 dat 维持内置全量（assets 内已 deflate）。
+
+## 0.15 规则模式修复与排序交互（2026-11-03 晚，真机反馈）
+
+- **规则模式启动失败修复**：真机 0.13/0.14 规则模式必挂（`app/router: this rule has no effective fields`、全局正常）。病根：xraytranslate 把 Clash 的 MATCH/FINAL 翻成只有 outboundTag、零条件字段的 field 规则，Xray 26.x 在实例创建时整表拒绝（订阅必带 MATCH 收尾故必挂）。修法：MATCH 规则补 `network: "tcp,udp"` 作有效字段（全匹配语义不变、保留 target 指向）。新增真启动回归测试 core/xray_rules_start_test.go（StartInstance 实启，沙箱已验：去修复必红、带修复通过）——rules_check_test 只验翻译映射、没真启内核，是漏检原因，延续「校验在 Start 阶段」教训。
+- **排序改非模态**：代理页排序原为 PopupMenuButton 弹出菜单，模态层吞掉全部手势、菜单开着时网格不能滑动，必须点一项才能继续（真机反馈）。改：排序图标点按在页头下方内联展开一行 ChoiceChip（智能排序/按延迟/按名称，AnimatedSize 150ms），选中即应用并收起，全程无遮罩、滑动不受影响。
