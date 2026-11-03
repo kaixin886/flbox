@@ -31,7 +31,22 @@ class FlboxVpnService : VpnService() {
 
     private fun startVpn() {
         if (tun != null) return
-        startForeground(NOTIF_ID, buildNotification())
+        // Android 14+ refuses startForeground without a declared type
+        // (MissingForegroundServiceTypeException). The manifest declares
+        // systemExempted (the VPN case); pass it explicitly too, and
+        // never let a promotion failure kill the tunnel itself.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIF_ID,
+                    buildNotification(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
+                )
+            } else {
+                startForeground(NOTIF_ID, buildNotification())
+            }
+        } catch (_: Exception) {
+        }
         val builder = Builder()
             .setSession("FlBox")
             .setMtu(1500)
