@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 
@@ -117,6 +118,14 @@ class _HomeShellState extends State<HomeShell> {
   Map<String, int?> _delays = {};
   bool _testing = false;
   Completer<int>? _tunReady;
+  String? _profileUrl;
+  Set<String> _bypassPkgs = {};
+  int _upBytes = 0;
+  int _downBytes = 0;
+  double _speedUp = 0;
+  double _speedDown = 0;
+  DateTime? _startedAt;
+  Timer? _pollTimer;
 
   static const _vpnChannel = MethodChannel('flbox/vpn');
 
@@ -138,6 +147,13 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _restore() async {
     final prefs = await SharedPreferences.getInstance();
     _modeVpn = prefs.getBool('mode_vpn') ?? true;
+    _profileUrl = prefs.getString('profile_url');
+    final bypassRaw = prefs.getString('bypass_pkgs');
+    if (bypassRaw != null) {
+      try {
+        _bypassPkgs = (jsonDecode(bypassRaw) as List).cast<String>().toSet();
+      } catch (_) {}
+    }
     final saved = prefs.getInt('nav_style');
     if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
       setState(() => _navStyle = NavStyle.values[saved]);
@@ -174,6 +190,44 @@ class _HomeShellState extends State<HomeShell> {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Shared landing path for file import and subscription fetch.
+  /// A null [url] means a local file (and clears any stored URL).
+  Future<void> _applyProfileYaml(
+    String text, {
+    required String name,
+    String? url,
+  }) async {
+    final docs = await getApplicationDocumentsDirectory();
+    _logPath = '${docs.path}/xray-error.log';
+    final profile = CoreBridge().translateXray(
+      text,
+      vpn: _modeVpn,
+      logPath: _logPath,
+    );
+    _profileYaml = text;
+    await File('${docs.path}/profile.yaml').writeAsString(text);
+    final prefs = await SharedPreferences.getInstance();
+    final selected =
+        profile.nodes.any((n) => n.name == _selectedNode)
+            ? _selectedNode!
+            : profile.nodes.first.name;
+    await prefs.setString('profile_name', name);
+    await prefs.setString('selected_node', selected);
+    if (url != null) {
+      await prefs.setString('profile_url', url);
+    } else {
+      await prefs.remove('profile_url');
+    }
+    setState(() {
+      _profile = profile;
+      _profileName = name;
+      _selectedNode = selected;
+      _profileUrl = url;
+      _delays = {};
+    });
+    _toast('已导入 ${profile.nodes.length} 个可用节点');
+  }
+
   Future<void> _importProfile() async {
     // FileType.any on purpose: Android's picker filters by MIME type,
     // and .yaml files carry no consistent MIME on many ROMs, which left
@@ -185,34 +239,156 @@ class _HomeShellState extends State<HomeShell> {
     final file = File(picked.files.single.path!);
     try {
       final text = await file.readAsString();
-      final docs = await getApplicationDocumentsDirectory();
-      _logPath = '${docs.path}/xray-error.log';
-      _profileYaml = text;
-      final profile = CoreBridge().translateXray(
-        text,
-        vpn: _modeVpn,
-        logPath: _logPath,
-      );
-      await File('${docs.path}/profile.yaml').writeAsString(text);
-      final prefs = await SharedPreferences.getInstance();
-      final name = picked.files.single.name;
-      final selected =
-          profile.nodes.any((n) => n.name == _selectedNode)
-              ? _selectedNode!
-              : profile.nodes.first.name;
-      await prefs.setString('profile_name', name);
-      await prefs.setString('selected_node', selected);
-      setState(() {
-        _profile = profile;
-        _profileName = name;
-        _selectedNode = selected;
-      });
-      _toast('已导入 ${profile.nodes.length} 个可用节点');
+      await _applyProfileYaml(text, name: picked.files.single.name);
     } on CoreException catch (e) {
       _toast('导入失败：${e.message}');
     } catch (e) {
       _toast('导入失败：$e');
     }
+  }
+
+  Future<String?> _askUrl() async {
+    final controller = TextEditingController(text: _profileUrl ?? '');
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('订阅链接'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: 'https://…',
+          ),
+          keyboardType: TextInputType.url,
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('拉取'),
+          ),
+        ],
+      ),
+    );
+    return (value == null || value.isEmpty) ? null : value;
+  }
+
+  Future<void> _fetchSubscription(String url) async {
+    final client = HttpClient();
+    try {
+      client.userAgent = 'ClashMeta/1.0';
+      final request = await client
+          .getUrl(Uri.parse(url))
+          .timeout(const Duration(seconds: 20));
+      final response = await request.close().timeout(
+            const Duration(seconds: 20),
+          );
+      if (response.statusCode != 200) {
+        _toast('拉取失败：HTTP ${response.statusCode}');
+        return;
+      }
+      final text = await response.transform(utf8.decoder).join();
+      final host = Uri.parse(url).host;
+      await _applyProfileYaml(
+        text,
+        name: host.isEmpty ? '订阅配置' : host,
+        url: url,
+      );
+    } on CoreException catch (e) {
+      _toast('订阅内容不可用：${e.message}');
+    } catch (e) {
+      _toast('拉取失败：$e');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _importFromUrl() async {
+    final url = await _askUrl();
+    if (url != null) await _fetchSubscription(url);
+  }
+
+  Future<void> _updateSubscription() async {
+    final url = _profileUrl;
+    if (url == null) return;
+    await _fetchSubscription(url);
+  }
+
+  Future<void> _deleteProfile() async {
+    if (_running) {
+      _toast('先停止再删除配置');
+      return;
+    }
+    final docs = await getApplicationDocumentsDirectory();
+    try {
+      await File('${docs.path}/profile.yaml').delete();
+    } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('profile_name');
+    await prefs.remove('profile_url');
+    await prefs.remove('selected_node');
+    setState(() {
+      _profile = null;
+      _profileName = null;
+      _profileYaml = null;
+      _profileUrl = null;
+      _selectedNode = null;
+      _delays = {};
+    });
+    _toast('已删除配置');
+  }
+
+  Future<void> _setBypassPkgs(Set<String> pkgs) async {
+    setState(() => _bypassPkgs = pkgs);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('bypass_pkgs', jsonEncode(pkgs.toList()));
+    _toast('分应用设置已保存，下次启动 VPN 时生效');
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    var lastUp = 0;
+    var lastDown = 0;
+    var lastTick = DateTime.now();
+    _upBytes = 0;
+    _downBytes = 0;
+    _speedUp = 0;
+    _speedDown = 0;
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted || !_running) return;
+      try {
+        final decoded =
+            jsonDecode(CoreBridge().xrayTraffic()) as Map<String, dynamic>;
+        final up = (decoded['up'] as num).toInt();
+        final down = (decoded['down'] as num).toInt();
+        final now = DateTime.now();
+        final dt = now.difference(lastTick).inMilliseconds / 1000.0;
+        if (dt > 0) {
+          _speedUp = (up - lastUp) / dt;
+          _speedDown = (down - lastDown) / dt;
+        }
+        lastUp = up;
+        lastDown = down;
+        lastTick = now;
+        setState(() {
+          _upBytes = up;
+          _downBytes = down;
+        });
+      } catch (_) {
+        // A failed poll just skips a beat; the next one retries.
+      }
+    });
+  }
+
+  void _stopPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _startedAt = null;
+    _speedUp = 0;
+    _speedDown = 0;
   }
 
   Future<void> _toggleCore() async {
@@ -224,7 +400,10 @@ class _HomeShellState extends State<HomeShell> {
       if (_modeVpn) {
         await _vpnChannel.invokeMethod('stopVpn');
         _tunFd = 0;
+      } else {
+        await _vpnChannel.invokeMethod('stopCoreService');
       }
+      _stopPolling();
       setState(() => _running = false);
       return;
     }
@@ -243,18 +422,33 @@ class _HomeShellState extends State<HomeShell> {
           return;
         }
         _tunReady = Completer<int>();
-        await _vpnChannel.invokeMethod('startVpn');
+        await _vpnChannel.invokeMethod('startVpn', {
+          'bypass': _bypassPkgs.toList(),
+        });
         fd = await _tunReady!.future.timeout(const Duration(seconds: 15));
         _tunFd = fd;
+      } else {
+        // Local mode: a foreground service hosts the process while the
+        // core runs (reference clients never run a core in a bare UI
+        // process — it gets frozen and its traffic silently dropped).
+        // The service promotes itself to foreground FIRST, before the
+        // core opens any socket.
+        await _vpnChannel.invokeMethod('startCoreService');
       }
       CoreBridge().xrayStart(config, fd);
+      _startedAt = DateTime.now();
       setState(() => _running = true);
+      _startPolling();
     } catch (e) {
       if (_modeVpn) {
         try {
           await _vpnChannel.invokeMethod('stopVpn');
         } catch (_) {}
         _tunFd = 0;
+      } else {
+        try {
+          await _vpnChannel.invokeMethod('stopCoreService');
+        } catch (_) {}
       }
       _toast('启动失败：$e');
     } finally {
@@ -378,6 +572,8 @@ class _HomeShellState extends State<HomeShell> {
           onNavStyleChanged: _setNavStyle,
           modeVpn: _modeVpn,
           onModeChanged: _setModeVpn,
+          bypassPkgs: _bypassPkgs,
+          onBypassChanged: _setBypassPkgs,
         ),
       ),
     );
@@ -385,6 +581,7 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
     _pageController.dispose();
     super.dispose();
   }
@@ -421,6 +618,11 @@ class _HomeShellState extends State<HomeShell> {
             currentNode: _selectedNode,
             onToggle: _toggleCore,
             modeVpn: _modeVpn,
+            upBytes: _upBytes,
+            downBytes: _downBytes,
+            speedUp: _speedUp,
+            speedDown: _speedDown,
+            startedAt: _startedAt,
           ),
           ProxiesPage(
             profile: _profile,
@@ -434,6 +636,11 @@ class _HomeShellState extends State<HomeShell> {
             profile: _profile,
             profileName: _profileName,
             onImport: _importProfile,
+            profileUrl: _profileUrl,
+            onImportUrl: _importFromUrl,
+            onUpdateSubscription:
+                _profileUrl == null ? null : _updateSubscription,
+            onDelete: _profile == null ? null : _deleteProfile,
           ),
           LogsPage(),
         ],
@@ -825,6 +1032,28 @@ class _PageFrame extends StatelessWidget {
   }
 }
 
+String _fmtBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+}
+
+String _fmtSpeed(double bps) => '${_fmtBytes(bps.round())}/s';
+
+String _fmtDuration(Duration d) {
+  final mm = (d.inMinutes % 60).toString().padLeft(2, '0');
+  final ss = (d.inSeconds % 60).toString().padLeft(2, '0');
+  return d.inHours > 0 ? '${d.inHours}:$mm:$ss' : '$mm:$ss';
+}
+
+Color _cardColor(BuildContext context) =>
+    Theme.of(context).colorScheme.onSurface.withValues(
+          alpha: Theme.of(context).brightness == Brightness.dark ? 0.07 : 0.045,
+        );
+
 class DashboardPage extends StatelessWidget {
   const DashboardPage({
     super.key,
@@ -835,6 +1064,11 @@ class DashboardPage extends StatelessWidget {
     required this.currentNode,
     required this.onToggle,
     required this.modeVpn,
+    required this.upBytes,
+    required this.downBytes,
+    required this.speedUp,
+    required this.speedDown,
+    required this.startedAt,
   });
 
   final VoidCallback onOpenSettings;
@@ -844,6 +1078,11 @@ class DashboardPage extends StatelessWidget {
   final String? currentNode;
   final VoidCallback onToggle;
   final bool modeVpn;
+  final int upBytes;
+  final int downBytes;
+  final double speedUp;
+  final double speedDown;
+  final DateTime? startedAt;
 
   @override
   Widget build(BuildContext context) {
@@ -869,18 +1108,105 @@ class DashboardPage extends StatelessWidget {
         onPressed: onOpenSettings,
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            running ? '运行中' : '未启动',
-            style: Theme.of(context).textTheme.titleMedium,
+          Container(
+            decoration: BoxDecoration(
+              color: _cardColor(context),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: running
+                            ? const Color(0xFF34A853)
+                            : muted,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      running ? '运行中' : '未启动',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    if (running && startedAt != null) ...[
+                      const Spacer(),
+                      Text(
+                        _fmtDuration(DateTime.now().difference(startedAt!)),
+                        style: TextStyle(color: muted),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(detail, style: TextStyle(color: muted)),
+              ],
+            ),
           ),
-          const SizedBox(height: 8),
-          Text(detail, style: TextStyle(color: muted)),
-          const SizedBox(height: 32),
-          FilledButton(
-            onPressed: busy ? null : onToggle,
-            child: Text(busy ? '处理中…' : (running ? '停止' : '启动')),
+          if (running) ...[
+            const SizedBox(height: 16),
+            Container(
+              decoration: BoxDecoration(
+                color: _cardColor(context),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              padding: const EdgeInsets.all(20),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('↑ 上行', style: TextStyle(color: muted)),
+                        const SizedBox(height: 6),
+                        Text(
+                          _fmtSpeed(speedUp),
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '共 ${_fmtBytes(upBytes)}',
+                          style: TextStyle(color: muted, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('↓ 下行', style: TextStyle(color: muted)),
+                        const SizedBox(height: 6),
+                        Text(
+                          _fmtSpeed(speedDown),
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '共 ${_fmtBytes(downBytes)}',
+                          style: TextStyle(color: muted, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 24),
+          SizedBox(
+            height: 48,
+            child: FilledButton(
+              onPressed: busy ? null : onToggle,
+              child: Text(busy ? '处理中…' : (running ? '停止' : '启动')),
+            ),
           ),
         ],
       ),
@@ -896,12 +1222,16 @@ class _SettingsPage extends StatefulWidget {
     required this.onNavStyleChanged,
     required this.modeVpn,
     required this.onModeChanged,
+    required this.bypassPkgs,
+    required this.onBypassChanged,
   });
 
   final NavStyle navStyle;
   final ValueChanged<NavStyle> onNavStyleChanged;
   final bool modeVpn;
   final ValueChanged<bool> onModeChanged;
+  final Set<String> bypassPkgs;
+  final ValueChanged<Set<String>> onBypassChanged;
 
   @override
   State<_SettingsPage> createState() => _SettingsPageState();
@@ -968,6 +1298,30 @@ class _SettingsPageState extends State<_SettingsPage> {
             },
           ),
           const SizedBox(height: 24),
+          Text('代理', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('分应用代理'),
+            subtitle: Text(
+              widget.bypassPkgs.isEmpty
+                  ? '所有应用都走 VPN'
+                  : '${widget.bypassPkgs.length} 个应用绕过 VPN',
+              style: TextStyle(color: muted),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => _BypassAppsPage(
+                    initial: widget.bypassPkgs,
+                    onChanged: widget.onBypassChanged,
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 24),
           Text('内核', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           const ListTile(
@@ -988,7 +1342,7 @@ class _SettingsPageState extends State<_SettingsPage> {
   }
 }
 
-class ProxiesPage extends StatelessWidget {
+class ProxiesPage extends StatefulWidget {
   const ProxiesPage({
     super.key,
     required this.profile,
@@ -1007,18 +1361,58 @@ class ProxiesPage extends StatelessWidget {
   final VoidCallback? onTestAll;
 
   @override
+  State<ProxiesPage> createState() => _ProxiesPageState();
+}
+
+class _ProxiesPageState extends State<ProxiesPage> {
+  String _query = '';
+
+  Color _delayColor(int? ms) {
+    if (ms == null) return Colors.redAccent;
+    if (ms < 300) return const Color(0xFF34A853);
+    if (ms < 800) return Colors.orange;
+    return Colors.redAccent;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final muted = Theme.of(context)
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
-    final profile = this.profile;
+    final profile = widget.profile;
     if (profile == null) {
       return _PageFrame(
         title: '代理',
         child: Text('还没有配置，先到「配置」页导入。', style: TextStyle(color: muted)),
       );
     }
+    // Tested nodes first (fastest first), then untested, then timeouts;
+    // the original profile order breaks ties.
+    int rank(XrayNode n) {
+      if (!widget.delays.containsKey(n.name)) return 1;
+      return widget.delays[n.name] == null ? 2 : 0;
+    }
+
+    final indexed = <(int, XrayNode)>[
+      for (var i = 0; i < profile.nodes.length; i++) (i, profile.nodes[i]),
+    ];
+    indexed.sort((a, b) {
+      final byRank = rank(a.$2).compareTo(rank(b.$2));
+      if (byRank != 0) return byRank;
+      if (rank(a.$2) == 0) {
+        final byDelay =
+            widget.delays[a.$2.name]!.compareTo(widget.delays[b.$2.name]!);
+        if (byDelay != 0) return byDelay;
+      }
+      return a.$1.compareTo(b.$1);
+    });
+    final nodes = <XrayNode>[
+      for (final e in indexed)
+        if (_query.isEmpty ||
+            e.$2.name.toLowerCase().contains(_query.toLowerCase()))
+          e.$2,
+    ];
     return _PageFrame(
       title: '代理',
       child: Column(
@@ -1032,44 +1426,62 @@ class ProxiesPage extends StatelessWidget {
               ),
               const Spacer(),
               FilledButton.tonal(
-                onPressed: testing ? null : onTestAll,
-                child: Text(testing
-                    ? '测速中 ${delays.length}/${profile.nodes.length}'
+                onPressed: widget.testing ? null : widget.onTestAll,
+                child: Text(widget.testing
+                    ? '测速中 ${widget.delays.length}/${profile.nodes.length}'
                     : '全部测速'),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
+          TextField(
+            decoration: const InputDecoration(
+              hintText: '搜索节点',
+              prefixIcon: Icon(Icons.search),
+              isDense: true,
+              border: OutlineInputBorder(),
+            ),
+            onChanged: (v) => setState(() => _query = v),
+          ),
+          const SizedBox(height: 12),
           Expanded(
             child: ListView(
               padding: EdgeInsets.zero,
               children: [
-                for (final node in profile.nodes)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(node.name),
-                    subtitle: Text(node.type, style: TextStyle(color: muted)),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (delays.containsKey(node.name))
-                          Text(
-                            delays[node.name] == null
-                                ? '超时'
-                                : '${delays[node.name]} ms',
-                            style: TextStyle(
-                              color: delays[node.name] == null
-                                  ? Colors.redAccent
-                                  : muted,
-                            ),
-                          ),
-                        if (node.name == selectedNode) ...[
-                          const SizedBox(width: 8),
-                          const Icon(Icons.check_circle, color: _accent),
-                        ],
-                      ],
+                for (final node in nodes)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: _cardColor(context),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: ListTile(
+                        title: Text(node.name),
+                        subtitle:
+                            Text(node.type, style: TextStyle(color: muted)),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (widget.delays.containsKey(node.name))
+                              Text(
+                                widget.delays[node.name] == null
+                                    ? '超时'
+                                    : '${widget.delays[node.name]} ms',
+                                style: TextStyle(
+                                  color: _delayColor(widget.delays[node.name]),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            if (node.name == widget.selectedNode) ...[
+                              const SizedBox(width: 8),
+                              const Icon(Icons.check_circle, color: _accent),
+                            ],
+                          ],
+                        ),
+                        onTap: () => widget.onSelect(node.name),
+                      ),
                     ),
-                    onTap: () => onSelect(node.name),
                   ),
               ],
             ),
@@ -1086,11 +1498,19 @@ class ProfilesPage extends StatelessWidget {
     required this.profile,
     required this.profileName,
     required this.onImport,
+    required this.profileUrl,
+    required this.onImportUrl,
+    required this.onUpdateSubscription,
+    required this.onDelete,
   });
 
   final XrayProfile? profile;
   final String? profileName;
   final VoidCallback onImport;
+  final String? profileUrl;
+  final VoidCallback onImportUrl;
+  final VoidCallback? onUpdateSubscription;
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -1101,40 +1521,92 @@ class ProfilesPage extends StatelessWidget {
     final profile = this.profile;
     return _PageFrame(
       title: '配置',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (profile == null)
-            Text('暂无配置。导入 Clash 配置文件后，用 Xray 内核启动。',
-                style: TextStyle(color: muted))
-          else ...[
-            Text(
-              profileName ?? '已导入配置',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '${profile.nodes.length} 个可用节点 · ${profile.skipped.length} 个已跳过',
-              style: TextStyle(color: muted),
-            ),
-            if (profile.skipped.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              for (final s in profile.skipped)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Text(
-                    '跳过：${s.name}（${s.type}）${s.reason}',
-                    style: TextStyle(color: muted, fontSize: 13),
-                  ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (profile == null)
+              Text('暂无配置。从文件导入，或粘贴机场的订阅链接拉取。',
+                  style: TextStyle(color: muted))
+            else ...[
+              Container(
+                decoration: BoxDecoration(
+                  color: _cardColor(context),
+                  borderRadius: BorderRadius.circular(16),
                 ),
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      profileName ?? '已导入配置',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${profile.nodes.length} 个可用节点 · ${profile.skipped.length} 个已跳过',
+                      style: TextStyle(color: muted),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      profileUrl != null
+                          ? '来源：订阅链接'
+                          : '来源：本地文件',
+                      style: TextStyle(color: muted),
+                    ),
+                  ],
+                ),
+              ),
+              if (profile.skipped.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                for (final s in profile.skipped)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      '跳过：${s.name}（${s.type}）${s.reason}',
+                      style: TextStyle(color: muted, fontSize: 13),
+                    ),
+                  ),
+              ],
+            ],
+            const SizedBox(height: 24),
+            SizedBox(
+              height: 48,
+              child: FilledButton(
+                onPressed: onImport,
+                child: Text(profile == null ? '从文件导入' : '从文件重新导入'),
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 48,
+              child: FilledButton.tonal(
+                onPressed: onImportUrl,
+                child: const Text('从订阅链接导入'),
+              ),
+            ),
+            if (onUpdateSubscription != null) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 48,
+                child: FilledButton.tonal(
+                  onPressed: onUpdateSubscription,
+                  child: const Text('更新订阅'),
+                ),
+              ),
+            ],
+            if (onDelete != null) ...[
+              const SizedBox(height: 12),
+              TextButton(
+                onPressed: onDelete,
+                child: const Text(
+                  '删除配置',
+                  style: TextStyle(color: Colors.redAccent),
+                ),
+              ),
             ],
           ],
-          const SizedBox(height: 32),
-          FilledButton(
-            onPressed: onImport,
-            child: Text(profile == null ? '导入配置' : '重新导入'),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -1222,6 +1694,138 @@ class _LogsPageState extends State<LogsPage> {
                       _logTail,
                       style: const TextStyle(fontSize: 12, height: 1.5),
                     ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// Per-app bypass picker: checked apps are excluded from the VPN
+// (addDisallowedApplication) the next time it starts.
+class _BypassAppsPage extends StatefulWidget {
+  const _BypassAppsPage({required this.initial, required this.onChanged});
+
+  final Set<String> initial;
+  final ValueChanged<Set<String>> onChanged;
+
+  @override
+  State<_BypassAppsPage> createState() => _BypassAppsPageState();
+}
+
+class _BypassAppsPageState extends State<_BypassAppsPage> {
+  static const _channel = MethodChannel('flbox/vpn');
+
+  late final Set<String> _selected = {...widget.initial};
+  List<({String pkg, String label})> _apps = [];
+  String _query = '';
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final raw = await _channel.invokeMethod<List<dynamic>>('listApps');
+      final apps = <({String pkg, String label})>[];
+      for (final e in raw ?? const []) {
+        final map = (e as Map).map(
+          (k, v) => MapEntry(k.toString(), v.toString()),
+        );
+        final pkg = map['pkg'];
+        if (pkg == null || pkg == 'com.kaixin886.flbox.dev') continue;
+        apps.add((pkg: pkg, label: map['label'] ?? pkg));
+      }
+      if (mounted) {
+        setState(() {
+          _apps = apps;
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = Theme.of(context)
+        .colorScheme
+        .onSurface
+        .withValues(alpha: 0.5);
+    final visible = <({String pkg, String label})>[
+      for (final app in _apps)
+        if (_query.isEmpty ||
+            app.label.toLowerCase().contains(_query.toLowerCase()) ||
+            app.pkg.toLowerCase().contains(_query.toLowerCase()))
+          app,
+    ];
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('分应用代理'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              widget.onChanged(_selected);
+              Navigator.of(context).pop();
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
+            child: TextField(
+              decoration: const InputDecoration(
+                hintText: '搜索应用',
+                prefixIcon: Icon(Icons.search),
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) => setState(() => _query = v),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '勾选的应用绕过 VPN 直连，下次启动 VPN 时生效',
+                style: TextStyle(color: muted, fontSize: 13),
+              ),
+            ),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 24),
+                    children: [
+                      for (final app in visible)
+                        CheckboxListTile(
+                          title: Text(app.label),
+                          subtitle: Text(
+                            app.pkg,
+                            style: TextStyle(color: muted, fontSize: 12),
+                          ),
+                          value: _selected.contains(app.pkg),
+                          onChanged: (checked) {
+                            setState(() {
+                              if (checked ?? false) {
+                                _selected.add(app.pkg);
+                              } else {
+                                _selected.remove(app.pkg);
+                              }
+                            });
+                          },
+                        ),
+                    ],
                   ),
           ),
         ],

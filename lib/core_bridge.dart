@@ -64,6 +64,7 @@ class CoreBridge {
     );
     _xrayStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStop');
     _xrayStatus = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStatus');
+    _xrayTraffic = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayTraffic');
     _lastError = lib.lookupFunction<_NoArg, _NoArg>('FlboxLastError');
     _free = lib.lookupFunction<_FreeNative, void Function(Pointer<Utf8>)>(
       'FlboxFree',
@@ -79,6 +80,7 @@ class CoreBridge {
   late final _StartDart _xrayStart;
   late final _NoArg _xrayStop;
   late final _NoArg _xrayStatus;
+  late final _NoArg _xrayTraffic;
   late final _NoArg _lastError;
   late final void Function(Pointer<Utf8>) _free;
 
@@ -147,6 +149,9 @@ class CoreBridge {
   }
 
   String xrayStatus() => _take(_xrayStatus()) ?? '(no status)';
+
+  /// Cumulative proxy traffic counters as JSON ({"up":n,"down":n}).
+  String xrayTraffic() => _take(_xrayTraffic()) ?? '{"up":0,"down":0}';
 }
 
 /// Reads a picked profile file as text.

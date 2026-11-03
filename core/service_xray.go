@@ -11,6 +11,7 @@ import (
 
 	"github.com/xtls/xray-core/common/platform"
 	xcore "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/stats"
 	_ "github.com/xtls/xray-core/main/distro/all"
 
 	"flbox/core/xraytranslate"
@@ -85,6 +86,27 @@ func xrayStatus() string {
 	defer xMu.Unlock()
 	running := xInst != nil
 	return fmt.Sprintf("xray %s · running=%v · %s", xcore.Version(), running, xReport)
+}
+
+// xrayTraffic returns the proxy outbound's cumulative byte counters as
+// JSON, for the dashboard's live traffic readout.
+func xrayTraffic() string {
+	xMu.Lock()
+	defer xMu.Unlock()
+	var up, down int64
+	if xInst != nil {
+		if feat := xInst.GetFeature(stats.ManagerType()); feat != nil {
+			if mgr, ok := feat.(stats.Manager); ok {
+				if c := mgr.GetCounter("outbound>>>proxy>>>traffic>>>uplink"); c != nil {
+					up = c.Value()
+				}
+				if c := mgr.GetCounter("outbound>>>proxy>>>traffic>>>downlink"); c != nil {
+					down = c.Value()
+				}
+			}
+		}
+	}
+	return fmt.Sprintf(`{"up":%d,"down":%d}`, up, down)
 }
 
 func xrayStop() error {

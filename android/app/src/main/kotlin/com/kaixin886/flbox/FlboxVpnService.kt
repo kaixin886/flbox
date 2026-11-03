@@ -23,13 +23,13 @@ class FlboxVpnService : VpnService() {
                 START_NOT_STICKY
             }
             else -> {
-                startVpn()
+                startVpn(intent?.getStringArrayListExtra(EXTRA_BYPASS) ?: emptyList())
                 START_STICKY
             }
         }
     }
 
-    private fun startVpn() {
+    private fun startVpn(bypass: List<String>) {
         if (tun != null) return
         // Android 14+ refuses startForeground without a declared type
         // (MissingForegroundServiceTypeException). The manifest declares
@@ -57,6 +57,14 @@ class FlboxVpnService : VpnService() {
             // into the tunnel it is serving.
             builder.addDisallowedApplication(packageName)
         } catch (_: PackageManager.NameNotFoundException) {
+        }
+        // User-chosen per-app bypass (set in FlBox settings).
+        for (pkg in bypass) {
+            if (pkg == packageName) continue
+            try {
+                builder.addDisallowedApplication(pkg)
+            } catch (_: PackageManager.NameNotFoundException) {
+            }
         }
         val pfd = builder.establish()
         if (pfd == null) {
@@ -117,6 +125,7 @@ class FlboxVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.kaixin886.flbox.VPN_START"
         const val ACTION_STOP = "com.kaixin886.flbox.VPN_STOP"
+        const val EXTRA_BYPASS = "com.kaixin886.flbox.EXTRA_BYPASS"
         private const val CHANNEL_ID = "flbox_vpn"
         private const val NOTIF_ID = 1
     }

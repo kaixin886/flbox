@@ -264,6 +264,13 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 	}
 	cfg := map[string]any{
 		"log":      logCfg,
+		"stats":    map[string]any{},
+		"policy": map[string]any{
+			"system": map[string]any{
+				"statsOutboundUplink":   true,
+				"statsOutboundDownlink": true,
+			},
+		},
 		"inbounds": inbounds,
 		"outbounds": []any{
 			outbound,

@@ -154,6 +154,11 @@ func FlboxXrayStatus() *C.char {
 	return C.CString(xrayStatus())
 }
 
+//export FlboxXrayTraffic
+func FlboxXrayTraffic() *C.char {
+	return C.CString(xrayTraffic())
+}
+
 //export FlboxFree
 func FlboxFree(ptr *C.char) {
 	C.free(unsafe.Pointer(ptr))
