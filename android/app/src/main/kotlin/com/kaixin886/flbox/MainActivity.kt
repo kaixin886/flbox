@@ -11,6 +11,7 @@ import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 // Holds the channel so the VpnService (a separate component) can
 // report the established TUN fd back to Dart.
@@ -73,6 +74,15 @@ class MainActivity : FlutterActivity() {
                 "listApps" -> {
                     result.success(listLaunchableApps())
                 }
+                "extractGeoData" -> {
+                    // ~25 MB copy: keep it off the main thread, reply
+                    // on it as MethodChannel requires.
+                    val force = call.argument<Boolean>("force") ?: false
+                    Thread {
+                        val ok = extractBundledGeoData(force)
+                        runOnUiThread { result.success(ok) }
+                    }.start()
+                }
                 "appSettings" -> {
                     // Deep-link to this app's system info page, where the
                     // per-app "allow network access" switch lives on ROMs
@@ -117,6 +127,41 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    /**
+     * Copies the rule databases bundled in the APK assets (geo/*.dat,
+     * downloaded at build time by the downloadGeoData Gradle task)
+     * into filesDir, where the core's asset lookup points. Skips
+     * files that are already in place unless [force]. Returns true
+     * when both files are present and sane-sized afterwards.
+     */
+    private fun extractBundledGeoData(force: Boolean): Boolean {
+        var allOk = true
+        for (name in listOf("geoip.dat", "geosite.dat")) {
+            val target = File(filesDir, name)
+            if (!force && target.exists() && target.length() > 1_000_000) {
+                continue
+            }
+            try {
+                val tmp = File(filesDir, "$name.tmp")
+                assets.open("geo/$name").use { input ->
+                    tmp.outputStream().use { output -> input.copyTo(output) }
+                }
+                if (tmp.length() <= 1_000_000) {
+                    tmp.delete()
+                    allOk = false
+                    continue
+                }
+                if (!tmp.renameTo(target)) {
+                    tmp.copyTo(target, overwrite = true)
+                    tmp.delete()
+                }
+            } catch (e: Exception) {
+                allOk = false
+            }
+        }
+        return allOk
     }
 
     /** Apps the user can pick in the per-app bypass list. */

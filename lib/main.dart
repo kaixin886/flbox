@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -133,6 +134,18 @@ class SubProfile {
       );
 }
 
+/// One traffic poll sample. Carried in a ValueNotifier so the 2 s
+/// poll rebuilds only the dashboard's traffic region instead of the
+/// whole shell (all four pages) on every tick.
+class _Traffic {
+  const _Traffic({this.up = 0, this.down = 0, this.speedUp = 0, this.speedDown = 0});
+
+  final int up;
+  final int down;
+  final double speedUp;
+  final double speedDown;
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -166,10 +179,7 @@ class _HomeShellState extends State<HomeShell> {
   Set<String> _bypassPkgs = {};
   bool _netBlocked = false;
   bool _batteryIgnored = false;
-  int _upBytes = 0;
-  int _downBytes = 0;
-  double _speedUp = 0;
-  double _speedDown = 0;
+  final _traffic = ValueNotifier<_Traffic>(const _Traffic());
   DateTime? _startedAt;
   Timer? _pollTimer;
 
@@ -337,10 +347,13 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
-  /// Downloads the routing rule databases (geoip.dat / geosite.dat,
-  /// ~25 MB total) into the documents directory, where the core's
-  /// asset lookup points. Returns false when already present counts
-  /// as success; the caller decides how to report failures.
+  /// Prepares the routing rule databases (geoip.dat / geosite.dat)
+  /// in the documents directory, where the core's asset lookup
+  /// points. The databases ship inside the APK (downloaded at build
+  /// time by a Gradle task) and are copied out of the bundled assets
+  /// locally — no runtime download. A network download remains only
+  /// as a fallback for a build whose assets are missing. Already
+  /// present counts as success; the caller reports failures.
   Future<bool> _ensureGeoData({bool force = false}) async {
     final docs = await getApplicationDocumentsDirectory();
     final files = {
@@ -352,6 +365,16 @@ class _HomeShellState extends State<HomeShell> {
         await files['geosite.dat']!.exists()) {
       _geoReady = true;
       return true;
+    }
+    try {
+      final ok = await _vpnChannel
+          .invokeMethod<bool>('extractGeoData', {'force': force});
+      if (ok == true) {
+        _geoReady = true;
+        return true;
+      }
+    } catch (_) {
+      // Bundled copy unavailable; fall through to the network path.
     }
     _toast('正在下载分流规则库（约 25 MB）…');
     final sources = {
@@ -402,7 +425,7 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     if (rules && !await _ensureGeoData()) {
-      _toast('规则库下载失败，检查网络后重试');
+      _toast('规则库准备失败，检查网络后重试');
       return;
     }
     final prefs = await SharedPreferences.getInstance();
@@ -718,11 +741,10 @@ class _HomeShellState extends State<HomeShell> {
     _pollTimer?.cancel();
     var lastUp = 0;
     var lastDown = 0;
+    var speedUp = 0.0;
+    var speedDown = 0.0;
     var lastTick = DateTime.now();
-    _upBytes = 0;
-    _downBytes = 0;
-    _speedUp = 0;
-    _speedDown = 0;
+    _traffic.value = const _Traffic();
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!mounted || !_running) return;
       try {
@@ -733,16 +755,18 @@ class _HomeShellState extends State<HomeShell> {
         final now = DateTime.now();
         final dt = now.difference(lastTick).inMilliseconds / 1000.0;
         if (dt > 0) {
-          _speedUp = (up - lastUp) / dt;
-          _speedDown = (down - lastDown) / dt;
+          speedUp = (up - lastUp) / dt;
+          speedDown = (down - lastDown) / dt;
         }
         lastUp = up;
         lastDown = down;
         lastTick = now;
-        setState(() {
-          _upBytes = up;
-          _downBytes = down;
-        });
+        _traffic.value = _Traffic(
+          up: up,
+          down: down,
+          speedUp: speedUp,
+          speedDown: speedDown,
+        );
       } catch (_) {
         // A failed poll just skips a beat; the next one retries.
       }
@@ -753,8 +777,7 @@ class _HomeShellState extends State<HomeShell> {
     _pollTimer?.cancel();
     _pollTimer = null;
     _startedAt = null;
-    _speedUp = 0;
-    _speedDown = 0;
+    _traffic.value = const _Traffic();
   }
 
   Future<void> _toggleCore() async {
@@ -977,7 +1000,7 @@ class _HomeShellState extends State<HomeShell> {
           geoReady: _geoReady,
           onUpdateGeo: () async {
             final ok = await _ensureGeoData(force: true);
-            _toast(ok ? '规则库已更新' : '规则库下载失败');
+            _toast(ok ? '规则库已刷新（内置版本）' : '规则库刷新失败');
           },
           autoConnect: _autoConnect,
           onAutoConnectChanged: _setAutoConnect,
@@ -992,6 +1015,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _traffic.dispose();
     _pageController.dispose();
     super.dispose();
   }
@@ -1020,7 +1044,7 @@ class _HomeShellState extends State<HomeShell> {
         controller: _pageController,
         onPageChanged: (index) => setState(() => _index = index),
         children: [
-          DashboardPage(
+          _DashboardPage(
             onOpenSettings: _openSettings,
             running: _running,
             busy: _busy,
@@ -1028,10 +1052,7 @@ class _HomeShellState extends State<HomeShell> {
             currentNode: _selectedNode,
             onToggle: _toggleCore,
             modeVpn: _modeVpn,
-            upBytes: _upBytes,
-            downBytes: _downBytes,
-            speedUp: _speedUp,
-            speedDown: _speedDown,
+            traffic: _traffic,
             startedAt: _startedAt,
             netBlocked: _netBlocked,
             onOpenNetSettings: _openNetSettings,
@@ -1065,7 +1086,8 @@ class _HomeShellState extends State<HomeShell> {
           LogsPage(),
         ],
       ),
-      bottomNavigationBar: switch (_navStyle) {
+      bottomNavigationBar: RepaintBoundary(
+        child: switch (_navStyle) {
         NavStyle.plain => _PlainNavBar(index: _index, onTap: _select),
         NavStyle.glass => _GlassNavBar(
             index: _index,
@@ -1077,7 +1099,8 @@ class _HomeShellState extends State<HomeShell> {
             destinations: _destinations,
             onTap: _select,
           ),
-      },
+        },
+      ),
     );
   }
 }
@@ -1107,6 +1130,9 @@ class _PlainNavBar extends StatelessWidget {
 // backdrop blur with a saturation lift, translucent fill, soft shadow.
 class _GlassShell extends StatelessWidget {
   const _GlassShell({required this.child, this.pressGlow = 0});
+
+  static final ImageFilter _blurFilter =
+      ImageFilter.blur(sigmaX: 16, sigmaY: 16);
 
   final Widget child;
   final double pressGlow;
@@ -1145,15 +1171,10 @@ class _GlassShell extends StatelessWidget {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(31),
             child: BackdropFilter(
-              filter: ImageFilter.compose(
-                outer: ImageFilter.blur(sigmaX: 26, sigmaY: 26),
-                inner: const ColorFilter.matrix([
-                  1.18, 0.12, 0.02, 0, -6,
-                  0.10, 1.14, 0.04, 0, -6,
-                  0.02, 0.10, 1.20, 0, -6,
-                  0, 0, 0, 1, 0,
-                ]),
-              ),
+              // Plain blur only: composing a saturation matrix over a
+              // sigma-26 blur made every frame scrolled under the
+              // floating bar pay for the full filter chain.
+              filter: _blurFilter,
               child: Container(color: fill, child: child),
             ),
           ),
@@ -1474,9 +1495,8 @@ Color _cardColor(BuildContext context) =>
           alpha: Theme.of(context).brightness == Brightness.dark ? 0.07 : 0.045,
         );
 
-class DashboardPage extends StatelessWidget {
-  const DashboardPage({
-    super.key,
+class _DashboardPage extends StatelessWidget {
+  const _DashboardPage({
     required this.onOpenSettings,
     required this.running,
     required this.busy,
@@ -1484,10 +1504,7 @@ class DashboardPage extends StatelessWidget {
     required this.currentNode,
     required this.onToggle,
     required this.modeVpn,
-    required this.upBytes,
-    required this.downBytes,
-    required this.speedUp,
-    required this.speedDown,
+    required this.traffic,
     required this.startedAt,
     required this.netBlocked,
     required this.onOpenNetSettings,
@@ -1503,10 +1520,7 @@ class DashboardPage extends StatelessWidget {
   final String? currentNode;
   final VoidCallback onToggle;
   final bool modeVpn;
-  final int upBytes;
-  final int downBytes;
-  final double speedUp;
-  final double speedDown;
+  final ValueListenable<_Traffic> traffic;
   final DateTime? startedAt;
   final bool netBlocked;
   final VoidCallback onOpenNetSettings;
@@ -1582,6 +1596,11 @@ class DashboardPage extends StatelessWidget {
             ),
             const SizedBox(height: 16),
           ],
+          ValueListenableBuilder<_Traffic>(
+            valueListenable: traffic,
+            builder: (context, traffic, _) => Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
           Container(
             decoration: BoxDecoration(
               color: _cardColor(context),
@@ -1639,12 +1658,12 @@ class DashboardPage extends StatelessWidget {
                         Text('↑ 上行', style: TextStyle(color: muted)),
                         const SizedBox(height: 6),
                         Text(
-                          _fmtSpeed(speedUp),
+                          _fmtSpeed(traffic.speedUp),
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '共 ${_fmtBytes(upBytes)}',
+                          '共 ${_fmtBytes(traffic.up)}',
                           style: TextStyle(color: muted, fontSize: 13),
                         ),
                       ],
@@ -1657,12 +1676,12 @@ class DashboardPage extends StatelessWidget {
                         Text('↓ 下行', style: TextStyle(color: muted)),
                         const SizedBox(height: 6),
                         Text(
-                          _fmtSpeed(speedDown),
+                          _fmtSpeed(traffic.speedDown),
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '共 ${_fmtBytes(downBytes)}',
+                          '共 ${_fmtBytes(traffic.down)}',
                           style: TextStyle(color: muted, fontSize: 13),
                         ),
                       ],
@@ -1672,6 +1691,9 @@ class DashboardPage extends StatelessWidget {
               ),
             ),
           ],
+              ],
+            ),
+          ),
           const SizedBox(height: 24),
           SizedBox(
             height: 48,
@@ -1839,7 +1861,7 @@ class _SettingsPageState extends State<_SettingsPage> {
             contentPadding: EdgeInsets.zero,
             title: const Text('分流规则库'),
             subtitle: Text(
-              widget.geoReady ? '已下载，点按可更新' : '未下载（开启规则模式时自动下载）',
+              widget.geoReady ? '已内置于安装包，点按可刷新' : '内置于安装包（开启规则模式时自动释放）',
               style: TextStyle(color: muted),
             ),
             trailing: const Icon(Icons.chevron_right),
@@ -1896,7 +1918,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.12.0 · app.flbox · Xray 内核',
+              'FlBox 0.13.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2052,61 +2074,99 @@ class _ProxiesPageState extends State<ProxiesPage> {
           ),
           const SizedBox(height: 12),
           Expanded(
-            child: ListView(
+            // Builder, not a children list: with 30+ nodes the eager
+            // list built every tile on every page rebuild (search
+            // keystrokes, delay updates), which visibly hitched.
+            child: ListView.builder(
               padding: EdgeInsets.zero,
-              children: [
-                for (final node in nodes)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: _cardColor(context),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: ListTile(
-                        title: Text(node.name),
-                        subtitle:
-                            Text(node.type, style: TextStyle(color: muted)),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: Icon(
-                                widget.favorites.contains(node.name)
-                                    ? Icons.star
-                                    : Icons.star_border,
-                                color: widget.favorites.contains(node.name)
-                                    ? _accent
-                                    : muted,
-                                size: 20,
-                              ),
-                              tooltip: '收藏',
-                              onPressed: () => widget.onToggleFav(node.name),
-                            ),
-                            if (widget.delays.containsKey(node.name))
-                              Text(
-                                widget.delays[node.name] == null
-                                    ? '超时'
-                                    : '${widget.delays[node.name]} ms',
-                                style: TextStyle(
-                                  color: _delayColor(widget.delays[node.name]),
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            if (node.name == widget.selectedNode) ...[
-                              const SizedBox(width: 8),
-                              const Icon(Icons.check_circle, color: _accent),
-                            ],
-                          ],
-                        ),
-                        onTap: () => widget.onSelect(node.name),
-                      ),
-                    ),
-                  ),
-              ],
+              itemCount: nodes.length,
+              itemBuilder: (context, i) {
+                final node = nodes[i];
+                return _NodeTile(
+                  node: node,
+                  muted: muted,
+                  favorite: widget.favorites.contains(node.name),
+                  hasDelay: widget.delays.containsKey(node.name),
+                  delay: widget.delays[node.name],
+                  delayColor: _delayColor(widget.delays[node.name]),
+                  selected: node.name == widget.selectedNode,
+                  onTap: () => widget.onSelect(node.name),
+                  onFav: () => widget.onToggleFav(node.name),
+                );
+              },
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// One node row on the proxies page, split out so list rebuilds can
+/// reuse unchanged rows instead of re-creating every tile inline.
+class _NodeTile extends StatelessWidget {
+  const _NodeTile({
+    required this.node,
+    required this.muted,
+    required this.favorite,
+    required this.hasDelay,
+    required this.delay,
+    required this.delayColor,
+    required this.selected,
+    required this.onTap,
+    required this.onFav,
+  });
+
+  final XrayNode node;
+  final Color muted;
+  final bool favorite;
+  final bool hasDelay;
+  final int? delay;
+  final Color delayColor;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onFav;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        decoration: BoxDecoration(
+          color: _cardColor(context),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: ListTile(
+          title: Text(node.name),
+          subtitle: Text(node.type, style: TextStyle(color: muted)),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: Icon(
+                  favorite ? Icons.star : Icons.star_border,
+                  color: favorite ? _accent : muted,
+                  size: 20,
+                ),
+                tooltip: '收藏',
+                onPressed: onFav,
+              ),
+              if (hasDelay)
+                Text(
+                  delay == null ? '超时' : '$delay ms',
+                  style: TextStyle(
+                    color: delayColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              if (selected) ...[
+                const SizedBox(width: 8),
+                const Icon(Icons.check_circle, color: _accent),
+              ],
+            ],
+          ),
+          onTap: onTap,
+        ),
       ),
     );
   }

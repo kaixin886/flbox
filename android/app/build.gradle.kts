@@ -19,6 +19,60 @@ if (!flboxJks.exists()) {
     }
 }
 
+// The routing rule databases ship inside the APK instead of being
+// downloaded on the phone at first use: fetch them at build time
+// into src/main/assets/geo/, from where MainActivity copies them out
+// of the bundled assets on first run. Fails the build loudly when no
+// mirror yields a sane file, so a rules-less APK never ships silent.
+val geoAssetsDir = layout.projectDirectory.dir("src/main/assets/geo")
+val downloadGeoData by tasks.registering {
+    outputs.dir(geoAssetsDir)
+    doLast {
+        val sources = mapOf(
+            "geoip.dat" to listOf(
+                "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat",
+                "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+            ),
+            "geosite.dat" to listOf(
+                "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat",
+                "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+            )
+        )
+        val dir = geoAssetsDir.asFile
+        dir.mkdirs()
+        for ((name, urls) in sources) {
+            val target = java.io.File(dir, name)
+            if (target.exists() && target.length() > 1_000_000) continue
+            var ok = false
+            for (url in urls) {
+                try {
+                    val tmp = java.io.File(dir, "$name.tmp")
+                    java.net.URL(url).openStream().use { input ->
+                        tmp.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    if (tmp.length() > 1_000_000) {
+                        tmp.renameTo(target)
+                        ok = true
+                        break
+                    }
+                    tmp.delete()
+                } catch (e: Exception) {
+                    logger.warn("geo data download failed from $url: ${e.message}")
+                }
+            }
+            if (!ok) {
+                throw GradleException("Could not download $name for the bundled rule databases")
+            }
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("Assets")) {
+        dependsOn(downloadGeoData)
+    }
+}
+
 android {
     namespace = "com.kaixin886.flbox"
     // file_picker 8.x is compiled against API 36 and requires consumers
