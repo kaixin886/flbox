@@ -1849,7 +1849,7 @@ class _BypassAppsPageState extends State<_BypassAppsPage> {
           (k, v) => MapEntry(k.toString(), v.toString()),
         );
         final pkg = map['pkg'];
-        if (pkg == null || pkg == 'com.kaixin886.flbox.dev') continue;
+        if (pkg == null || pkg == 'app.flbox') continue;
         apps.add((pkg: pkg, label: map['label'] ?? pkg));
       }
       if (mounted) {
