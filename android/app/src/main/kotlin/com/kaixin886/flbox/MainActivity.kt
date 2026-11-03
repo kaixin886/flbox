@@ -130,7 +130,7 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Copies the rule databases bundled in the APK assets (geo/*.dat,
+     * Copies the rule databases bundled in the APK assets (the geo folder,
      * downloaded at build time by the downloadGeoData Gradle task)
      * into filesDir, where the core's asset lookup points. Skips
      * files that are already in place unless [force]. Returns true
