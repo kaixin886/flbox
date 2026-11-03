@@ -45,6 +45,7 @@ type clashProxy struct {
 
 type clashConfig struct {
 	Proxies []clashProxy `yaml:"proxies"`
+	Rules   []string     `yaml:"rules"`
 }
 
 type NodeInfo struct {
@@ -59,9 +60,11 @@ type SkippedNode struct {
 }
 
 type Result struct {
-	Nodes   []NodeInfo        `json:"nodes"`
-	Skipped []SkippedNode     `json:"skipped"`
-	Configs map[string]string `json:"configs"`
+	Nodes        []NodeInfo        `json:"nodes"`
+	Skipped      []SkippedNode     `json:"skipped"`
+	Configs      map[string]string `json:"configs"`
+	RulesApplied int               `json:"rulesApplied"`
+	RulesSkipped int               `json:"rulesSkipped"`
 }
 
 var privateCIDRs = []string{
@@ -221,9 +224,79 @@ func nodeOutbound(p clashProxy) (map[string]any, error) {
 type Options struct {
 	VPN     bool
 	LogPath string
+	// Rules enables rule mode: the profile's own Clash rules are
+	// translated into Xray routing rules (unsupported types dropped).
+	// Without usable profile rules it falls back to the classic
+	// bypass-mainland set (geosite:cn / geoip:cn direct). Rule mode
+	// needs geoip.dat and geosite.dat in the Xray asset directory.
+	Rules bool
 }
 
-func buildConfig(p clashProxy, opts Options) (string, error) {
+// translateRule converts one Clash rule line into an Xray field rule.
+// ok=false for rule types with no equivalent in this client. Named
+// proxy groups collapse onto the single selected node's outbound.
+func translateRule(line string) (map[string]any, bool) {
+	parts := strings.Split(line, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	if len(parts) < 2 {
+		return nil, false
+	}
+	outboundFor := func(target string) string {
+		switch strings.ToUpper(target) {
+		case "DIRECT":
+			return "direct"
+		case "REJECT":
+			return "block"
+		default:
+			return "proxy"
+		}
+	}
+	rule := map[string]any{"type": "field"}
+	switch strings.ToUpper(parts[0]) {
+	case "MATCH", "FINAL":
+		rule["outboundTag"] = outboundFor(parts[1])
+		return rule, true
+	case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "GEOSITE":
+		if len(parts) < 3 {
+			return nil, false
+		}
+		prefix := map[string]string{
+			"DOMAIN":         "full:",
+			"DOMAIN-SUFFIX":  "domain:",
+			"DOMAIN-KEYWORD": "keyword:",
+			"GEOSITE":        "geosite:",
+		}[strings.ToUpper(parts[0])]
+		rule["domain"] = []string{prefix + parts[1]}
+		rule["outboundTag"] = outboundFor(parts[2])
+		return rule, true
+	case "IP-CIDR", "IP-CIDR6":
+		if len(parts) < 3 {
+			return nil, false
+		}
+		rule["ip"] = []string{parts[1]}
+		rule["outboundTag"] = outboundFor(parts[2])
+		return rule, true
+	case "GEOIP":
+		if len(parts) < 3 {
+			return nil, false
+		}
+		rule["ip"] = []string{"geoip:" + strings.ToLower(parts[1])}
+		rule["outboundTag"] = outboundFor(parts[2])
+		return rule, true
+	case "DST-PORT":
+		if len(parts) < 3 {
+			return nil, false
+		}
+		rule["port"] = parts[1]
+		rule["outboundTag"] = outboundFor(parts[2])
+		return rule, true
+	}
+	return nil, false
+}
+
+func buildConfig(p clashProxy, profileRules []string, opts Options) (string, error) {
 	outbound, err := nodeOutbound(p)
 	if err != nil {
 		return "", err
@@ -262,6 +335,43 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 			},
 		})
 	}
+	routingRules := []any{}
+	if opts.Rules {
+		applied := 0
+		for _, line := range profileRules {
+			if r, ok := translateRule(line); ok {
+				routingRules = append(routingRules, r)
+				applied++
+			}
+		}
+		if applied == 0 {
+			// No usable rules in the profile: classic bypass-mainland.
+			routingRules = append(routingRules,
+				map[string]any{
+					"type":        "field",
+					"domain":      []string{"geosite:cn"},
+					"outboundTag": "direct",
+				},
+				map[string]any{
+					"type":        "field",
+					"ip":          []string{"geoip:cn"},
+					"outboundTag": "direct",
+				},
+			)
+		}
+	}
+	routingRules = append(routingRules,
+		map[string]any{
+			"type":        "field",
+			"ip":          privateCIDRs,
+			"outboundTag": "direct",
+		},
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{"in", "tun"},
+			"outboundTag": "proxy",
+		},
+	)
 	cfg := map[string]any{
 		"log":   logCfg,
 		"stats": map[string]any{},
@@ -279,18 +389,7 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 		},
 		"routing": map[string]any{
 			"domainStrategy": "AsIs",
-			"rules": []any{
-				map[string]any{
-					"type":        "field",
-					"ip":          privateCIDRs,
-					"outboundTag": "direct",
-				},
-				map[string]any{
-					"type":        "field",
-					"inboundTag":  []string{"in", "tun"},
-					"outboundTag": "proxy",
-				},
-			},
+			"rules":          routingRules,
 		},
 	}
 	raw, err := json.Marshal(cfg)
@@ -315,8 +414,17 @@ func Translate(clashYAML []byte, opts Options) (*Result, error) {
 		Skipped: []SkippedNode{},
 		Configs: map[string]string{},
 	}
+	if opts.Rules {
+		for _, line := range cfg.Rules {
+			if _, ok := translateRule(line); ok {
+				result.RulesApplied++
+			} else {
+				result.RulesSkipped++
+			}
+		}
+	}
 	for _, p := range cfg.Proxies {
-		nodeCfg, err := buildConfig(p, opts)
+		nodeCfg, err := buildConfig(p, cfg.Rules, opts)
 		if err != nil {
 			reason := err.Error()
 			if strings.Contains(reason, "unsupported") {

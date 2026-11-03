@@ -117,9 +117,11 @@ class CoreBridge {
     String clashYaml, {
     required bool vpn,
     required String logPath,
+    bool rules = false,
   }) {
     final arg = clashYaml.toNativeUtf8();
-    final mode = (vpn ? 'vpn' : 'local').toNativeUtf8();
+    final mode =
+        ((vpn ? 'vpn' : 'local') + (rules ? ':rules' : '')).toNativeUtf8();
     final log = logPath.toNativeUtf8();
     final out = _take(_xrayTranslate(arg, mode, log));
     malloc.free(arg);

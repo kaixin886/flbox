@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,9 +31,18 @@ func xrayVersion() string {
 	return xcore.Version()
 }
 
+// xAssetDir is where geoip.dat / geosite.dat live for rule mode. It
+// is captured from the log path (the app documents directory) because
+// that is where the app downloads the rule databases.
+var xAssetDir string
+
 func xrayTranslate(clashYAML, mode, logPath string) (string, error) {
+	if logPath != "" {
+		xAssetDir = filepath.Dir(logPath)
+	}
 	result, err := xraytranslate.Translate([]byte(clashYAML), xraytranslate.Options{
-		VPN:     mode == "vpn",
+		VPN:     strings.HasPrefix(mode, "vpn"),
+		Rules:   strings.HasSuffix(mode, ":rules"),
 		LogPath: logPath,
 	})
 	if err != nil {
@@ -76,6 +87,10 @@ func xrayStart(configJSON string, tunFd int) error {
 		os.Setenv(platform.TunFdKey, strconv.Itoa(tunFd))
 	} else {
 		os.Unsetenv(platform.TunFdKey)
+	}
+	if xAssetDir != "" {
+		// Rule mode resolves geosite:/geoip: entries from these files.
+		os.Setenv(platform.AssetLocation, xAssetDir)
 	}
 	inst, err := xcore.StartInstance("json", []byte(configJSON))
 	if err != nil {

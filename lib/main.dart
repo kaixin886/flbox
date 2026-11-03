@@ -158,6 +158,11 @@ class _HomeShellState extends State<HomeShell> {
   Completer<int>? _tunReady;
   List<SubProfile> _subs = [];
   String? _activeSubId;
+  bool _rulesMode = false;
+  bool _geoReady = false;
+  Set<String> _favNodes = {};
+  bool _autoConnect = false;
+  bool _subAutoUpdate = false;
   Set<String> _bypassPkgs = {};
   bool _netBlocked = false;
   bool _batteryIgnored = false;
@@ -240,6 +245,15 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _restore() async {
     final prefs = await SharedPreferences.getInstance();
     _modeVpn = prefs.getBool('mode_vpn') ?? true;
+    _rulesMode = prefs.getBool('rules_mode') ?? false;
+    _autoConnect = prefs.getBool('auto_connect') ?? false;
+    _subAutoUpdate = prefs.getBool('sub_auto_update') ?? false;
+    final favRaw = prefs.getString('fav_nodes');
+    if (favRaw != null) {
+      try {
+        _favNodes = (jsonDecode(favRaw) as List).cast<String>().toSet();
+      } catch (_) {}
+    }
     final bypassRaw = prefs.getString('bypass_pkgs');
     if (bypassRaw != null) {
       try {
@@ -253,6 +267,8 @@ class _HomeShellState extends State<HomeShell> {
     try {
       final docs = await getApplicationDocumentsDirectory();
       _logPath = '${docs.path}/xray-error.log';
+      _geoReady = await File('${docs.path}/geoip.dat').exists() &&
+          await File('${docs.path}/geosite.dat').exists();
       final subsRaw = prefs.getString('subs_v2');
       if (subsRaw != null) {
         final list = jsonDecode(subsRaw) as List<dynamic>;
@@ -289,6 +305,7 @@ class _HomeShellState extends State<HomeShell> {
             yaml,
             vpn: _modeVpn,
             logPath: _logPath,
+            rules: _rulesMode,
           );
           final stored = prefs.getString('selected_node');
           setState(() {
@@ -304,6 +321,123 @@ class _HomeShellState extends State<HomeShell> {
     } catch (_) {
       // A stale or corrupt saved profile must not block startup.
     }
+    if (_rulesMode && !_geoReady) {
+      await _ensureGeoData();
+    }
+    if (_subAutoUpdate) {
+      final active = _activeSub;
+      if (active?.url != null &&
+          DateTime.now().millisecondsSinceEpoch - active!.updatedAtMs >
+              86400000) {
+        await _fetchSubscription(active.url!, updateSub: active);
+      }
+    }
+    if (_autoConnect && _profile != null && !_running && mounted) {
+      await _toggleCore();
+    }
+  }
+
+  /// Downloads the routing rule databases (geoip.dat / geosite.dat,
+  /// ~25 MB total) into the documents directory, where the core's
+  /// asset lookup points. Returns false when already present counts
+  /// as success; the caller decides how to report failures.
+  Future<bool> _ensureGeoData({bool force = false}) async {
+    final docs = await getApplicationDocumentsDirectory();
+    final files = {
+      'geoip.dat': File('${docs.path}/geoip.dat'),
+      'geosite.dat': File('${docs.path}/geosite.dat'),
+    };
+    if (!force &&
+        await files['geoip.dat']!.exists() &&
+        await files['geosite.dat']!.exists()) {
+      _geoReady = true;
+      return true;
+    }
+    _toast('正在下载分流规则库（约 25 MB）…');
+    final sources = {
+      'geoip.dat': [
+        'https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat',
+        'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat',
+      ],
+      'geosite.dat': [
+        'https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat',
+        'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat',
+      ],
+    };
+    final client = HttpClient();
+    try {
+      for (final entry in files.entries) {
+        var ok = false;
+        for (final url in sources[entry.key]!) {
+          try {
+            final req = await client
+                .getUrl(Uri.parse(url))
+                .timeout(const Duration(seconds: 30));
+            final resp =
+                await req.close().timeout(const Duration(seconds: 60));
+            if (resp.statusCode != 200) continue;
+            final sink = entry.value.openWrite();
+            await resp.pipe(sink);
+            ok = await entry.value.length() > 1000000;
+            if (ok) break;
+          } catch (_) {
+            // Try the next mirror.
+          }
+        }
+        if (!ok) {
+          _geoReady = false;
+          return false;
+        }
+      }
+      _geoReady = true;
+      return true;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _setRulesMode(bool rules) async {
+    if (_running) {
+      _toast('先停止再切换路由模式');
+      return;
+    }
+    if (rules && !await _ensureGeoData()) {
+      _toast('规则库下载失败，检查网络后重试');
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('rules_mode', rules);
+    setState(() => _rulesMode = rules);
+    final yaml = _profileYaml;
+    if (yaml != null && _activeSub != null) {
+      try {
+        await _activateYaml(yaml, name: _activeSub!.name);
+      } catch (e) {
+        _toast('切换路由模式失败：$e');
+        return;
+      }
+    }
+    _toast(rules ? '已切换到规则模式（按订阅分流）' : '已切换到全局模式');
+  }
+
+  Future<void> _setAutoConnect(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('auto_connect', value);
+    setState(() => _autoConnect = value);
+  }
+
+  Future<void> _setSubAutoUpdate(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('sub_auto_update', value);
+    setState(() => _subAutoUpdate = value);
+  }
+
+  Future<void> _toggleFav(String name) async {
+    setState(() {
+      if (!_favNodes.remove(name)) _favNodes.add(name);
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('fav_nodes', jsonEncode(_favNodes.toList()));
   }
 
   void _toast(String message) {
@@ -321,6 +455,7 @@ class _HomeShellState extends State<HomeShell> {
       text,
       vpn: _modeVpn,
       logPath: _logPath,
+      rules: _rulesMode,
     );
     _profileYaml = text;
     final prefs = await SharedPreferences.getInstance();
@@ -350,6 +485,7 @@ class _HomeShellState extends State<HomeShell> {
       text,
       vpn: _modeVpn,
       logPath: _logPath,
+      rules: _rulesMode,
     );
     final sub = SubProfile(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -534,6 +670,7 @@ class _HomeShellState extends State<HomeShell> {
           text,
           vpn: _modeVpn,
           logPath: _logPath,
+          rules: _rulesMode,
         );
         await _subFile(docs, updateSub.id).writeAsString(text);
         updateSub
@@ -700,6 +837,7 @@ class _HomeShellState extends State<HomeShell> {
           yaml,
           vpn: vpn,
           logPath: _logPath,
+          rules: _rulesMode,
         );
         setState(() => _profile = profile);
       } catch (e) {
@@ -772,6 +910,26 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  Future<void> _pickFastest() async {
+    await _testAll();
+    if (!mounted || _profile == null) return;
+    String? best;
+    int? bestMs;
+    for (final n in _profile!.nodes) {
+      final d = _delays[n.name];
+      if (d != null && (bestMs == null || d < bestMs)) {
+        best = n.name;
+        bestMs = d;
+      }
+    }
+    if (best == null) {
+      _toast('没有测到可用节点');
+      return;
+    }
+    await _selectNode(best);
+    _toast('已选最快节点：$best（$bestMs ms）');
+  }
+
   Future<void> _selectNode(String name) async {
     if (name == _selectedNode) return;
     setState(() => _selectedNode = name);
@@ -794,6 +952,9 @@ class _HomeShellState extends State<HomeShell> {
     try {
       _batteryIgnored =
           await _vpnChannel.invokeMethod<bool>('batteryState') ?? false;
+      final docs = await getApplicationDocumentsDirectory();
+      _geoReady = await File('${docs.path}/geoip.dat').exists() &&
+          await File('${docs.path}/geosite.dat').exists();
     } catch (_) {}
     if (!mounted) return;
     await Navigator.of(context).push(
@@ -811,6 +972,17 @@ class _HomeShellState extends State<HomeShell> {
               await _vpnChannel.invokeMethod('openBatterySettings');
             } catch (_) {}
           },
+          rulesMode: _rulesMode,
+          onRulesModeChanged: _setRulesMode,
+          geoReady: _geoReady,
+          onUpdateGeo: () async {
+            final ok = await _ensureGeoData(force: true);
+            _toast(ok ? '规则库已更新' : '规则库下载失败');
+          },
+          autoConnect: _autoConnect,
+          onAutoConnectChanged: _setAutoConnect,
+          subAutoUpdate: _subAutoUpdate,
+          onSubAutoUpdateChanged: _setSubAutoUpdate,
         ),
       ),
     );
@@ -865,6 +1037,8 @@ class _HomeShellState extends State<HomeShell> {
             onOpenNetSettings: _openNetSettings,
             onRecheckNetwork: _checkNetwork,
             profileName: _profileName,
+            currentDelay:
+                _selectedNode != null ? _delays[_selectedNode] : null,
           ),
           ProxiesPage(
             profile: _profile,
@@ -874,6 +1048,9 @@ class _HomeShellState extends State<HomeShell> {
             delays: _delays,
             testing: _testing,
             onTestAll: _profile == null ? null : _testAll,
+            favorites: _favNodes,
+            onToggleFav: _toggleFav,
+            onPickFastest: _profile == null ? null : _pickFastest,
           ),
           ProfilesPage(
             subs: _subs,
@@ -1316,6 +1493,7 @@ class DashboardPage extends StatelessWidget {
     required this.onOpenNetSettings,
     required this.onRecheckNetwork,
     required this.profileName,
+    required this.currentDelay,
   });
 
   final VoidCallback onOpenSettings;
@@ -1334,6 +1512,7 @@ class DashboardPage extends StatelessWidget {
   final VoidCallback onOpenNetSettings;
   final VoidCallback onRecheckNetwork;
   final String? profileName;
+  final int? currentDelay;
 
   @override
   Widget build(BuildContext context) {
@@ -1343,9 +1522,10 @@ class DashboardPage extends StatelessWidget {
         .withValues(alpha: 0.5);
     final String detail;
     if (running) {
+      final delayText = currentDelay != null ? ' · $currentDelay ms' : '';
       detail = modeVpn
-          ? '当前节点：${currentNode ?? '-'} · Xray 内核 · VPN 模式（系统代理）\n订阅：${profileName ?? '-'}'
-          : '当前节点：${currentNode ?? '-'} · Xray 内核 · 普通模式 127.0.0.1:7890\n订阅：${profileName ?? '-'}';
+          ? '当前节点：${currentNode ?? '-'}$delayText · Xray 内核 · VPN 模式（系统代理）\n订阅：${profileName ?? '-'}'
+          : '当前节点：${currentNode ?? '-'}$delayText · Xray 内核 · 普通模式 127.0.0.1:7890\n订阅：${profileName ?? '-'}';
     } else if (!hasProfile) {
       detail = '先到「配置」页导入一个 Clash 配置。';
     } else {
@@ -1518,6 +1698,14 @@ class _SettingsPage extends StatefulWidget {
     required this.onBypassChanged,
     required this.batteryIgnored,
     required this.onOpenBatterySettings,
+    required this.rulesMode,
+    required this.onRulesModeChanged,
+    required this.geoReady,
+    required this.onUpdateGeo,
+    required this.autoConnect,
+    required this.onAutoConnectChanged,
+    required this.subAutoUpdate,
+    required this.onSubAutoUpdateChanged,
   });
 
   final NavStyle navStyle;
@@ -1528,6 +1716,14 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<Set<String>> onBypassChanged;
   final bool batteryIgnored;
   final VoidCallback onOpenBatterySettings;
+  final bool rulesMode;
+  final ValueChanged<bool> onRulesModeChanged;
+  final bool geoReady;
+  final VoidCallback onUpdateGeo;
+  final bool autoConnect;
+  final ValueChanged<bool> onAutoConnectChanged;
+  final bool subAutoUpdate;
+  final ValueChanged<bool> onSubAutoUpdateChanged;
 
   @override
   State<_SettingsPage> createState() => _SettingsPageState();
@@ -1618,6 +1814,56 @@ class _SettingsPageState extends State<_SettingsPage> {
             },
           ),
           const SizedBox(height: 24),
+          Text('代理', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('全局模式'),
+            subtitle: Text('所有流量都走代理', style: TextStyle(color: muted)),
+            trailing: !widget.rulesMode
+                ? const Icon(Icons.check, color: _accent)
+                : null,
+            onTap: () => widget.onRulesModeChanged(false),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('规则模式（分流）'),
+            subtitle:
+                Text('按订阅自带规则分流，国内站点直连', style: TextStyle(color: muted)),
+            trailing: widget.rulesMode
+                ? const Icon(Icons.check, color: _accent)
+                : null,
+            onTap: () => widget.onRulesModeChanged(true),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('分流规则库'),
+            subtitle: Text(
+              widget.geoReady ? '已下载，点按可更新' : '未下载（开启规则模式时自动下载）',
+              style: TextStyle(color: muted),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: widget.onUpdateGeo,
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('启动后自动连接'),
+            subtitle:
+                Text('打开 FlBox 时自动启动上次的节点', style: TextStyle(color: muted)),
+            value: widget.autoConnect,
+            onChanged: widget.onAutoConnectChanged,
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('订阅每天自动更新'),
+            subtitle: Text(
+              '当前订阅超过 24 小时未更新时，启动时自动拉取',
+              style: TextStyle(color: muted),
+            ),
+            value: widget.subAutoUpdate,
+            onChanged: widget.onSubAutoUpdateChanged,
+          ),
+          const SizedBox(height: 24),
           Text('系统', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           ListTile(
@@ -1650,7 +1896,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.11.0 · app.flbox · Xray 内核',
+              'FlBox 0.12.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -1670,6 +1916,9 @@ class ProxiesPage extends StatefulWidget {
     required this.delays,
     required this.testing,
     required this.onTestAll,
+    required this.favorites,
+    required this.onToggleFav,
+    required this.onPickFastest,
   });
 
   final XrayProfile? profile;
@@ -1679,6 +1928,9 @@ class ProxiesPage extends StatefulWidget {
   final Map<String, int?> delays;
   final bool testing;
   final VoidCallback? onTestAll;
+  final Set<String> favorites;
+  final ValueChanged<String> onToggleFav;
+  final VoidCallback? onPickFastest;
 
   @override
   State<ProxiesPage> createState() => _ProxiesPageState();
@@ -1708,11 +1960,13 @@ class _ProxiesPageState extends State<ProxiesPage> {
         child: Text('还没有配置，先到「配置」页导入。', style: TextStyle(color: muted)),
       );
     }
-    // Tested nodes first (fastest first), then untested, then timeouts;
-    // the original profile order breaks ties.
+    // Favorites first in smart order; then tested nodes (fastest
+    // first), untested, timeouts; profile order breaks ties.
     int rank(XrayNode n) {
-      if (!widget.delays.containsKey(n.name)) return 1;
-      return widget.delays[n.name] == null ? 2 : 0;
+      final base = !widget.delays.containsKey(n.name)
+          ? 1
+          : (widget.delays[n.name] == null ? 2 : 0);
+      return widget.favorites.contains(n.name) ? base - 3 : base;
     }
 
     final indexed = <(int, XrayNode)>[
@@ -1768,6 +2022,11 @@ class _ProxiesPageState extends State<ProxiesPage> {
                     ? '测速中 ${widget.delays.length}/${profile.nodes.length}'
                     : '全部测速'),
               ),
+              IconButton(
+                icon: const Icon(Icons.bolt),
+                tooltip: '测速并选最快',
+                onPressed: widget.testing ? null : widget.onPickFastest,
+              ),
               PopupMenuButton<int>(
                 icon: const Icon(Icons.sort),
                 tooltip: '排序',
@@ -1811,6 +2070,19 @@ class _ProxiesPageState extends State<ProxiesPage> {
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            IconButton(
+                              icon: Icon(
+                                widget.favorites.contains(node.name)
+                                    ? Icons.star
+                                    : Icons.star_border,
+                                color: widget.favorites.contains(node.name)
+                                    ? _accent
+                                    : muted,
+                                size: 20,
+                              ),
+                              tooltip: '收藏',
+                              onPressed: () => widget.onToggleFav(node.name),
+                            ),
                             if (widget.delays.containsKey(node.name))
                               Text(
                                 widget.delays[node.name] == null

@@ -76,3 +76,11 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **仪表盘**：状态卡显示当前订阅名。
 - **日志页**：新增「清空」按钮。
 - **设置页**：底部版本号行（与 pubspec 同步手改）。
+
+## 0.12 功能补齐（2026-11-03 晚）
+
+- **规则模式（分流）**：设置→代理可选全局/规则。规则模式下翻译器把配置自带 Clash rules 翻译为 Xray 路由（DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/IP-CIDR/GEOIP/GEOSITE/DST-PORT/MATCH；组名目标一律落到当前选中节点；不支持的类型跳过并计数）；无可用规则时兜底 geosite:cn＋geoip:cn 直连。geoip.dat/geosite.dat 运行时从 Loyalsoldier 规则库（jsdelivr 优先、GitHub 兜底）下载到文档目录，Go 侧 Start 前以 `xray.location.asset` 指到该目录；设置里可手动更新规则库。规则翻译有单元测试 core/xraytranslate/rules_check_test.go。
+- **收藏节点**：代理页星标收藏，智能排序时置顶（prefs fav_nodes）。
+- **测速选最快**：代理页闪电按钮＝全量并行测速后自动切换到延迟最低的节点。
+- **启动后自动连接**（设置开关，prefs auto_connect）、**订阅每天自动更新**（超过 24 小时在启动时静默拉取，prefs sub_auto_update）。
+- **仪表盘**：运行中状态行显示当前节点最近一次测速延迟。
