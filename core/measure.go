@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	corenet "github.com/xtls/xray-core/common/net"
@@ -16,6 +17,25 @@ import (
 	xcore "github.com/xtls/xray-core/core"
 	coreserial "github.com/xtls/xray-core/infra/conf/serial"
 )
+
+// measureMu serializes the instance lifecycle - load, create,
+// start, close - across all concurrent measure calls; only the
+// probe itself runs in parallel. The controlled comparison
+// across builds is unambiguous: every FlBox build whose test
+// instances were created serially (0.42's node swapping, 0.43's
+// lock-held starts) ran the full list without crashing, and
+// every build that created instances concurrently (0.44's
+// listening instances, 0.45's first cut of this design) died
+// partway through the same subscription on the same phone.
+// v2rayNG survives the same native shape because its test
+// service runs in a separate ":tasks" process (manifest), so a
+// native abort there never takes the UI down - and even they
+// serialize measurements globally for untrimmable configs.
+// FlBox measures in the UI process, so the lifecycle itself is
+// serialized instead: creation is milliseconds for a trimmed
+// config, the probe is the slow part, and the probe stays
+// parallel.
+var measureMu sync.Mutex
 
 // xrayMeasureDelay measures one node's real latency in a single
 // self-contained call, following the design v2rayNG ships
@@ -69,30 +89,42 @@ func xrayMeasureDelay(configJSON, url string) (int64, error) {
 	if err != nil {
 		return -1, err
 	}
+	// The lifecycle - parse, create, start - runs under
+	// measureMu (see its comment); the probe below does not.
+	measureMu.Lock()
 	config, err := coreserial.LoadJSONConfig(strings.NewReader(string(raw)))
-	if err != nil {
-		return -1, fmt.Errorf("config load error: %w", err)
-	}
-	config.Inbound = nil
-	var essential []*serial.TypedMessage
-	for _, app := range config.App {
-		switch app.Type {
-		case "xray.app.proxyman.OutboundConfig",
-			"xray.app.dispatcher.Config",
-			"xray.app.log.Config":
-			essential = append(essential, app)
+	var inst *xcore.Instance
+	if err == nil {
+		config.Inbound = nil
+		var essential []*serial.TypedMessage
+		for _, app := range config.App {
+			switch app.Type {
+			case "xray.app.proxyman.OutboundConfig",
+				"xray.app.dispatcher.Config",
+				"xray.app.log.Config":
+				essential = append(essential, app)
+			}
+		}
+		config.App = essential
+		inst, err = xcore.New(config)
+		if err == nil {
+			err = inst.Start()
 		}
 	}
-	config.App = essential
-
-	inst, err := xcore.New(config)
+	measureMu.Unlock()
 	if err != nil {
-		return -1, fmt.Errorf("instance creation failed: %w", err)
+		if inst != nil {
+			measureMu.Lock()
+			inst.Close()
+			measureMu.Unlock()
+		}
+		return -1, fmt.Errorf("test instance setup failed: %w", err)
 	}
-	if err := inst.Start(); err != nil {
-		return -1, fmt.Errorf("startup failed: %w", err)
-	}
-	defer inst.Close()
+	defer func() {
+		measureMu.Lock()
+		inst.Close()
+		measureMu.Unlock()
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()

@@ -265,3 +265,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - v2rayNG 的实际做法（读其主仓与 AndroidLibXrayLite 源码，存于 flbox-verify/refs/）：每个节点单独一次原生调用 MeasureOutboundDelay——配置先在 Kotlin 侧裁掉 inbounds、清空 routing 规则、dns/fakedns/stats/policy 置空（postProcessForSpeedtest），原生侧解析后再把 App 段只留 proxyman-outbound/dispatcher/log、Inbound 置 nil，core.New 起实例，用 core.Dial 让 HTTP 探针从实例内部走默认出站，测两次取小，建、测、拆全在一次调用内完成，不开任何监听端口；并发默认 16，但全量（自定义）配置的测量被他们全局串行，源码注释原话：并行拆建可能 abort 掉探针进程。
 - 本版照此落地：Go 新增 xrayMeasureDelay（FFI FlboxXrayMeasureDelay，返回毫秒数或 -1，panic 兜底）：JSON 层先删 inbounds/routing/dns/fakedns/stats/policy——本仓 Xray 版本的 JSON 加载器在**解析期**就会解析 geosite 引用（实测假 geosite 名在 LoadJSONConfig 阶段即报加载失败），只靠 App 过滤挡不住、必须先裁；随后 App 过滤＋Inbound=nil＋core.New/Start＋core.Dial 探针两次取小＋Close。Dart _testAll 改走该调用、8 路并发，逐节点日志行保留；旧的注册表式测速实例入口（xrayTestStart/Stop 与对应 FFI、桥接方法）保留无调用方作后备。
 - 新增 measure_test.go 三件：freedom 出站直测本地 204 服务器走通全链路、带假 geosite 的路由/DNS 配置能测通（证两层裁剪生效）、6 路并发测量全过；Go 全包测试与 analyze 均过。
+
+## 0.46：测速实例生命周期串行化（用户 2026-11-04：0.45 第 23 个闪退）
+- 证据链补完：0.45 真机测到第 23 个完成时闪退（日志 start 行已打到第 31 个、新加坡专线01）。跨版本对照成为定案级证据——凡实例**串行**创建的版本（0.42 逐个换主实例、0.43 启动被注册表锁串行）全程不闪；凡实例**并发**创建的版本（0.44 真并行、0.45 测量调用全并发）都在同一订阅中段（20–32 个）闪退。
+- v2rayNG 为何同设计不闪，也查清了：其清单里 CoreTestService 跑在独立的 `:tasks` 进程（原生层权威进程是 `:daemon`），原生探针就算 abort 也只死测试进程、界面无感；FlBox 测量跑在界面进程里，同样的 abort 就是闪退。这也是它敢默认并发 16 的前提。
+- 改法：`xrayMeasureDelay` 的实例生命周期（LoadJSONConfig＋New＋Start＋Close）全部收进一把全局锁串行，只放探针本身并行——裁剪后的创建是毫秒级、慢的是探针，速度损失可忽略；这与 v2rayNG 对不可裁剪配置全局串行的处理同理。Dart 侧每节点补 `speed test done:` 完成日志，与 start 行配对：万一再死，无 done 行的在飞集合至多 8 个具名节点，可继续收窄。
+- 若本版仍闪：下一手是将测速整体迁到独立进程（仿 `:tasks`），工程量大、留作后手不在本版。

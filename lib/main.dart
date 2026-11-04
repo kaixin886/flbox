@@ -2099,6 +2099,15 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// phone (32 of 47 starts logged inside two seconds, then
   /// the process was gone). The core-side test-instance entry
   /// points remain as a fallback but have no caller now.
+  /// 0.45's first cut of this measure design still died (at 23
+  /// completions): instance lifecycles were still fully
+  /// concurrent, and unlike v2rayNG - whose test service runs
+  /// in a separate ":tasks" process - FlBox measures in the UI
+  /// process, so a native abort is an app crash. Since 0.46
+  /// the core serializes the instance lifecycle (load, create,
+  /// start, close) and only the probes run in parallel; the
+  /// builds that never crashed (0.42, 0.43) are exactly the
+  /// ones whose starts were serialized.
   ///
   /// A node's name is logged before its measure call, so a
   /// call that still manages to kill the process names its
@@ -2132,6 +2141,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           _logEvent('speed test: ${entry.key} failed: $e');
           ms = null;
         }
+        // Completion lines pair with the start lines above: if
+        // a measure ever kills the process again, the nodes
+        // with a start line but no done line are the in-flight
+        // suspects, a set of at most the worker count.
+        _logEvent('speed test done: ${entry.key} ${ms ?? 'timeout'}');
         if (mounted) {
           setState(() => _delays = {..._delays, entry.key: ms});
         }
@@ -3673,7 +3687,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.45.0 · app.flbox · Xray 内核',
+              'FlBox 0.46.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
