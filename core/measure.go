@@ -18,24 +18,60 @@ import (
 	coreserial "github.com/xtls/xray-core/infra/conf/serial"
 )
 
-// measureMu serializes the instance lifecycle - load, create,
-// start, close - across all concurrent measure calls; only the
-// probe itself runs in parallel. The controlled comparison
-// across builds is unambiguous: every FlBox build whose test
-// instances were created serially (0.42's node swapping, 0.43's
-// lock-held starts) ran the full list without crashing, and
-// every build that created instances concurrently (0.44's
-// listening instances, 0.45's first cut of this design) died
-// partway through the same subscription on the same phone.
-// v2rayNG survives the same native shape because its test
-// service runs in a separate ":tasks" process (manifest), so a
-// native abort there never takes the UI down - and even they
-// serialize measurements globally for untrimmable configs.
-// FlBox measures in the UI process, so the lifecycle itself is
-// serialized instead: creation is milliseconds for a trimmed
-// config, the probe is the slow part, and the probe stays
-// parallel.
+// measureMu serializes instance CREATION - load, create,
+// start - across all concurrent measure calls; the probe runs
+// in parallel and teardown runs on a background closer (see
+// closeQueue below), so neither waits on the other. The
+// controlled comparison across builds is unambiguous: every
+// FlBox build whose test instances were created serially
+// (0.42's node swapping, 0.43's lock-held starts) ran the full
+// list without crashing, and every build that created
+// instances concurrently (0.44's listening instances, 0.45's
+// first cut of this design) died partway through the same
+// subscription on the same phone. v2rayNG survives the same
+// native shape because its test service runs in a separate
+// ":tasks" process (manifest), so a native abort there never
+// takes the UI down - and even they serialize measurements
+// globally for untrimmable configs.
 var measureMu sync.Mutex
+
+// closeQueue feeds a single background goroutine that closes
+// finished test instances one at a time. Closes used to run on
+// the calling worker under measureMu, and that was the poison
+// in 0.47-0.49: every run on the user's phone wedged at
+// exactly 23 posted results with the process still alive -
+// one instance's Close deadlocked, ate the mutex, and queued
+// every later lifecycle call behind it forever; results whose
+// probes had already succeeded never posted either, because
+// their own deferred closes were stuck in the same queue (the
+// missing results were scattered, not a clean prefix). A
+// hanging Close now stalls only the closer goroutine: leaked
+// instances pile up harmlessly in a throwaway process, closes
+// stay serialized among themselves, and measurement never
+// waits on teardown.
+var closeQueue = make(chan *xcore.Instance, 128)
+
+func init() {
+	go func() {
+		for inst := range closeQueue {
+			inst.Close()
+		}
+	}()
+}
+
+func enqueueClose(inst *xcore.Instance) {
+	if inst == nil {
+		return
+	}
+	select {
+	case closeQueue <- inst:
+	default:
+		// The closer is wedged and the queue is full; hand the
+		// instance to a fire-and-forget goroutine rather than
+		// block a measurement on it.
+		go inst.Close()
+	}
+}
 
 // xrayMeasureDelay measures one node's real latency in a single
 // self-contained call, following the design v2rayNG ships
@@ -51,8 +87,11 @@ var measureMu sync.Mutex
 //     the instance itself (core.Dial), so the request leaves
 //     through the instance's default outbound - the node under
 //     test. Nothing listens, nothing is probed from outside.
-//   - The instance is created, measured and closed inside this
-//     one call. Earlier designs kept throwaway instances alive
+//   - The instance is created and measured inside this one
+//     call; teardown is handed to a serialized background
+//     closer (see closeQueue) so a hanging Close can never
+//     wedge the run. Earlier designs kept throwaway instances
+//     alive
 //     across FFI calls in a registry while other instances
 //     started and stopped around them (0.43/0.44); on the phone
 //     that died partway through the list. v2rayNG only ever
@@ -113,18 +152,10 @@ func xrayMeasureDelay(configJSON, url string) (int64, error) {
 	}
 	measureMu.Unlock()
 	if err != nil {
-		if inst != nil {
-			measureMu.Lock()
-			inst.Close()
-			measureMu.Unlock()
-		}
+		enqueueClose(inst)
 		return -1, fmt.Errorf("test instance setup failed: %w", err)
 	}
-	defer func() {
-		measureMu.Lock()
-		inst.Close()
-		measureMu.Unlock()
-	}()
+	defer func() { enqueueClose(inst) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()

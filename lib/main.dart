@@ -408,7 +408,18 @@ Future<void> testMain() async {
         final item = items[next++];
         int ms;
         try {
-          ms = await _xrayMeasureInIsolate(item['config'] as String, url);
+          // A single measure is bounded down in the core (a
+          // 12-second probe behind a serialized, millisecond
+          // lifecycle), so 30 seconds without a return means
+          // the call wedged below Dart. Post a timeout for the
+          // node and move on: the stuck isolate is abandoned
+          // (its late completion is ignored) instead of
+          // silently ending the whole run at that node - the
+          // 0.47-0.49 runs all stopped dead at 23 results
+          // because one wedged call starved every worker
+          // behind it.
+          ms = await _xrayMeasureInIsolate(item['config'] as String, url)
+              .timeout(const Duration(seconds: 30), onTimeout: () => -1);
         } catch (_) {
           ms = -1;
         }
@@ -3943,7 +3954,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.49.0 · app.flbox · Xray 内核',
+              'FlBox 0.50.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
