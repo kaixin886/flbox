@@ -236,3 +236,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.40：VPN 改 v2rayNG 式常驻 + 修测速闪退（用户 2026-11-04 两报）
 - **常驻语义反转（用户拍板，覆盖 0.26/0.19 的旧契约）**：用户要求「和 v2rayNG 一样：后台划掉 VPN 服务仍然在，打开软件显示开启，点一下就可以关闭」。改法：① FlboxVpnService 删除 onTaskRemoved（不再喊 Dart 停、不再 800ms 自拆），清单给服务加 stopWithTask="false"；② Dart 删除 onTaskRemoved 通道处理；③ 常驻通知加 contentIntent，点击通知直接回到 App。会话生灭回归前台服务本身：进程还在→隧道＋核心＋转发器都在，重开靠 0.39 的对账接管（_running 直接延续或 adopt/revive），主开关一点即全拆；进程真被系统杀掉→隧道随进程消亡，null intent 仍 stopSelf 不复活僵尸（NOT_STICKY 不变）。休眠中的 FlboxCoreService 同步删 onTaskRemoved，免得日后复活时带回旧行为。注意：小米等 ROM 在划掉后强杀进程时 FGS 也保不住，那是系统层面的事，靠电池白名单缓解，不在本版范围。
 - **测速闪退**：_testAll 是全仓最后一个把整表活放主 isolate 的地方——translateAll（47 节点逐个 LoadConfig 验活）＋两次整实例 xrayStart（测速实例与恢复原节点）全同步堵 UI 线程数秒，与 0.31「切分组卡顿」同源，堵到系统杀掉/ANR 即表现为闪退。改法：三处 FFI 全部走 Isolate.run（先快照 yaml 与原节点配置到本地变量，闭包不捕获 this），主 isolate 只留 6 路 HTTP 探测；另加 _busy 守卫。加固：Go 侧 FFI 边界加 panic 兜底（XrayStart/Stop、Translate/TranslateAll、VpnForwardStart/Stop、sing-box Start/Stop）——未捕获的 Go panic 会直接杀进程无任何提示，今后一律转成错误字符串走既有 toast＋日志路径，真有内核 panic 也能拿到文本定位。
+
+## 0.41 修复：0.40 测速报「object is unsendable」（用户 2026-11-04 截图）
+- 现象：0.40 点全部测速不再闪退（主线程解堵生效，应用活着），但 toast 报 `Illegal argument in isolate message: object is unsendable - _Timer ... <- _HomeShellState <- _testAll.<anonymous closure>`，测速在干活前就被拒。
+- 定案：_testAll 里内联写的 Isolate.run 闭包继承了这个大方法的整个捕获上下文（State 对象及其内部 Timer），不可发送之物被一起打包，Isolate.run 直接抛错。而 _translate/_restartCoreInPlace 这类专用小方法没事，是因为它们的方法体里别无他物、上下文干净——「闭包先快照字段、绝不捕获 this」的旧规矩防的是直接捕获，防不住同方法内其他闭包把 this 拉进共享上下文这一路。
+- 修法：测速的三处 isolate 调用（translateAll、起测速实例、恢复原节点/停核心）改走顶层函数（_translateAllInIsolate/_xrayStartInIsolate/_xrayStopInIsolate），顶层闭包只能捕获自己的参数，物理上带不进 State。耐久规矩追加：**大方法内绝不内联 Isolate.run，一律经顶层或专用小方法转发**。
+- 本版仅 Dart 改动，0.40 的 VPN 常驻化原样保留、待一并验收。

@@ -363,6 +363,27 @@ Color _delayColor(int? ms) {
   return Colors.redAccent;
 }
 
+/// Worker-isolate entry points for the bulk speed test. These are
+/// top-level on purpose: Isolate.run rejects a closure whose
+/// captured context holds an unsendable object, and a closure
+/// created inside a large state method can inherit that method's
+/// whole context - in 0.40 the speed test's closures dragged the
+/// state object (and a Timer inside it) along and every test
+/// failed with "object is unsendable" before doing any work. A
+/// top-level function's closure can only capture its own
+/// parameters, which are plain sendable values. (The small
+/// in-class helpers _translate and _restartCoreInPlace get away
+/// with in-class closures because their methods hold nothing
+/// else; do not copy that pattern into a big method.)
+Future<XrayAllTest> _translateAllInIsolate(String yaml) =>
+    Isolate.run(() => CoreBridge().translateAllXray(yaml, logPath: ''));
+
+Future<void> _xrayStartInIsolate(String config) =>
+    Isolate.run(() => CoreBridge().xrayStart(config, 0));
+
+Future<void> _xrayStopInIsolate() =>
+    Isolate.run(() => CoreBridge().xrayStop());
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -2066,8 +2087,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// killed it - the "speed test crashes the app" report of
   /// 2026-11-04 (the same trap the group switch hit in 0.31).
   /// Only the probes (plain HTTP through the test ports) stay on
-  /// this isolate. Locals are snapshotted first: an isolate
-  /// closure may only capture sendable values, never `this`.
+  /// this isolate. The isolate calls go through the top-level
+  /// helpers above, never an Isolate.run written inline here:
+  /// an inline closure inherits this method's context and is
+  /// rejected as unsendable (the 0.40 attempt failed exactly so).
   Future<void> _testAll() async {
     if (_testing || _busy || _profile == null || _profileYaml == null) {
       return;
@@ -2082,10 +2105,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _delays = {};
     });
     try {
-      final all = await Isolate.run(
-        () => CoreBridge().translateAllXray(yaml, logPath: ''),
-      );
-      await Isolate.run(() => CoreBridge().xrayStart(all.config, 0));
+      final all = await _translateAllInIsolate(yaml);
+      await _xrayStartInIsolate(all.config);
       final entries = all.ports.entries
           .where((e) => !isInfoNode(e.key))
           .toList();
@@ -2107,9 +2128,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } finally {
       try {
         if (wasRunning && prevConfig != null) {
-          await Isolate.run(() => CoreBridge().xrayStart(prevConfig, 0));
+          await _xrayStartInIsolate(prevConfig);
         } else if (!wasRunning) {
-          await Isolate.run(() => CoreBridge().xrayStop());
+          await _xrayStopInIsolate();
         }
       } catch (_) {}
       if (mounted) setState(() => _testing = false);
@@ -3644,7 +3665,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.40.0 · app.flbox · Xray 内核',
+              'FlBox 0.41.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
