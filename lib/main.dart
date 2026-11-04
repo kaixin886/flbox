@@ -3275,6 +3275,22 @@ class _SettingsPageState extends State<_SettingsPage> {
   late NavStyle _navStyle = widget.navStyle;
   late int _autoIntervalHours = widget.autoIntervalHours;
 
+  // Local copies of the remaining mutable values. This page is
+  // a pushed route: it does not rebuild when the home shell
+  // setStates after applying a change, so controls bound
+  // straight to widget values looked frozen until the page was
+  // closed and reopened. Each control updates its copy through
+  // this page's own setState and forwards the change up. (The
+  // routing-mode copy is optimistic: if the shell rejects the
+  // switch it toasts, and the check corrects on next open.)
+  late bool _autoConnect = widget.autoConnect;
+  late bool _restoreOnBoot = widget.restoreOnBoot;
+  late bool _ipv6Enabled = widget.ipv6Enabled;
+  late bool _notifyOnStart = widget.notifyOnStart;
+  late bool _notifySubUpdate = widget.notifySubUpdate;
+  late bool _rulesMode = widget.rulesMode;
+  late Set<String> _bypassPkgs = widget.bypassPkgs;
+
   @override
   Widget build(BuildContext context) {
     final muted = Theme.of(context)
@@ -3336,9 +3352,9 @@ class _SettingsPageState extends State<_SettingsPage> {
               leading: const Icon(Icons.apps_outlined),
               title: const Text('分应用代理'),
               subtitle: Text(
-                widget.bypassPkgs.isEmpty
+                _bypassPkgs.isEmpty
                     ? '所有应用都走 VPN'
-                    : '${widget.bypassPkgs.length} 个应用绕过 VPN',
+                    : '${_bypassPkgs.length} 个应用绕过 VPN',
                 style: TextStyle(color: muted),
               ),
               trailing: const Icon(Icons.chevron_right),
@@ -3346,8 +3362,11 @@ class _SettingsPageState extends State<_SettingsPage> {
                 Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => _BypassAppsPage(
-                      initial: widget.bypassPkgs,
-                      onChanged: widget.onBypassChanged,
+                      initial: _bypassPkgs,
+                      onChanged: (pkgs) {
+                        setState(() => _bypassPkgs = pkgs);
+                        widget.onBypassChanged(pkgs);
+                      },
                     ),
                   ),
                 );
@@ -3362,10 +3381,13 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('全局模式'),
               subtitle:
                   Text('所有流量都走代理', style: TextStyle(color: muted)),
-              trailing: !widget.rulesMode
+              trailing: !_rulesMode
                   ? const Icon(Icons.check, color: _accent)
                   : null,
-              onTap: () => widget.onRulesModeChanged(false),
+              onTap: () {
+                setState(() => _rulesMode = false);
+                widget.onRulesModeChanged(false);
+              },
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -3373,10 +3395,13 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('规则模式（分流）'),
               subtitle: Text('v2ray 原版绕过大陆：国内域名与 IP 直连，其余走代理',
                   style: TextStyle(color: muted)),
-              trailing: widget.rulesMode
+              trailing: _rulesMode
                   ? const Icon(Icons.check, color: _accent)
                   : null,
-              onTap: () => widget.onRulesModeChanged(true),
+              onTap: () {
+                setState(() => _rulesMode = true);
+                widget.onRulesModeChanged(true);
+              },
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -3400,8 +3425,11 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('启动后自动连接'),
               subtitle: Text('打开 FlBox 时自动启动上次的节点',
                   style: TextStyle(color: muted)),
-              value: widget.autoConnect,
-              onChanged: widget.onAutoConnectChanged,
+              value: _autoConnect,
+              onChanged: (v) {
+                setState(() => _autoConnect = v);
+                widget.onAutoConnectChanged(v);
+              },
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -3411,8 +3439,11 @@ class _SettingsPageState extends State<_SettingsPage> {
                 '手机重启后自动恢复上次连接（需在系统里允许 FlBox 自启动）',
                 style: TextStyle(color: muted),
               ),
-              value: widget.restoreOnBoot,
-              onChanged: widget.onRestoreOnBootChanged,
+              value: _restoreOnBoot,
+              onChanged: (v) {
+                setState(() => _restoreOnBoot = v);
+                widget.onRestoreOnBootChanged(v);
+              },
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -3452,8 +3483,11 @@ class _SettingsPageState extends State<_SettingsPage> {
                 '开启后 VPN 同时接管 IPv6 流量（节点服务器需有 IPv6 出口）；下次启动 VPN 时生效',
                 style: TextStyle(color: muted),
               ),
-              value: widget.ipv6Enabled,
-              onChanged: widget.onIpv6Changed,
+              value: _ipv6Enabled,
+              onChanged: (v) {
+                setState(() => _ipv6Enabled = v);
+                widget.onIpv6Changed(v);
+              },
             ),
           ]),
           const SizedBox(height: 20),
@@ -3464,8 +3498,11 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('常驻通知信息'),
               subtitle: Text('在 VPN 常驻通知里实时显示当前节点、延迟与上下行速度',
                   style: TextStyle(color: muted)),
-              value: widget.notifyOnStart,
-              onChanged: widget.onNotifyOnStartChanged,
+              value: _notifyOnStart,
+              onChanged: (v) {
+                setState(() => _notifyOnStart = v);
+                widget.onNotifyOnStartChanged(v);
+              },
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -3473,8 +3510,11 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('订阅自动更新通知'),
               subtitle: Text('订阅自动更新成功后推送通知',
                   style: TextStyle(color: muted)),
-              value: widget.notifySubUpdate,
-              onChanged: widget.onNotifySubUpdateChanged,
+              value: _notifySubUpdate,
+              onChanged: (v) {
+                setState(() => _notifySubUpdate = v);
+                widget.onNotifySubUpdateChanged(v);
+              },
             ),
           ]),
           const SizedBox(height: 20),
@@ -3532,7 +3572,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.37.0 · app.flbox · Xray 内核',
+              'FlBox 0.38.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

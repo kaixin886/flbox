@@ -224,3 +224,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.37 修复：全新安装规则模式启动失败（用户朋友截图＋用户清数据复现，2026-11-04）
 - 定案：内置规则库解压目录错位——Kotlin extractBundledGeoData 把 geoip/geosite.dat 写进 filesDir，而 Dart 检查与 Xray 核心（assetDir＝日志所在目录）读的是 app_flutter（path_provider 文档目录）。全新安装/清数据后规则模式启动即报 geosite.dat 不存在；老用户因早期网络下载路径把文件落对了位置故不犯。全局模式不引用 geosite 故正常（用户实证）。
 - 修法：Dart 把 docs 路径经通道参数 dir 传给 Kotlin、解压写到该目录；且 Dart 在解压报成功后复核文件确实落地（存在＋geosite >1MB）才认成功，否则回落网络下载路径，不再静默假成功。
+
+## 0.38 修复：设置页开关点按不变样（用户 2026-11-04 录屏＋确认，其他开关同样）
+- 定案：设置页是推入的路由，主页（HomeShell）setState 不会重建它；直接绑 widget 值的控件（自动连接/开机自启/IPv6/两个通知开关、路由模式勾选、分应用数量）改动其实已生效落盘，但本页视觉纹丝不动，关掉重开才显示新状态（导航样式与更新周期早用本地副本故无此症）。
+- 修法：_SettingsPageState 给上述全部可变值加本地副本，各控件先 setState 本地副本再上抛回调；路由模式为乐观更新（壳层若因规则库失败拒绝会弹提示，重开页面自动校正）。
