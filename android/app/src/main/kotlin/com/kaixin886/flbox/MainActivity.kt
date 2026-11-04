@@ -112,8 +112,9 @@ class MainActivity : FlutterActivity() {
                     // ~25 MB copy: keep it off the main thread, reply
                     // on it as MethodChannel requires.
                     val force = call.argument<Boolean>("force") ?: false
+                    val dir = call.argument<String>("dir")
                     Thread {
-                        val ok = extractBundledGeoData(force)
+                        val ok = extractBundledGeoData(force, dir)
                         runOnUiThread { result.success(ok) }
                     }.start()
                 }
@@ -183,15 +184,22 @@ class MainActivity : FlutterActivity() {
      * files that are already in place unless [force]. Returns true
      * when both files are present and sane-sized afterwards.
      */
-    private fun extractBundledGeoData(force: Boolean): Boolean {
+    // The Dart side owns the location: the core reads the rule
+    // databases from the documents directory it passes in, so
+    // the bundled copies must land exactly there (an earlier
+    // version wrote to filesDir, which the core never reads -
+    // fresh installs then failed to start in rules mode).
+    private fun extractBundledGeoData(force: Boolean, dirPath: String?): Boolean {
+        val dir = if (dirPath != null) File(dirPath) else filesDir
+        dir.mkdirs()
         var allOk = true
         for (name in listOf("geoip.dat", "geosite.dat")) {
-            val target = File(filesDir, name)
+            val target = File(dir, name)
             if (!force && target.exists() && target.length() > 1_000_000) {
                 continue
             }
             try {
-                val tmp = File(filesDir, "$name.tmp")
+                val tmp = File(dir, "$name.tmp")
                 assets.open("geo/$name").use { input ->
                     tmp.outputStream().use { output -> input.copyTo(output) }
                 }

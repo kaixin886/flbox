@@ -750,9 +750,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       return true;
     }
     try {
-      final ok = await _vpnChannel
-          .invokeMethod<bool>('extractGeoData', {'force': force});
-      if (ok == true) {
+      final ok = await _vpnChannel.invokeMethod<bool>(
+        'extractGeoData',
+        {'force': force, 'dir': docs.path},
+      );
+      // Trust the extraction only once the files are verifiably
+      // where the core looks for them; a silent misplacement
+      // falls through to the download path instead of a dead
+      // rules-mode start.
+      if (ok == true &&
+          await files['geoip.dat']!.exists() &&
+          await files['geosite.dat']!.exists() &&
+          await files['geosite.dat']!.length() > 1000000) {
         _geoReady = true;
         return true;
       }
@@ -3523,7 +3532,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.36.0 · app.flbox · Xray 内核',
+              'FlBox 0.37.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

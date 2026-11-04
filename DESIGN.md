@@ -220,3 +220,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 备份/恢复：设置页新增「备份」组。导出＝全部订阅（元数据＋YAML 内容）＋用户设置存成一个 JSON，经系统保存对话框落盘（失败回退剪贴板）；恢复＝选文件校验 app/kind 标记后全量覆盖订阅文件与设置、重载当前订阅。
 - 开机自启恢复：was_running 在启动成功/接管会话时置真、手动停止时清零；设置→连接新增「开机自启恢复」开关；Kotlin BootReceiver 读 FlutterSharedPreferences，两者都真时拉起 MainActivity，Dart 侧以与自动连接相同的路径重连（ROM 拦后台拉起时退化为下次手动打开时恢复）。
 - 后台自动更新修复：_bgRefreshDueSubs 此前假设订阅内容恒为 Clash YAML，现与前台一致先走 convertImport 归一化，并顺手把 subscription-userinfo 写回（formatSubInfoText 抽为顶层函数共用）。
+
+## 0.37 修复：全新安装规则模式启动失败（用户朋友截图＋用户清数据复现，2026-11-04）
+- 定案：内置规则库解压目录错位——Kotlin extractBundledGeoData 把 geoip/geosite.dat 写进 filesDir，而 Dart 检查与 Xray 核心（assetDir＝日志所在目录）读的是 app_flutter（path_provider 文档目录）。全新安装/清数据后规则模式启动即报 geosite.dat 不存在；老用户因早期网络下载路径把文件落对了位置故不犯。全局模式不引用 geosite 故正常（用户实证）。
+- 修法：Dart 把 docs 路径经通道参数 dir 传给 Kotlin、解压写到该目录；且 Dart 在解压报成功后复核文件确实落地（存在＋geosite >1MB）才认成功，否则回落网络下载路径，不再静默假成功。
