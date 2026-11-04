@@ -254,3 +254,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 新设计：测速不再碰主实例。Go 新增瞬态实例注册表（xrayTestStart/xrayTestStop，FFI FlboxXrayTestStart/Stop，带 panic 兜底）：拿节点自己的单节点配置，把首个入站端口改到 20100+i 私有端口、日志从共享错误文件摘掉（防多实例抢同一文件），StartInstance 起独立小实例，与主实例（7890＋转发器＋VPN 会话）完全隔离。Dart 恢复 6 路并发 worker：起实例→探私有端口→关实例；测完无恢复步骤。VPN 开着测速时流量照走当前节点不受扰。
 - 操作锁全撤：_toggleCore/_selectNode 的 _testing 拒绝块删除，_onNetworkChanged 不再被 _testing 挡（它重启的是主实例，与测速无关）。测速期间切节点/开关照常可用。
 - 保留的定位手段：每节点起实例前先写日志行 `speed test: <名>`；单节点失败标超时继续。新增 Go 测试 TestXrayTestInstances：两节点（vless＋hy2）并行起实例、端口可拨、主实例不受扰、停后端口释放、停未知端口无害。
+
+## 0.44：测速提速（用户 2026-11-04 报 0.43「测速太慢」）
+- 两处根因（读 0.43 代码定案）：①`xrayTestStart` 把注册表互斥锁跨着 `StartInstance` 持有——启动是最贵的一步却全程串行，6 路 worker 实际只有探测在并行，47 个节点的启动一个接一个排队；②规则模式的单节点配置自带 geosite/geoip 路由＋分流 DNS，每个测速实例启动时都要加载 geo 数据文件并建匹配器——纯延迟探测根本用不上路由，这份成本却付了 47 遍。
+- 改法：`xrayTestStart` 先把配置瘦身——删 routing/dns/stats/policy（无路由时实例默认全走第一个出站，恰好就是被测节点；删 DNS 一并去掉其 geo 引用，测速实例不再碰资源目录），再把 `StartInstance` 移到锁外（锁只护注册表 map，换入时旧实例在锁外关闭，stop 同理）；Dart worker 数 6→12。
+- 新增 Go 回归测试：TestXrayTestStartStripsGeoSections（喂带假 geosite 名的路由/DNS 配置，剥离失效则启动必失败）、TestXrayTestStartConcurrent（4 路 goroutine 同时起实例、全数监听成功）。

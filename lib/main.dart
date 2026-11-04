@@ -2077,13 +2077,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   /// Parallel latency test on transient per-node instances:
-  /// six workers each start a throwaway core instance for one
-  /// node (the node's own single-node config, its inbound moved
-  /// to a private port), probe it, and close it. The main
-  /// instance - and with it any live VPN session - is never
-  /// touched: nothing needs restoring afterwards, the session
-  /// keeps carrying traffic while the test flies, and the user
-  /// is NOT locked out of other operations meanwhile.
+  /// twelve workers each start a throwaway core instance for
+  /// one node (the node's own single-node config, slimmed down
+  /// core-side to inbound plus outbound, its inbound moved to a
+  /// private port), probe it, and close it. The main instance -
+  /// and with it any live VPN session - is never touched:
+  /// nothing needs restoring afterwards, the session keeps
+  /// carrying traffic while the test flies, and the user is NOT
+  /// locked out of other operations meanwhile.
   ///
   /// History: the test began as ONE combined instance holding
   /// every outbound at once (TranslateAll), which flash-crashed
@@ -2093,7 +2094,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// refuse toggles and node switches for the duration; the
   /// user sent that back as too slow. Per-node transient
   /// instances keep every start in the exact shape a daily
-  /// connection proves, just six at a time on side ports.
+  /// connection proves, just twelve at a time on side ports.
+  /// The first transient cut (0.43) was still slow: the core
+  /// held a registry lock across instance starts (serializing
+  /// the expensive step) and every test instance loaded the
+  /// rule-mode geo data; 0.44 starts truly in parallel on
+  /// configs stripped of routing and DNS.
   ///
   /// A node's name is logged before its instance starts, so a
   /// start that still manages to kill the process names its
@@ -2141,7 +2147,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
 
     try {
-      await Future.wait([for (var i = 0; i < 6; i++) worker()]);
+      await Future.wait([for (var i = 0; i < 12; i++) worker()]);
     } finally {
       if (mounted) setState(() => _testing = false);
     }
@@ -3675,7 +3681,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.43.0 · app.flbox · Xray 内核',
+              'FlBox 0.44.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

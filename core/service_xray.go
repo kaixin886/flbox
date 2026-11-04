@@ -185,6 +185,19 @@ func xrayStop() error {
 // app on the user's phone), and swapping the main instance
 // node by node (worked, but took the better part of a minute
 // and locked the user out meanwhile).
+//
+// Two speed rules learned from the first cut of this design
+// (0.43, still slow on the user's phone):
+//   - The registry mutex guards ONLY the map. Holding it across
+//     StartInstance serialized every start, so the "parallel"
+//     workers queued behind the single most expensive step.
+//   - A latency probe needs no routing, DNS, stats or policy:
+//     with no routing section the instance sends everything to
+//     its first (proxy) outbound, which is exactly the node
+//     under test. Rule-mode configs carry geosite/geoip routing
+//     and split DNS; starting one instance per node made every
+//     start load the geo data files and build matchers - the
+//     dominant per-node cost, paid dozens of times per run.
 var (
 	testMu    sync.Mutex
 	testInsts = map[int]*xcore.Instance{}
@@ -207,37 +220,41 @@ func xrayTestStart(configJSON string, port int) error {
 	// Detach the log from the shared error file: many instances
 	// writing one file concurrently would interleave and fight.
 	cfg["log"] = map[string]any{"loglevel": "warning", "access": "none"}
+	// Slim the config down to what a probe needs (see the speed
+	// rules above): inbound plus the node's outbound. Dropping
+	// the DNS section also drops its geo references, so no asset
+	// directory is consulted at all.
+	delete(cfg, "routing")
+	delete(cfg, "dns")
+	delete(cfg, "stats")
+	delete(cfg, "policy")
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	if xAssetDir != "" {
-		// Rule-mode configs in the test set resolve geo entries
-		// from the same asset dir as the main instance (whose
-		// start normally sets this env var first).
-		os.Setenv(platform.AssetLocation, xAssetDir)
-	}
-	testMu.Lock()
-	defer testMu.Unlock()
-	if old := testInsts[port]; old != nil {
-		old.Close()
-		delete(testInsts, port)
-	}
+	// StartInstance runs OUTSIDE the registry lock so parallel
+	// workers really do start their instances at the same time.
 	inst, err := xcore.StartInstance("json", raw)
 	if err != nil {
 		return err
 	}
+	testMu.Lock()
+	old := testInsts[port]
 	testInsts[port] = inst
+	testMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
 	return nil
 }
 
 func xrayTestStop(port int) error {
 	testMu.Lock()
-	defer testMu.Unlock()
 	inst := testInsts[port]
+	delete(testInsts, port)
+	testMu.Unlock()
 	if inst == nil {
 		return nil
 	}
-	delete(testInsts, port)
 	return inst.Close()
 }
