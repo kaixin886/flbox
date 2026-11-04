@@ -375,11 +375,8 @@ Color _delayColor(int? ms) {
 /// in-class helpers _translate and _restartCoreInPlace get away
 /// with in-class closures because their methods hold nothing
 /// else; do not copy that pattern into a big method.)
-Future<void> _xrayTestStartInIsolate(String config, int port) =>
-    Isolate.run(() => CoreBridge().xrayTestStart(config, port));
-
-Future<void> _xrayTestStopInIsolate(int port) =>
-    Isolate.run(() => CoreBridge().xrayTestStop(port));
+Future<int> _xrayMeasureInIsolate(String config, String url) =>
+    Isolate.run(() => CoreBridge().xrayMeasureDelay(config, url));
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -2076,15 +2073,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Parallel latency test on transient per-node instances:
-  /// twelve workers each start a throwaway core instance for
-  /// one node (the node's own single-node config, slimmed down
-  /// core-side to inbound plus outbound, its inbound moved to a
-  /// private port), probe it, and close it. The main instance -
-  /// and with it any live VPN session - is never touched:
-  /// nothing needs restoring afterwards, the session keeps
-  /// carrying traffic while the test flies, and the user is NOT
-  /// locked out of other operations meanwhile.
+  /// Parallel latency test, v2rayNG's design (0.45): each node
+  /// is measured by ONE self-contained core call that trims the
+  /// node's config to its outbound essentials, starts a
+  /// throwaway instance with no inbounds, probes through the
+  /// instance itself and closes it - see xrayMeasureDelay in
+  /// the core. Eight workers run these calls concurrently. The
+  /// main instance - and with it any live VPN session - is
+  /// never touched: nothing needs restoring afterwards, the
+  /// session keeps carrying traffic while the test flies, and
+  /// the user is NOT locked out of other operations meanwhile.
   ///
   /// History: the test began as ONE combined instance holding
   /// every outbound at once (TranslateAll), which flash-crashed
@@ -2092,17 +2090,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// swapped the main instance node by node - correct, but the
   /// better part of a minute for a big profile, and it had to
   /// refuse toggles and node switches for the duration; the
-  /// user sent that back as too slow. Per-node transient
-  /// instances keep every start in the exact shape a daily
-  /// connection proves, just twelve at a time on side ports.
-  /// The first transient cut (0.43) was still slow: the core
-  /// held a registry lock across instance starts (serializing
-  /// the expensive step) and every test instance loaded the
-  /// rule-mode geo data; 0.44 starts truly in parallel on
-  /// configs stripped of routing and DNS.
+  /// user sent that back as too slow. The 0.43/0.44 design kept
+  /// per-node throwaway instances in a registry across separate
+  /// start/probe/stop calls: 0.43 serialized the starts behind
+  /// a registry lock and loaded the rule-mode geo data in every
+  /// instance (slow), and 0.44's truly parallel starts on
+  /// listening instances died partway through the list on the
+  /// phone (32 of 47 starts logged inside two seconds, then
+  /// the process was gone). The core-side test-instance entry
+  /// points remain as a fallback but have no caller now.
   ///
-  /// A node's name is logged before its instance starts, so a
-  /// start that still manages to kill the process names its
+  /// A node's name is logged before its measure call, so a
+  /// call that still manages to kill the process names its
   /// culprit on the log page; ordinary failures just mark the
   /// node timed out and the run continues.
   Future<void> _testAll() async {
@@ -2120,25 +2119,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     var next = 0;
     Future<void> worker() async {
       while (next < entries.length) {
-        final i = next++;
-        final entry = entries[i];
-        final port = 20100 + i;
+        final entry = entries[next++];
         _logEvent('speed test: ${entry.key}');
         int? ms;
-        var started = false;
         try {
-          await _xrayTestStartInIsolate(entry.value, port);
-          started = true;
-          ms = await _probePort(port);
+          final r = await _xrayMeasureInIsolate(
+            entry.value,
+            'http://www.gstatic.com/generate_204',
+          );
+          ms = r >= 0 ? r : null;
         } catch (e) {
           _logEvent('speed test: ${entry.key} failed: $e');
           ms = null;
-        } finally {
-          if (started) {
-            try {
-              await _xrayTestStopInIsolate(port);
-            } catch (_) {}
-          }
         }
         if (mounted) {
           setState(() => _delays = {..._delays, entry.key: ms});
@@ -2147,7 +2139,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
 
     try {
-      await Future.wait([for (var i = 0; i < 12; i++) worker()]);
+      await Future.wait([for (var i = 0; i < 8; i++) worker()]);
     } finally {
       if (mounted) setState(() => _testing = false);
     }
@@ -3681,7 +3673,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.44.0 · app.flbox · Xray 内核',
+              'FlBox 0.45.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

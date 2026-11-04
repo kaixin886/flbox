@@ -103,6 +103,10 @@ class CoreBridge {
     _xrayTestStop = lib.lookupFunction<_TestStopNative, _TestStopDart>(
       'FlboxXrayTestStop',
     );
+    _xrayMeasureDelay = lib
+        .lookupFunction<_NodeDetailNative, _NodeDetailNative>(
+          'FlboxXrayMeasureDelay',
+        );
     _xrayStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStop');
     _xrayStatus = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStatus');
     _xrayTraffic = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayTraffic');
@@ -162,6 +166,7 @@ class CoreBridge {
   late final _StartDart _xrayStart;
   late final _StartDart _xrayTestStart;
   late final _TestStopDart _xrayTestStop;
+  late final _NodeDetailNative _xrayMeasureDelay;
   late final _NoArg _xrayStop;
   late final _NoArg _xrayStatus;
   late final _NoArg _xrayTraffic;
@@ -267,6 +272,23 @@ class CoreBridge {
   void xrayTestStop(int port) {
     final err = _take(_xrayTestStop(port));
     if (err != null) throw CoreException(err);
+  }
+
+  /// Measures one node's real latency in a single self-contained
+  /// core call (the v2rayNG design): the core trims the config
+  /// to its outbound essentials, starts a throwaway instance
+  /// with no inbounds, probes [url] through the instance itself
+  /// and closes it, all inside the call. Returns the best of two
+  /// attempts in milliseconds, or -1 when the node did not
+  /// answer; the failure detail is kept as the core's last
+  /// error. Never throws for a failed node.
+  int xrayMeasureDelay(String configJson, String url) {
+    final a = configJson.toNativeUtf8();
+    final b = url.toNativeUtf8();
+    final res = _take(_xrayMeasureDelay(a, b));
+    malloc.free(a);
+    malloc.free(b);
+    return int.tryParse(res ?? '') ?? -1;
   }
 
   String xrayStatus() => _take(_xrayStatus()) ?? '(no status)';

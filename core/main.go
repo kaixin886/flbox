@@ -31,10 +31,20 @@ func recordErr(err error) *C.char {
 	if err == nil {
 		return nil
 	}
+	noteErr(err)
+	return C.CString(err.Error())
+}
+
+// noteErr stores err as the last error without allocating a
+// return string, for entry points whose return value carries
+// data rather than the error itself.
+func noteErr(err error) {
+	if err == nil {
+		return
+	}
 	lastErrMu.Lock()
 	lastErr = err.Error()
 	lastErrMu.Unlock()
-	return C.CString(err.Error())
 }
 
 func translateClash(clashYAML string) (string, error) {
@@ -249,6 +259,22 @@ func FlboxXrayTestStop(port C.int) (out *C.char) {
 		}
 	}()
 	return recordErr(xrayTestStop(int(port)))
+}
+
+//export FlboxXrayMeasureDelay
+func FlboxXrayMeasureDelay(configJSON, url *C.char) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			noteErr(fmt.Errorf("core panic recovered: %v", r))
+			out = C.CString("-1")
+		}
+	}()
+	ms, err := xrayMeasureDelay(C.GoString(configJSON), C.GoString(url))
+	if err != nil {
+		noteErr(err)
+		return C.CString("-1")
+	}
+	return C.CString(fmt.Sprintf("%d", ms))
 }
 
 //export FlboxXrayStatus
