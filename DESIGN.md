@@ -211,3 +211,6 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.34 功能补强（用户 2026-11-04：「ipv6 那些加上」「订阅分组可以参考他的」）
 - **IPv6 支持开关**（设置→高级，默认关，下次启动 VPN 生效）：开后 VpnService 加 fdfe:dcba:9876::1/126 地址＋::/0 路由，转发器 tun 同步双栈地址——关着时 IPv6 流量绕过隧道直连（泄漏口），开后一并接管；节点服务器无 IPv6 出口时 v6 目标会不通，故默认关、用户自选。链路：Dart pref ipv6_enabled → startVpn 通道参数 → MainActivity intent extra EXTRA_IPV6 → FlboxVpnService Builder；FFI FlboxVpnForwardStart 加 ipv6 参数选 vpnForwardConfig6。
 - **订阅分组对齐 AsteriskNG**：①卡面右上加**启用开关**——禁用后该分组从代理页页签消失、自动更新（前台/后台）跳过；禁用正在使用的分组＝先停连接、当前位顺延到下一个启用分组（无则置空）；②编辑弹层加 **User-Agent** 字段＋预设 chips（ClashMeta/1.0、v2rayNG/2.3.10、sing-box/1.14.4），拉取订阅（手动/前台自动/后台自动三路）都用该订阅自己的 UA（此前写死 ClashMeta/1.0）。HWID/Age 私钥等 Mihomo 专属字段仍不抄。
+
+## 0.35 仪表盘开启前布局修复（用户 2026-11-04 真机报障）
+- 未启动时速率卡只剩标题行也要占满高（空图表 72＋图例），页面临界溢出一点点却滑不动、下方模式开关够不着。修法：无样本（<2）时速率卡只显示标题行（实时速率＋暂无数据），图表与图例有数据才展开；仪表盘滚动改 AlwaysScrollableScrollPhysics＋Column mainAxisSize.min，临界溢出也能拖动。

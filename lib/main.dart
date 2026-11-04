@@ -2601,7 +2601,9 @@ class _DashboardPage extends StatelessWidget {
         onPressed: onOpenSettings,
       ),
       child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (netBlocked) ...[
@@ -2770,42 +2772,46 @@ class _DashboardPage extends StatelessWidget {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        height: 72,
-                        width: double.infinity,
-                        child: CustomPaint(
-                          painter: _RateChartPainter(samples),
+                      if (samples.length >= 2) ...[
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          height: 72,
+                          width: double.infinity,
+                          child: CustomPaint(
+                            painter: _RateChartPainter(samples),
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: const BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: _accent,
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: _accent,
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text('下行',
-                              style: TextStyle(color: muted, fontSize: 12)),
-                          const SizedBox(width: 16),
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: const BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Color(0xFF34A853),
+                            const SizedBox(width: 6),
+                            Text('下行',
+                                style:
+                                    TextStyle(color: muted, fontSize: 12)),
+                            const SizedBox(width: 16),
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Color(0xFF34A853),
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text('上行',
-                              style: TextStyle(color: muted, fontSize: 12)),
-                        ],
-                      ),
+                            const SizedBox(width: 6),
+                            Text('上行',
+                                style:
+                                    TextStyle(color: muted, fontSize: 12)),
+                          ],
+                        ),
+                      ],
                     ],
                   ),
                 );
@@ -3243,7 +3249,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.34.0 · app.flbox · Xray 内核',
+              'FlBox 0.35.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
