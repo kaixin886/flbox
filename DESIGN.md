@@ -162,3 +162,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **单节点链接导入**：Go 侧 ParseShareLinks 解析 vless/vmess/trojan/ss/hysteria2/wireguard 六种链接（多行或整段 base64 blob），产出与节点编辑器同构的条目、经 UpsertNode 存入「手动节点」；hy2 链接的 pinSHA256 直落 pinned-cert-sha256，vless 的 raw 传输名归一为 tcp。入口：代理页右上链接图标、配置页「从单节点链接导入」按钮（对话框带粘贴键）；无法解析的条数在 toast 里报数。六链接全链路测试（解析→upsert→翻译，REALITY 与 obfs 存活断言）在内。
 - **多格式文件导入**：Go 侧 ConvertImport 统一嗅探并归一为 Clash YAML：YAML 直通、链接清单/base64、Xray JSON（protocol 体系，hysteria 出站的 finalmask salamander/quicParams 与 pinnedPeerCertSha256 反向映射回条目）、sing-box JSON（type 体系，含 endpoints 的 wireguard，selector/direct 跳过）。_addSubFromYaml 与订阅更新路径都先归一，JSON 型订阅可加可更新；导入 toast 标注来源格式。Xray/sing-box 两组真配置转换测试在内。
 - **文件选择器白名单**：_importProfile 由 FileType.any 改为 custom 扩展名（yaml/yml/json/txt），无关文件不可选、防加错。历史注记：any 是当年 yaml MIME 不一致变灰的对策；若本机再现变灰，退回 any＋ConvertImport 内容校验（非配置内容本就导不进）。
+
+## 0.26（2026-11-04）修测速全灭（allowInsecure）与 VPN 关不掉
+
+- **allowInsecure 根除**：0.24 真机实锤——良心云 47 节点里混有普通 TLS 节点，翻译器给 tlsSettings 恒写 allowInsecure（false 也写），而内嵌 Xray 26.3.27 对该字段是「出现即硬错误」（已移除特性），单个节点选作出口时启动必死、TranslateAll 的整表配置一加载就被 proxy-31 拖沉、全部测速直接报「测速失败」。修法：翻译器任何路径都不再输出 allowInsecure（TLS 与 hy2 两处）；skip-cert-verify 在 Xray 侧无等价物，自签服务器走 pinnedPeerCertSha256（普通 TLS 分支也接上 pin）。另加防线：宿主包给 TranslateAll 注入 OutboundCheck（逐出站用真 LoadConfig 验活），验不过的节点不给测速端口——今后任何单个坏节点只死自己、不沉整表。测试：TLS 版三节点（vless/trojan/hy2 均带 skip-cert-verify）逐个与整表 LoadConfig 全过、配置全文断言无 allowInsecure、人造毒节点被跳过。
+- **VPN 停止加固**：用户报「开关关了 VPN 服务还在」。停止路径三层兜底：Dart 侧抽出 _stopCore 统一拆除（转发器→核心→隧道），停后轮询 vpnActive 校验、没停掉记日志并重试一次，结果行（core stopped (vpn service down)）进日志页可查；MainActivity 的 stopVpn/stopCoreService 在发停止意图后 600ms 再 stopService 兜底（服务没自停则系统强拆、onDestroy 关隧道）；两个服务都加 onTaskRemoved——划掉后台时先喊 Dart 走正规停止，800ms 没落地则本地自拆。本地模式的「核心服务」通知残留同理覆盖。
+- 文件导入在 0.24 真机已确认可用（ntt-test-profile.yaml 导入成功）。

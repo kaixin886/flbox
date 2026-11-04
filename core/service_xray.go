@@ -67,6 +67,31 @@ func xrayTranslateAll(clashYAML, logPath string) (string, error) {
 	return string(raw), nil
 }
 
+func init() {
+	// One un-loadable node must never poison a whole-profile
+	// speed test (a removed Xray field in a single airport
+	// node used to fail every node's test at once, because
+	// the combined config is loaded as a whole). TranslateAll
+	// drops outbounds the real loader rejects.
+	xraytranslate.OutboundCheck = func(outbound map[string]any) error {
+		raw, err := json.Marshal(map[string]any{
+			"inbounds": []any{
+				map[string]any{
+					"listen":   "127.0.0.1",
+					"port":     20199,
+					"protocol": "mixed",
+				},
+			},
+			"outbounds": []any{outbound},
+		})
+		if err != nil {
+			return err
+		}
+		_, err = xcore.LoadConfig("json", strings.NewReader(string(raw)))
+		return err
+	}
+}
+
 var xReport string
 
 // xrayStart starts the instance (StartInstance already starts it; an

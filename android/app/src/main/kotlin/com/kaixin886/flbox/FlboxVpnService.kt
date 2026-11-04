@@ -113,6 +113,20 @@ class FlboxVpnService : VpnService() {
         stopSelf()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Swiping FlBox out of recents ends the session: a
+        // tunnel that outlives its UI reads as "the VPN won't
+        // turn off". Dart gets a brief window to run its
+        // orderly stop (forwarder, core, tunnel); the delayed
+        // local teardown fires only if that never landed.
+        try {
+            VpnBridge.channel?.invokeMethod("onTaskRemoved", null)
+        } catch (_: Exception) {
+        }
+        Handler(Looper.getMainLooper()).postDelayed({ stopVpn() }, 800)
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         active = false
         tunFd = -1

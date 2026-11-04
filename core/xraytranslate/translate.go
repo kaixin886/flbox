@@ -128,12 +128,22 @@ func streamSettings(p clashProxy) map[string]any {
 		}
 	case p.TLS:
 		stream["security"] = "tls"
-		stream["tlsSettings"] = map[string]any{
-			"serverName":    sniOf(p),
-			"fingerprint":   fingerprint,
-			"alpn":          p.ALPN,
-			"allowInsecure": p.SkipCertVerify,
+		tlsSettings := map[string]any{
+			"serverName":  sniOf(p),
+			"fingerprint": fingerprint,
+			"alpn":        p.ALPN,
 		}
+		// Never emit allowInsecure, in either value: Xray
+		// removed the field and its mere presence in the JSON
+		// is a hard config error ("The feature allowInsecure
+		// has been removed"), which poisoned every plain-TLS
+		// node - and any all-node speed-test config holding
+		// one. Clash's skip-cert-verify has no Xray
+		// equivalent; self-signed servers get pinned instead.
+		if p.PinnedCert != "" {
+			tlsSettings["pinnedPeerCertSha256"] = p.PinnedCert
+		}
+		stream["tlsSettings"] = tlsSettings
 	}
 	switch network {
 	case "ws":
@@ -275,9 +285,7 @@ func nodeOutbound(p clashProxy) (map[string]any, error) {
 			"fingerprint": fingerprint,
 			"alpn":        alpn,
 		}
-		if p.SkipCertVerify {
-			tlsSettings["allowInsecure"] = true
-		}
+		// allowInsecure is never emitted (see streamSettings).
 		if p.PinnedCert != "" {
 			tlsSettings["pinnedPeerCertSha256"] = p.PinnedCert
 		}
@@ -540,6 +548,12 @@ type AllResult struct {
 	Ports  map[string]int `json:"ports"`
 }
 
+// OutboundCheck, when set by the host package, validates one
+// built outbound with the real core loader. TranslateAll drops
+// nodes whose outbound fails the check, so a single node the
+// core refuses can never fail a whole-profile speed test again.
+var OutboundCheck func(outbound map[string]any) error
+
 // TranslateAll builds ONE Xray config holding every supported node as
 // its own outbound, each fronted by a dedicated mixed inbound on
 // 127.0.0.1:20100+i. It exists for parallel latency tests: a single
@@ -565,6 +579,11 @@ func TranslateAll(clashYAML []byte, logPath string) (*AllResult, error) {
 		}
 		outTag := fmt.Sprintf("proxy-%d", idx)
 		outbound["tag"] = outTag
+		if OutboundCheck != nil {
+			if err := OutboundCheck(outbound); err != nil {
+				continue
+			}
+		}
 		outbounds = append(outbounds, outbound)
 		port := 20100 + idx
 		inTag := fmt.Sprintf("in-%d", idx)

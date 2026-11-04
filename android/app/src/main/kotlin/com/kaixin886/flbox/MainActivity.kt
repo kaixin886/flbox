@@ -6,6 +6,8 @@ import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
@@ -55,6 +57,14 @@ class MainActivity : FlutterActivity() {
                         Intent(this, FlboxVpnService::class.java)
                             .setAction(FlboxVpnService.ACTION_STOP)
                     )
+                    // Backstop: if the service has not stopped
+                    // itself shortly after (lost intent, ROM
+                    // quirk), stopService makes the system tear
+                    // it down and onDestroy closes the tunnel.
+                    // A no-op when it already stopped.
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        stopService(Intent(this, FlboxVpnService::class.java))
+                    }, 600)
                     result.success(null)
                 }
                 "startCoreService" -> {
@@ -78,6 +88,10 @@ class MainActivity : FlutterActivity() {
                         Intent(this, FlboxCoreService::class.java)
                             .setAction(FlboxCoreService.ACTION_STOP)
                     )
+                    // Same backstop as stopVpn above.
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        stopService(Intent(this, FlboxCoreService::class.java))
+                    }, 600)
                     result.success(null)
                 }
                 "listApps" -> {

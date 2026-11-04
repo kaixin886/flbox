@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -94,5 +95,97 @@ func TestXraySmoke(t *testing.T) {
 		if _, err := xcore.LoadConfig("json", strings.NewReader(vpnCfg)); err != nil {
 			t.Errorf("node %s: vpn config rejected by Xray: %v", name, err)
 		}
+	}
+}
+
+const tlsYAML = `
+proxies:
+  - name: TLS-VLESS
+    type: vless
+    server: 203.0.113.30
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    tls: true
+    servername: example.com
+    skip-cert-verify: true
+  - name: TLS-TROJAN
+    type: trojan
+    server: 203.0.113.31
+    port: 443
+    password: test-pass
+    sni: example.com
+    skip-cert-verify: true
+  - name: HY2-SKIP
+    type: hysteria2
+    server: 203.0.113.32
+    port: 443
+    password: test-auth
+    sni: example.com
+    skip-cert-verify: true
+`
+
+// Plain-TLS nodes (the airport staple) must load: Xray removed
+// allowInsecure and rejects any config still carrying the key,
+// which used to break both starting on such a node and the
+// all-node speed test.
+func TestXrayTlsNodesLoad(t *testing.T) {
+	result, err := xraytranslate.Translate([]byte(tlsYAML), xraytranslate.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(result.Nodes) != 3 {
+		t.Fatalf("nodes = %+v", result.Nodes)
+	}
+	for name, cfgJSON := range result.Configs {
+		if strings.Contains(cfgJSON, "allowInsecure") {
+			t.Errorf("node %s: config still carries allowInsecure", name)
+		}
+		if _, err := xcore.LoadConfig("json", strings.NewReader(cfgJSON)); err != nil {
+			t.Errorf("node %s: config rejected by Xray: %v", name, err)
+		}
+	}
+	all, err := xraytranslate.TranslateAll([]byte(tlsYAML), "")
+	if err != nil {
+		t.Fatalf("translateAll: %v", err)
+	}
+	if len(all.Ports) != 3 {
+		t.Fatalf("ports = %+v", all.Ports)
+	}
+	if strings.Contains(all.Config, "allowInsecure") {
+		t.Errorf("combined config carries allowInsecure")
+	}
+	if _, err := xcore.LoadConfig("json", strings.NewReader(all.Config)); err != nil {
+		t.Fatalf("combined config rejected by Xray: %v", err)
+	}
+}
+
+var errPoison = errors.New("poisoned outbound")
+
+// TranslateAll must drop a node whose outbound the core loader
+// rejects instead of failing the whole speed test.
+func TestTranslateAllSkipsPoisonedNode(t *testing.T) {
+	orig := xraytranslate.OutboundCheck
+	defer func() { xraytranslate.OutboundCheck = orig }()
+	xraytranslate.OutboundCheck = func(ob map[string]any) error {
+		if ob["protocol"] == "trojan" {
+			return errPoison
+		}
+		if orig != nil {
+			return orig(ob)
+		}
+		return nil
+	}
+	all, err := xraytranslate.TranslateAll([]byte(tlsYAML), "")
+	if err != nil {
+		t.Fatalf("translateAll: %v", err)
+	}
+	if _, ok := all.Ports["TLS-TROJAN"]; ok {
+		t.Errorf("poisoned trojan node kept a speed-test port")
+	}
+	if len(all.Ports) != 2 {
+		t.Fatalf("ports = %+v", all.Ports)
+	}
+	if _, err := xcore.LoadConfig("json", strings.NewReader(all.Config)); err != nil {
+		t.Fatalf("combined config rejected by Xray: %v", err)
 	}
 }

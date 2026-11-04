@@ -364,6 +364,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
       } else if (call.method == 'onNetworkChanged') {
         _onNetworkChanged();
+      } else if (call.method == 'onTaskRemoved') {
+        // The user swiped FlBox out of recents: end the session
+        // in an orderly way instead of leaving a host behind.
+        if (_running) await _stopCore();
       }
       return null;
     });
@@ -1477,25 +1481,59 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _rateHistory.value = const [];
   }
 
+  /// Full session teardown, shared by the toggle and the
+  /// task-removed signal from the services: packet forwarder
+  /// and core first, then the host (the VPN tunnel or the
+  /// local foreground service). The VPN stop is verified
+  /// against the service's own state - a stop that only landed
+  /// in Dart leaves a black-holing tunnel behind, which reads
+  /// as "the VPN won't turn off".
+  Future<void> _stopCore() async {
+    if (_modeVpn) {
+      try {
+        CoreBridge().vpnForwardStop();
+      } catch (_) {}
+    }
+    try {
+      CoreBridge().xrayStop();
+    } catch (_) {}
+    if (_modeVpn) {
+      try {
+        await _vpnChannel.invokeMethod('stopVpn');
+      } catch (_) {}
+      _tunFd = 0;
+      var down = false;
+      for (var i = 0; i < 6 && !down; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        try {
+          down = !(await _vpnChannel.invokeMethod<bool>('vpnActive') ??
+              false);
+        } catch (_) {
+          down = true;
+        }
+      }
+      if (down) {
+        _logEvent('core stopped (vpn service down)');
+      } else {
+        _logEvent('stop: vpn service still active, retrying stop');
+        try {
+          await _vpnChannel.invokeMethod('stopVpn');
+        } catch (_) {}
+      }
+    } else {
+      try {
+        await _vpnChannel.invokeMethod('stopCoreService');
+      } catch (_) {}
+      _logEvent('core stopped');
+    }
+    _stopPolling();
+    if (mounted) setState(() => _running = false);
+  }
+
   Future<void> _toggleCore() async {
     if (_busy) return;
     if (_running) {
-      if (_modeVpn) {
-        try {
-          CoreBridge().vpnForwardStop();
-        } catch (_) {}
-      }
-      try {
-        CoreBridge().xrayStop();
-      } catch (_) {}
-      if (_modeVpn) {
-        await _vpnChannel.invokeMethod('stopVpn');
-        _tunFd = 0;
-      } else {
-        await _vpnChannel.invokeMethod('stopCoreService');
-      }
-      _stopPolling();
-      setState(() => _running = false);
+      await _stopCore();
       return;
     }
     final config = _profile?.configs[_selectedNode];
@@ -2950,7 +2988,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.25.0 · app.flbox · Xray 内核',
+              'FlBox 0.26.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
