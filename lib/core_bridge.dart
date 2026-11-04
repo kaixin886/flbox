@@ -26,6 +26,7 @@ typedef _FwdStartDart = Pointer<Utf8> Function(int);
 typedef _FwdActiveNative = Int32 Function();
 typedef _FwdActiveDart = int Function();
 typedef _NodeDetailNative = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _ParseLinksNative = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _NodeUpsertNative = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
@@ -117,6 +118,12 @@ class CoreBridge {
     _filterNodes = lib.lookupFunction<_NodeUpsertNative, _NodeUpsertNative>(
       'FlboxFilterNodes',
     );
+    _parseLinks = lib.lookupFunction<_ParseLinksNative, _ParseLinksNative>(
+      'FlboxParseShareLinks',
+    );
+    _convertImport = lib.lookupFunction<_ParseLinksNative, _ParseLinksNative>(
+      'FlboxConvertImport',
+    );
     _lastError = lib.lookupFunction<_NoArg, _NoArg>('FlboxLastError');
     _free = lib.lookupFunction<_FreeNative, void Function(Pointer<Utf8>)>(
       'FlboxFree',
@@ -135,6 +142,8 @@ class CoreBridge {
   late final _NodeUpsertNative _nodeUpsert;
   late final _NodeDetailNative _nodeDelete;
   late final _NodeUpsertNative _filterNodes;
+  late final _ParseLinksNative _parseLinks;
+  late final _ParseLinksNative _convertImport;
   late final _NoArg _xrayVersion;
   late final _TranslateNative _xrayTranslate;
   late final _TranslateAllNative _xrayTranslateAll;
@@ -307,6 +316,32 @@ class CoreBridge {
       throw CoreException(_lastErrorText() ?? 'node filter failed');
     }
     return out;
+  }
+
+  /// Parses share links (vless/vmess/trojan/ss/hysteria2/
+  /// wireguard, one per line, or a base64 blob of them) into
+  /// editor-shaped node entries.
+  /// Sniffs an imported file's format (Clash YAML passthrough,
+  /// share-link lists, Xray JSON, sing-box JSON) and returns the
+  /// normalised Clash YAML plus a kind tag.
+  Map<String, dynamic> convertImport(String text) {
+    final a = text.toNativeUtf8();
+    final out = _take(_convertImport(a));
+    malloc.free(a);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'import conversion failed');
+    }
+    return jsonDecode(out) as Map<String, dynamic>;
+  }
+
+  Map<String, dynamic> parseShareLinks(String text) {
+    final a = text.toNativeUtf8();
+    final out = _take(_parseLinks(a));
+    malloc.free(a);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'share link parse failed');
+    }
+    return jsonDecode(out) as Map<String, dynamic>;
   }
 
   String nodeDelete(String yaml, String name) {

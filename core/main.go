@@ -11,6 +11,7 @@ package main
 import "C"
 
 import (
+	"encoding/json"
 	"sync"
 	"unsafe"
 
@@ -243,6 +244,31 @@ func FlboxFilterNodes(clashYAML, keep, drop *C.char) *C.char {
 		return nil
 	}
 	return C.CString(out)
+}
+
+//export FlboxParseShareLinks
+func FlboxParseShareLinks(text *C.char) *C.char {
+	out, err := xraytranslate.ParseShareLinks(C.GoString(text))
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
+}
+
+//export FlboxConvertImport
+func FlboxConvertImport(text *C.char) *C.char {
+	yamlText, kind, err := xraytranslate.ConvertImport(C.GoString(text))
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	out, err := json.Marshal(map[string]string{"yaml": yamlText, "kind": kind})
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(string(out))
 }
 
 //export FlboxFree

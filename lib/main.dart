@@ -878,7 +878,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     });
   }
 
-  /// Adds a new subscription entry from YAML text and activates it.
+  /// Adds a new subscription entry from imported text and
+  /// activates it. The text may be Clash YAML, a share-link list,
+  /// or an Xray / sing-box JSON config: the core sniffs and
+  /// normalises it to Clash YAML first.
   Future<void> _addSubFromYaml(
     String text, {
     required String name,
@@ -887,6 +890,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }) async {
     final docs = await getApplicationDocumentsDirectory();
     _logPath = '${docs.path}/xray-error.log';
+    final converted = CoreBridge().convertImport(text);
+    text = converted['yaml'] as String;
+    final kind = converted['kind'] as String;
     final profile = CoreBridge().translateXray(
       text,
       vpn: _modeVpn,
@@ -907,7 +913,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _activeSubId = sub.id;
     await _persistSubs();
     await _activateYaml(text, name: name);
-    _toast('已导入 ${profile.nodes.length} 个可用节点');
+    _toast(
+      '已导入 ${profile.nodes.length} 个可用节点'
+      '${kind == 'yaml' ? '' : '（已从 $kind 转换）'}',
+    );
   }
 
   Future<void> _switchSub(SubProfile sub) async {
@@ -1085,17 +1094,121 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _importProfile() async {
-    // FileType.any on purpose: Android's picker filters by MIME type,
-    // and .yaml files carry no consistent MIME on many ROMs, which left
-    // them greyed out. Content is validated by the translator instead.
+    // Restricted to importable extensions so unrelated files stay
+    // unselectable and a wrong tap is impossible. History: this
+    // used to be FileType.any because .yaml carries no consistent
+    // MIME on many ROMs and files greyed out — if that ever bites
+    // again, the fallback is any-type picking plus the converter's
+    // validation (ConvertImport rejects non-config content anyway).
     final picked = await FilePicker.platform.pickFiles(
-      type: FileType.any,
+      type: FileType.custom,
+      allowedExtensions: ['yaml', 'yml', 'json', 'txt'],
     );
     if (picked == null || picked.files.single.path == null) return;
     final file = File(picked.files.single.path!);
     try {
       final text = await file.readAsString();
       await _addSubFromYaml(text, name: picked.files.single.name);
+    } on CoreException catch (e) {
+      _toast('导入失败：${e.message}');
+    } catch (e) {
+      _toast('导入失败：$e');
+    }
+  }
+
+  /// Pastes/imports share links (vless://, hy2://, …): parsed in
+  /// the core, then spliced into the local "手动节点" profile like
+  /// hand-added nodes, so subscription updates never touch them.
+  Future<void> _importFromLink() async {
+    if (_running) {
+      _toast('先停止再导入节点');
+      return;
+    }
+    final controller = TextEditingController();
+    final text = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('导入单节点链接'),
+        content: SizedBox(
+          width: 320,
+          child: TextField(
+            controller: controller,
+            decoration: const InputDecoration(
+              hintText: 'vless://… / hysteria2://…（可多行，或整段 base64）',
+            ),
+            keyboardType: TextInputType.multiline,
+            minLines: 3,
+            maxLines: 6,
+            autofocus: true,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              final data = await Clipboard.getData(Clipboard.kTextPlain);
+              if (data?.text != null) controller.text = data!.text!;
+            },
+            child: const Text('粘贴'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
+    if (text == null || text.isEmpty) return;
+    try {
+      final parsed = CoreBridge().parseShareLinks(text);
+      final entries = (parsed['entries'] as List).cast<Map<String, dynamic>>();
+      if (entries.isEmpty) {
+        _toast('没有可导入的链接');
+        return;
+      }
+      final docs = await getApplicationDocumentsDirectory();
+      SubProfile? manual;
+      for (final s in _subs) {
+        if (s.id == 'manual') manual = s;
+      }
+      var yaml = '';
+      if (manual != null) {
+        final f = _subFile(docs, manual.id);
+        if (await f.exists()) yaml = await f.readAsString();
+      }
+      for (final entry in entries) {
+        yaml = CoreBridge().nodeUpsert(yaml, entry, '');
+      }
+      final profile = CoreBridge().translateXray(
+        yaml,
+        vpn: _modeVpn,
+        logPath: _logPath,
+        rules: _rulesMode,
+      );
+      var sub = manual;
+      if (sub == null) {
+        sub = SubProfile(
+          id: 'manual',
+          name: '手动节点',
+          updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        );
+        _subs = [..._subs, sub];
+      }
+      await _subFile(docs, sub.id).writeAsString(yaml);
+      sub.nodeCount = profile.nodes.length;
+      sub.updatedAtMs = DateTime.now().millisecondsSinceEpoch;
+      await _persistSubs();
+      _activeSubId = sub.id;
+      await _persistSubs();
+      await _activateYaml(yaml, name: sub.name);
+      final skipped = (parsed['skipped'] as num?)?.toInt() ?? 0;
+      _toast(
+        '已导入 ${entries.length} 个节点到「手动节点」'
+        '${skipped > 0 ? '，跳过 $skipped 条无法解析的' : ''}',
+      );
     } on CoreException catch (e) {
       _toast('导入失败：${e.message}');
     } catch (e) {
@@ -1244,6 +1357,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final subInfo =
           _formatSubInfo(response.headers.value('subscription-userinfo'));
       var text = await response.transform(utf8.decoder).join();
+      if (updateSub != null) {
+        // A subscription added from a JSON/link import stores the
+        // converted YAML; its updates arrive in the original
+        // format, so normalise again before filtering/translating.
+        text = CoreBridge().convertImport(text)['yaml'] as String;
+      }
       if (updateSub != null &&
           (updateSub.keepRegex.isNotEmpty || updateSub.dropRegex.isNotEmpty)) {
         text = CoreBridge().filterNodes(
@@ -1683,6 +1802,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onSwitchSub: _switchSub,
             onEditNode: _openNodeEditor,
             onAddNode: () => _openNodeEditor(),
+            onImportLink: _importFromLink,
             profile: _profile,
             profileName: _profileName,
             selectedNode: _selectedNode,
@@ -1705,6 +1825,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onDelete: _deleteSub,
             onToggleAutoUpdate: _toggleSubAutoUpdate,
             onEditSub: _openSubEditor,
+            onImportLink: _importFromLink,
           ),
           LogsPage(),
         ],
@@ -2829,7 +2950,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.24.0 · app.flbox · Xray 内核',
+              'FlBox 0.25.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2854,6 +2975,7 @@ class ProxiesPage extends StatefulWidget {
     required this.onPickFastest,
     required this.onEditNode,
     required this.onAddNode,
+    required this.onImportLink,
     required this.subs,
     required this.activeSubId,
     required this.onSwitchSub,
@@ -2871,6 +2993,7 @@ class ProxiesPage extends StatefulWidget {
   final VoidCallback? onPickFastest;
   final ValueChanged<String> onEditNode;
   final VoidCallback onAddNode;
+  final VoidCallback onImportLink;
   final List<SubProfile> subs;
   final String? activeSubId;
   final ValueChanged<SubProfile> onSwitchSub;
@@ -2973,6 +3096,11 @@ class _ProxiesPageState extends State<ProxiesPage> {
                 style: TextStyle(color: muted),
               ),
               const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.link),
+                tooltip: '导入单节点链接',
+                onPressed: widget.onImportLink,
+              ),
               IconButton(
                 icon: const Icon(Icons.add),
                 tooltip: '手动添加节点',
@@ -3896,6 +4024,7 @@ class ProfilesPage extends StatelessWidget {
     required this.onDelete,
     required this.onToggleAutoUpdate,
     required this.onEditSub,
+    required this.onImportLink,
   });
 
   final List<SubProfile> subs;
@@ -3908,6 +4037,7 @@ class ProfilesPage extends StatelessWidget {
   final ValueChanged<SubProfile> onDelete;
   final ValueChanged<SubProfile> onToggleAutoUpdate;
   final ValueChanged<SubProfile> onEditSub;
+  final VoidCallback onImportLink;
 
   String _updatedLabel(int ms) {
     if (ms <= 0) return '';
@@ -3982,6 +4112,14 @@ class ProfilesPage extends StatelessWidget {
               child: FilledButton.tonal(
                 onPressed: onImportUrl,
                 child: const Text('从订阅链接导入'),
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 48,
+              child: FilledButton.tonal(
+                onPressed: onImportLink,
+                child: const Text('从单节点链接导入'),
               ),
             ),
           ],

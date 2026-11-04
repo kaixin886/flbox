@@ -156,3 +156,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **自动更新改版（照 netproxy）**：订阅新增每份独立设置——autoIntervalHours（6/12/24/48/72）、updateViaProxy（直连/经当前代理 7890）、keepRegex/dropRegex（更新时经 FilterNodes 应用到节点名）。配置页订阅卡加「编辑」打开 _SubEditPage（名称/链接/自动更新/周期/更新网络/过滤，保存时校验正则）。设置页的全局间隔降为「新订阅默认更新周期」。到期检查三路：启动时、应用存活期 30 分钟定时器、WorkManager 每小时后台任务（独立 isolate 拉取＋过滤＋翻译验活＋写文件与 subs_v2、置 bg_subs_changed 标志；经代理类订阅后台跳过）；UI 在启动/回前台时消费标志：元数据重载，活动订阅被后台换了文件且核心未运行时自动重新激活。自动路径全程静默（失败不弹 toast，成功只记日志行）；手动更新保持原有提示。
 - **UI 第一批**：仪表盘加实时速率曲线卡（复用 2 秒流量轮询的样本队列、上限 45 点；下行强调蓝填充、上行绿线，带峰值读数与图例）；代理页顶加订阅页签（多订阅时横滑 ChoiceChip 切换）；延迟配色统一 _delayColor 并收紧阈值（<120 绿、<280 橙、其余红，原 300/800 在本用户线路上几乎全绿等于没信息）；仪表盘当前节点延迟同步配色；状态文案注明「Xray 核心 · sing-box 数据通路」。
 - 本地验证：Go 三包测试全过（新增 nodeedit 五个用例＋FilterNodes 用例、冒烟三节点全量 LoadConfig）；flutter analyze 干净。真机待验：hy2 节点（机场＋自建指纹）实连、WG 节点导入、节点编辑改名/删除、手动节点不被订阅更新冲掉、订阅编辑页保存、后台自动更新（关应用等周期或改小周期观察）、速率图与订阅页签观感。workmanager 为新依赖，CI 若因插件构建失败优先看 Android 侧报错。
+
+## 0.25（2026-11-04）单节点链接导入＋多格式文件导入＋选择器白名单
+
+- **单节点链接导入**：Go 侧 ParseShareLinks 解析 vless/vmess/trojan/ss/hysteria2/wireguard 六种链接（多行或整段 base64 blob），产出与节点编辑器同构的条目、经 UpsertNode 存入「手动节点」；hy2 链接的 pinSHA256 直落 pinned-cert-sha256，vless 的 raw 传输名归一为 tcp。入口：代理页右上链接图标、配置页「从单节点链接导入」按钮（对话框带粘贴键）；无法解析的条数在 toast 里报数。六链接全链路测试（解析→upsert→翻译，REALITY 与 obfs 存活断言）在内。
+- **多格式文件导入**：Go 侧 ConvertImport 统一嗅探并归一为 Clash YAML：YAML 直通、链接清单/base64、Xray JSON（protocol 体系，hysteria 出站的 finalmask salamander/quicParams 与 pinnedPeerCertSha256 反向映射回条目）、sing-box JSON（type 体系，含 endpoints 的 wireguard，selector/direct 跳过）。_addSubFromYaml 与订阅更新路径都先归一，JSON 型订阅可加可更新；导入 toast 标注来源格式。Xray/sing-box 两组真配置转换测试在内。
+- **文件选择器白名单**：_importProfile 由 FileType.any 改为 custom 扩展名（yaml/yml/json/txt），无关文件不可选、防加错。历史注记：any 是当年 yaml MIME 不一致变灰的对策；若本机再现变灰，退回 any＋ConvertImport 内容校验（非配置内容本就导不进）。
