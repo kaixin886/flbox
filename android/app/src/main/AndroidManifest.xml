@@ -40,17 +40,6 @@
                 <action android:name="android.net.VpnService"/>
             </intent-filter>
         </service>
-        <!-- Hosts the core in local proxy mode: reference clients never
-             run the core in a bare UI process (it gets frozen and its
-             traffic silently dropped). -->
-        <service
-            android:name=".FlboxCoreService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="proxy core hosting"/>
-        </service>
         <!-- Bulk speed test host, in its own process like
              v2rayNG's test service: a native abort during a test
              run then costs the run, not the app. -->

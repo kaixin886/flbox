@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -54,43 +53,6 @@ func xrayTranslate(clashYAML, mode, logPath string) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
-}
-
-func xrayTranslateAll(clashYAML, logPath string) (string, error) {
-	res, err := xraytranslate.TranslateAll([]byte(clashYAML), logPath)
-	if err != nil {
-		return "", err
-	}
-	raw, err := json.Marshal(res)
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
-}
-
-func init() {
-	// One un-loadable node must never poison a whole-profile
-	// speed test (a removed Xray field in a single airport
-	// node used to fail every node's test at once, because
-	// the combined config is loaded as a whole). TranslateAll
-	// drops outbounds the real loader rejects.
-	xraytranslate.OutboundCheck = func(outbound map[string]any) error {
-		raw, err := json.Marshal(map[string]any{
-			"inbounds": []any{
-				map[string]any{
-					"listen":   "127.0.0.1",
-					"port":     20199,
-					"protocol": "mixed",
-				},
-			},
-			"outbounds": []any{outbound},
-		})
-		if err != nil {
-			return err
-		}
-		_, err = xcore.LoadConfig("json", strings.NewReader(string(raw)))
-		return err
-	}
 }
 
 var xReport string
@@ -171,90 +133,4 @@ func xrayStop() error {
 	err := xInst.Close()
 	xInst = nil
 	return err
-}
-
-// Transient per-node test instances for the bulk speed test.
-// Each test runs a node's OWN single-node config - the shape
-// daily connections prove - as a throwaway instance on a
-// private port, without touching the main instance: a live VPN
-// session (whose core listens on 7890 and is fed by the
-// sing-box forwarder) keeps running while tests fly, nothing
-// needs restoring afterwards, and several tests run in
-// parallel. This replaced two failed designs: one combined
-// instance holding every outbound at once (flash-crashed the
-// app on the user's phone), and swapping the main instance
-// node by node (worked, but took the better part of a minute
-// and locked the user out meanwhile).
-//
-// Two speed rules learned from the first cut of this design
-// (0.43, still slow on the user's phone):
-//   - The registry mutex guards ONLY the map. Holding it across
-//     StartInstance serialized every start, so the "parallel"
-//     workers queued behind the single most expensive step.
-//   - A latency probe needs no routing, DNS, stats or policy:
-//     with no routing section the instance sends everything to
-//     its first (proxy) outbound, which is exactly the node
-//     under test. Rule-mode configs carry geosite/geoip routing
-//     and split DNS; starting one instance per node made every
-//     start load the geo data files and build matchers - the
-//     dominant per-node cost, paid dozens of times per run.
-var (
-	testMu    sync.Mutex
-	testInsts = map[int]*xcore.Instance{}
-)
-
-func xrayTestStart(configJSON string, port int) error {
-	var cfg map[string]any
-	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
-		return fmt.Errorf("test config is not json: %w", err)
-	}
-	inbounds, ok := cfg["inbounds"].([]any)
-	if !ok || len(inbounds) == 0 {
-		return errors.New("test config has no inbound")
-	}
-	first, ok := inbounds[0].(map[string]any)
-	if !ok {
-		return errors.New("test config inbound malformed")
-	}
-	first["port"] = port
-	// Detach the log from the shared error file: many instances
-	// writing one file concurrently would interleave and fight.
-	cfg["log"] = map[string]any{"loglevel": "warning", "access": "none"}
-	// Slim the config down to what a probe needs (see the speed
-	// rules above): inbound plus the node's outbound. Dropping
-	// the DNS section also drops its geo references, so no asset
-	// directory is consulted at all.
-	delete(cfg, "routing")
-	delete(cfg, "dns")
-	delete(cfg, "stats")
-	delete(cfg, "policy")
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	// StartInstance runs OUTSIDE the registry lock so parallel
-	// workers really do start their instances at the same time.
-	inst, err := xcore.StartInstance("json", raw)
-	if err != nil {
-		return err
-	}
-	testMu.Lock()
-	old := testInsts[port]
-	testInsts[port] = inst
-	testMu.Unlock()
-	if old != nil {
-		old.Close()
-	}
-	return nil
-}
-
-func xrayTestStop(port int) error {
-	testMu.Lock()
-	inst := testInsts[port]
-	delete(testInsts, port)
-	testMu.Unlock()
-	if inst == nil {
-		return nil
-	}
-	return inst.Close()
 }

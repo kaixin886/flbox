@@ -311,3 +311,12 @@ Go core（core/，c-shared 导出 libflbox.so）
 - Go 新增 xrayMeasureAll：把一块 6 个节点的出站合并进**一个实例**：单个 SOCKS 入站＋每节点一个账号＋路由按 user 分流到对应出站 tag；探针为以该账号开 SOCKS 隧道的 HTTP 客户端（两次取小，与逐节点版同口径）。实例一块只建一次、只关一次（仍走后台关闭队列），逐节点零建拆。
 - 整实例建不起来（某出站配置非法/端口被楔死的前任进程占用）→ 返回空串，testMain 自动回退该块走原逐节点测速（带 30 秒看门狗），不丢块。
 - testMain 流程改为：先组合测速（60 秒看门狗）→ 成功逐条回报；失败才走原 8 工人逐节点回退。本地 Go 测试三件新增并全过：逐出站路由判别（中间死 SOCKS 出站必 -1、两侧 freedom 有数，路由串线即挂）、坏协议整实例失败回退信号、geo 段裁剪后仍可测。
+- 0.53 真机仍同曲线，用户 21:30 拍板测速线关闭（见上条），0.54 转新需求：删无用代码＋加 root 模式。
+
+## 0.54：删无用代码＋Root TUN 模式（一期）
+- **删无用代码**（全部先验无调用方才删，删后 Go 全量测试＋analyze 绿）：Go FFI 九个不可达导出（FlboxVersion/SelfCheck/Translate/Start/Stop、FlboxXrayVersion/TranslateAll/TestStart/TestStop）及 translateClash＋自检 init；service_xray 的瞬态测试实例注册表（0.43 旧测速路）与 xrayTranslateAll；xraytranslate.TranslateAll＋AllResult＋OutboundCheck；xray_test_instance_test.go 整文件与 smoke 里两处 TranslateAll 测试；Dart bridge 四个死方法＋XrayAllTest 类；Kotlin FlboxCoreService 整文件＋三个通道处理器＋清单条目（push-files 不能删文件，仓内两文件以「仅包声明」形式清空）。**保留**：startCore/stopCore（转发器在用）、sbtranslate（root 模式要用）、逐节点测速（组合测速的回退）。
+- **Root 模式架构**：App 进程拿不到 root，另设守护进程 `core/cmd/flboxd`（独立 sing-box 可执行，CGO 关、android/arm64，本地交叉编译实证 44.6MB）：以 libflboxd.so 之名进 jniLibs，Kotlin 首用时复制到 filesDir 并 chmod（防未解压打包无法 exec），经 su＋nohup 拉起；状态文件（running＋pid / error / stopped）为唯一回执通道，停止靠 su kill pid。
+- **配置生成**（core/rootconfig.go，FFI FlboxRootTunConfig）：sbtranslate 全量翻译＋Selected 预设当前节点 → 入站换 TUN（auto_route、strict_route、gVisor 栈、分应用 include/exclude_package 沿用既有偏好）→ 路由砍为全局形（hijack-dns＋私网直连＋final 不变，规则集剥离）→ DNS 双服务器：bootstrap 走 direct 只解节点域名、remote 经 final 出。本地测试三件全过（含 sing-box Options 解析校验）。
+- **App 接线**：设置页新增「运行模式」组（VPN／Root TUN／Root eBPF 禁用占位）；pref run_mode 贯通备份恢复；_toggleCore/_stopCore/_restartForMode（切节点/切订阅/切规则时重生成配置重启守护进程）/_resyncCoreState（状态文件 adopt）/_onNetworkChanged（root 下跳过）/状态轮询（root 下跳过）全部分流。root 模式下划掉 App 不影响守护进程（比 VPN 常驻更彻底）。
+- **一期边界（明示）**：Root TUN 仅全局模式（规则模式需 .srs 规则集管线，后续阶段）；手动节点订阅在 root 下会报「节点不在订阅中」；仪表盘无流量曲线（守护进程无计数通道）；开机自启恢复对 root 模式未接。**eBPF 为二期**：设置项已占位禁用。
+- **构建前置（需用户手改工作流一次）**：build-apk.yaml 的 Build Go core 步在 libflbox.so 之后加守护进程构建行（CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o ../android/app/src/main/jniLibs/arm64-v8a/libflboxd.so ./cmd/flboxd），未改时构建照常成功、App 内 rootCheck 报「未包含守护进程」。

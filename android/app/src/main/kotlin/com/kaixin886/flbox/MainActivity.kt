@@ -34,6 +34,28 @@ class MainActivity : FlutterActivity() {
 
     private var pendingPrepare: MethodChannel.Result? = null
 
+    // The root daemon ships as a jniLibs "library" (it is a
+    // full executable), but modern packaging may leave native
+    // libs unextracted inside the APK, where nothing can be
+    // exec'd. Copy it into filesDir and mark it executable;
+    // refreshed whenever the packaged size differs.
+    private fun daemonBinary(): File? {
+        return try {
+            val src = File(applicationInfo.nativeLibraryDir, "libflboxd.so")
+            if (!src.exists()) return null
+            val dst = File(filesDir, "flboxd")
+            if (!dst.exists() || dst.length() != src.length()) {
+                src.inputStream().use { input ->
+                    dst.outputStream().use { input.copyTo(it) }
+                }
+            }
+            dst.setExecutable(true, false)
+            dst
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "flbox/vpn")
@@ -89,13 +111,6 @@ class MainActivity : FlutterActivity() {
                     }, 600)
                     result.success(null)
                 }
-                "startCoreService" -> {
-                    startService(
-                        Intent(this, FlboxCoreService::class.java)
-                            .setAction(FlboxCoreService.ACTION_START)
-                    )
-                    result.success(null)
-                }
                 "vpnActive" -> {
                     result.success(FlboxVpnService.active)
                 }
@@ -104,20 +119,6 @@ class MainActivity : FlutterActivity() {
                 }
                 "tunFd" -> {
                     result.success(FlboxVpnService.tunFd)
-                }
-                "coreActive" -> {
-                    result.success(FlboxCoreService.active)
-                }
-                "stopCoreService" -> {
-                    startService(
-                        Intent(this, FlboxCoreService::class.java)
-                            .setAction(FlboxCoreService.ACTION_STOP)
-                    )
-                    // Same backstop as stopVpn above.
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        stopService(Intent(this, FlboxCoreService::class.java))
-                    }, 600)
-                    result.success(null)
                 }
                 "listApps" -> {
                     // Rendering ~200 app icons takes a moment;
@@ -178,6 +179,75 @@ class MainActivity : FlutterActivity() {
                     } catch (e: Exception) {
                     }
                     result.success(killed)
+                }
+                "rootCheck" -> {
+                    // "ok" when su grants uid 0 and the root
+                    // daemon binary is packaged; distinct codes
+                    // so the UI can say which leg is missing.
+                    Thread {
+                        var code = "nosu"
+                        if (daemonBinary() == null) {
+                            code = "nodaemon"
+                        } else {
+                            try {
+                                val proc = ProcessBuilder("su", "-c", "id -u")
+                                    .redirectErrorStream(true)
+                                    .start()
+                                val out = proc.inputStream
+                                    .bufferedReader()
+                                    .readText()
+                                    .trim()
+                                val exit = proc.waitFor()
+                                if (exit == 0 && out == "0") code = "ok"
+                            } catch (e: Exception) {
+                            }
+                        }
+                        runOnUiThread { result.success(code) }
+                    }.start()
+                }
+                "rootStart" -> {
+                    // Launches the daemon detached through su;
+                    // the daemon itself reports readiness in
+                    // the status file Dart polls.
+                    val args = call.arguments as? Map<*, *>
+                    val configPath = args?.get("config") as? String
+                    val statusPath = args?.get("status") as? String
+                    val logPath = args?.get("log") as? String
+                    if (configPath == null || statusPath == null || logPath == null) {
+                        result.error("badargs", "missing daemon paths", null)
+                    } else {
+                        Thread {
+                            var ok = false
+                            try {
+                                val daemon = daemonBinary()?.absolutePath
+                                    ?: throw IllegalStateException("no daemon")
+                                val cmd = "nohup '$daemon' '$configPath' " +
+                                    "'$statusPath' >'$logPath' 2>&1 &"
+                                val proc = ProcessBuilder("su", "-c", cmd)
+                                    .redirectErrorStream(true)
+                                    .start()
+                                proc.waitFor()
+                                ok = true
+                            } catch (e: Exception) {
+                            }
+                            runOnUiThread { result.success(ok) }
+                        }.start()
+                    }
+                }
+                "rootStop" -> {
+                    val pid = (call.arguments as? Number)?.toInt() ?: 0
+                    Thread {
+                        try {
+                            if (pid > 0) {
+                                ProcessBuilder("su", "-c", "kill $pid")
+                                    .redirectErrorStream(true)
+                                    .start()
+                                    .waitFor()
+                            }
+                        } catch (e: Exception) {
+                        }
+                        runOnUiThread { result.success(null) }
+                    }.start()
                 }
                 "writeTestJob" -> {
                     // Writes the speed test job file and clears

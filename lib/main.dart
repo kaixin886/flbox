@@ -507,6 +507,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _wasRunning = false;
   bool _notifyOnStart = true;
   bool _ipv6Enabled = false;
+  String _runMode = 'vpn';
   bool _notifySubUpdate = true;
   int _subAutoIntervalHours = 24;
   Set<String> _bypassPkgs = {};
@@ -618,6 +619,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
     _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
+    _runMode = prefs.getString('run_mode') ?? 'vpn';
     _subAutoIntervalHours = prefs.getInt('sub_auto_interval_hours') ?? 24;
     final legacySubAuto = prefs.getBool('sub_auto_update') ?? false;
     final favRaw = prefs.getString('fav_nodes');
@@ -782,6 +784,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// swipe-away on ROMs that keep the service process.
   Future<void> _resyncCoreState() async {
     if (_busy || _running) return;
+    if (_runMode == 'root_tun') {
+      // The root daemon lives outside the app process; its
+      // status file is the ground truth. A live daemon is
+      // adopted as-is - nothing else needs reconciling.
+      final status = await _readRootStatus();
+      if (status.startsWith('running')) {
+        _logEvent('resync: adopted live root daemon session');
+        _adoptSession();
+      }
+      return;
+    }
     try {
       final coreRunning =
           CoreBridge().xrayStatus().contains('running=true');
@@ -885,6 +898,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     // (it uses transient side instances), so it must not block
     // the network-change restart of the live session.
     if (!_running || _busy) return;
+    // The root daemon is a full sing-box: it watches interface
+    // changes itself, no in-place restart needed.
+    if (_runMode == 'root_tun') return;
     final last = _lastCoreRestart;
     if (last != null &&
         DateTime.now().difference(last) < const Duration(seconds: 15)) {
@@ -1008,7 +1024,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final config = _profile?.configs[_selectedNode];
       if (config != null) {
         try {
-          await _restartCoreInPlace(config);
+          await _restartForMode(config);
           _logEvent('core restarted for mode switch (rules=$rules)');
           _startedAt = DateTime.now();
         } on CoreException catch (e) {
@@ -1075,6 +1091,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           'notify_on_start': _notifyOnStart,
           'notify_sub_update': _notifySubUpdate,
           'ipv6_enabled': _ipv6Enabled,
+          'run_mode': _runMode,
           'sub_auto_interval_hours': _subAutoIntervalHours,
           'nav_style': _navStyle.index,
           'fav_nodes': _favNodes.toList(),
@@ -1155,6 +1172,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       var bypassPkgs = _bypassPkgs;
       var bypassEnabled = _splitEnabled;
       var bypassAllow = _splitAllow;
+      var runMode = _runMode;
       final bp = decoded['prefs'];
       if (bp is Map<String, dynamic>) {
         bool bb(String k, bool cur) => bp[k] is bool ? bp[k] as bool : cur;
@@ -1164,6 +1182,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         notifyOnStart = bb('notify_on_start', notifyOnStart);
         notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
         ipv6Enabled = bb('ipv6_enabled', ipv6Enabled);
+        if (bp['run_mode'] is String) runMode = bp['run_mode'] as String;
         bypassEnabled = bb('bypass_enabled', bypassEnabled);
         bypassAllow = bb('bypass_allow', bypassAllow);
         if (bp['sub_auto_interval_hours'] is int) {
@@ -1195,6 +1214,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _notifyOnStart = notifyOnStart;
         _notifySubUpdate = notifySubUpdate;
         _ipv6Enabled = ipv6Enabled;
+        _runMode = runMode;
         _subAutoIntervalHours = intervalHours;
         _navStyle = navStyle;
         _favNodes = favNodes;
@@ -1208,6 +1228,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await prefs.setBool('notify_on_start', notifyOnStart);
       await prefs.setBool('notify_sub_update', notifySubUpdate);
       await prefs.setBool('ipv6_enabled', ipv6Enabled);
+      await prefs.setString('run_mode', runMode);
       await prefs.setInt('sub_auto_interval_hours', intervalHours);
       await prefs.setInt('nav_style', navStyle.index);
       await prefs.setString('fav_nodes', jsonEncode(favNodes.toList()));
@@ -1424,7 +1445,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         final config = _profile?.configs[_selectedNode];
         if (config != null) {
           try {
-            await _restartCoreInPlace(config);
+            await _restartForMode(config);
             _logEvent(
               'core restarted for subscription switch (${sub.name})',
             );
@@ -1935,6 +1956,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   void _startPolling() {
+    // Root mode has no in-process core to poll traffic from;
+    // the dashboard simply shows the session as running.
+    if (_runMode == 'root_tun') return;
     _pollTimer?.cancel();
     var lastUp = 0;
     var lastDown = 0;
@@ -2007,7 +2031,158 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// against the service's own state - a stop that only landed
   /// in Dart leaves a black-holing tunnel behind, which reads
   /// as "the VPN won't turn off".
+  /// The root daemon's status file: "running" plus a pid
+  /// line, "error: ..." or "stopped", written by the daemon
+  /// itself (see cmd/flboxd). Empty when no daemon ever ran.
+  Future<String> _readRootStatus() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final f = File('${docs.path}/root-status.txt');
+      if (!await f.exists()) return '';
+      return (await f.readAsString()).trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<int> _rootDaemonPid() async {
+    final lines = (await _readRootStatus()).split('\n');
+    return lines.length > 1 ? int.tryParse(lines[1].trim()) ?? 0 : 0;
+  }
+
+  /// Generates the daemon config for the current selection,
+  /// (re)writes the control files and launches the daemon
+  /// through su, then waits for its status file to report.
+  /// Throws a plain message string on failure.
+  Future<void> _launchRootDaemon() async {
+    final node = _selectedNode;
+    final yaml = _profileYaml;
+    if (node == null || yaml == null) {
+      throw '先到「代理」页选一个节点';
+    }
+    final ipv6 = _ipv6Enabled;
+    final include = (_splitEnabled && _splitAllow)
+        ? _bypassPkgs.toList()
+        : <String>[];
+    final exclude = (_splitEnabled && !_splitAllow)
+        ? _bypassPkgs.toList()
+        : <String>[];
+    final config = await Isolate.run(
+      () => CoreBridge().rootTunConfig(
+        yaml,
+        node,
+        ipv6: ipv6,
+        includePkgs: include,
+        excludePkgs: exclude,
+      ),
+    );
+    final docs = await getApplicationDocumentsDirectory();
+    final cfgFile = File('${docs.path}/root-config.json');
+    final statusFile = File('${docs.path}/root-status.txt');
+    await cfgFile.writeAsString(config);
+    if (await statusFile.exists()) await statusFile.delete();
+    final ok =
+        await _vpnChannel.invokeMethod<bool>('rootStart', {
+          'config': cfgFile.path,
+          'status': statusFile.path,
+          'log': '${docs.path}/root-daemon.log',
+        }) ??
+        false;
+    if (!ok) throw '守护进程拉起失败';
+    for (var i = 0; i < 32; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      final s = await _readRootStatus();
+      if (s.startsWith('running')) return;
+      if (s.startsWith('error:')) throw s.substring(6).trim();
+    }
+    throw '守护进程启动超时';
+  }
+
+  Future<void> _startRootTun() async {
+    if (_selectedNode == null || _profileYaml == null) {
+      _toast('先到「代理」页选一个节点');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final check = await _vpnChannel.invokeMethod<String>('rootCheck');
+      if (check == 'nodaemon') {
+        _toast('此安装包未包含 root 守护进程');
+        return;
+      }
+      if (check != 'ok') {
+        _toast('未取得 root 授权（su 不可用或被拒绝）');
+        return;
+      }
+      await _launchRootDaemon();
+      _logEvent('root tun started (node=$_selectedNode)');
+      _startedAt = DateTime.now();
+      setState(() => _running = true);
+      unawaited(_markWasRunning(true));
+    } catch (e) {
+      _toast('启动失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _stopRootTun() async {
+    try {
+      final pid = await _rootDaemonPid();
+      if (pid > 0) {
+        await _vpnChannel.invokeMethod('rootStop', pid);
+        for (var i = 0; i < 12; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+          final s = await _readRootStatus();
+          if (s.startsWith('stopped') || s.isEmpty) break;
+        }
+      }
+      _logEvent('root tun stopped');
+    } catch (_) {}
+    _stopPolling();
+    unawaited(_markWasRunning(false));
+    if (mounted) setState(() => _running = false);
+  }
+
+  /// Node/subscription/rules changes while running land here:
+  /// the VPN path restarts the core in place; root mode
+  /// regenerates the daemon config and bounces the daemon.
+  Future<void> _restartForMode(String config) async {
+    if (_runMode == 'root_tun') {
+      final pid = await _rootDaemonPid();
+      if (pid > 0) {
+        try {
+          await _vpnChannel.invokeMethod('rootStop', pid);
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
+      try {
+        await _launchRootDaemon();
+      } catch (e) {
+        throw CoreException('$e');
+      }
+      _logEvent('root tun restarted (node=$_selectedNode)');
+    } else {
+      await _restartCoreInPlace(config);
+    }
+  }
+
+  Future<void> _setRunMode(String mode) async {
+    if (mode == _runMode) return;
+    if (_running) {
+      _toast('先停止当前连接再切换运行模式');
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('run_mode', mode);
+    setState(() => _runMode = mode);
+  }
+
   Future<void> _stopCore() async {
+    if (_runMode == 'root_tun') {
+      await _stopRootTun();
+      return;
+    }
     try {
       CoreBridge().vpnForwardStop();
     } catch (_) {}
@@ -2051,6 +2226,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     if (_busy) return;
     if (_running) {
       await _stopCore();
+      return;
+    }
+    if (_runMode == 'root_tun') {
+      await _startRootTun();
       return;
     }
     final config = _profile?.configs[_selectedNode];
@@ -2493,7 +2672,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final config = _profile?.configs[name];
       if (config == null) return;
       try {
-        await _restartCoreInPlace(config);
+        await _restartForMode(config);
         _pushVpnStatus();
         unawaited(_primeStatus());
         _toast('已切换到 $name');
@@ -2547,6 +2726,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           onAutoIntervalChanged: _setSubAutoInterval,
           ipv6Enabled: _ipv6Enabled,
           onIpv6Changed: _setIpv6Enabled,
+          runMode: _runMode,
+          onRunModeChanged: _setRunMode,
           onExportBackup: _exportBackup,
           onImportBackup: _importBackup,
         ),
@@ -3659,6 +3840,8 @@ class _SettingsPage extends StatefulWidget {
     required this.onAutoIntervalChanged,
     required this.ipv6Enabled,
     required this.onIpv6Changed,
+    required this.runMode,
+    required this.onRunModeChanged,
     required this.restoreOnBoot,
     required this.onRestoreOnBootChanged,
     required this.onExportBackup,
@@ -3687,6 +3870,8 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<int> onAutoIntervalChanged;
   final bool ipv6Enabled;
   final ValueChanged<bool> onIpv6Changed;
+  final String runMode;
+  final ValueChanged<String> onRunModeChanged;
   final bool restoreOnBoot;
   final ValueChanged<bool> onRestoreOnBootChanged;
   final VoidCallback onExportBackup;
@@ -3711,6 +3896,7 @@ class _SettingsPageState extends State<_SettingsPage> {
   late bool _autoConnect = widget.autoConnect;
   late bool _restoreOnBoot = widget.restoreOnBoot;
   late bool _ipv6Enabled = widget.ipv6Enabled;
+  late String _runMode = widget.runMode;
   late bool _notifyOnStart = widget.notifyOnStart;
   late bool _notifySubUpdate = widget.notifySubUpdate;
   late bool _rulesMode = widget.rulesMode;
@@ -3771,6 +3957,48 @@ class _SettingsPageState extends State<_SettingsPage> {
                   widget.onNavStyleChanged(style);
                 },
               ),
+          ]),
+          const SizedBox(height: 20),
+          section('运行模式', [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('VPN 模式'),
+              subtitle: Text(
+                '系统 VpnService 接管流量，无需 root',
+                style: TextStyle(color: muted),
+              ),
+              trailing: _runMode == 'vpn'
+                  ? const Icon(Icons.check, color: _accent)
+                  : null,
+              onTap: () {
+                setState(() => _runMode = 'vpn');
+                widget.onRunModeChanged('vpn');
+              },
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Root TUN'),
+              subtitle: Text(
+                'root 守护进程自建 TUN 并接管路由，划掉应用不影响；当前为全局模式',
+                style: TextStyle(color: muted),
+              ),
+              trailing: _runMode == 'root_tun'
+                  ? const Icon(Icons.check, color: _accent)
+                  : null,
+              onTap: () {
+                setState(() => _runMode = 'root_tun');
+                widget.onRunModeChanged('root_tun');
+              },
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Root eBPF'),
+              subtitle: Text(
+                '开发中，下一阶段加入',
+                style: TextStyle(color: muted),
+              ),
+              enabled: false,
+            ),
           ]),
           const SizedBox(height: 20),
           section('代理', [
@@ -4007,7 +4235,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.53.0 · app.flbox · Xray 内核',
+              'FlBox 0.54.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

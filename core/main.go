@@ -16,10 +16,8 @@ import (
 	"sync"
 	"unsafe"
 
-	"flbox/core/sbtranslate"
 	"flbox/core/xraytranslate"
 
-	"github.com/sagernet/sing-box/experimental/libbox"
 )
 
 var (
@@ -47,53 +45,6 @@ func noteErr(err error) {
 	lastErrMu.Unlock()
 }
 
-func translateClash(clashYAML string) (string, error) {
-	cfg, err := sbtranslate.ParseClash([]byte(clashYAML))
-	if err != nil {
-		return "", err
-	}
-	out, err := sbtranslate.Translate(cfg)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
-// Self-check: proves the translator is linked and functional before any
-// real profile is involved. Uses a placeholder node only.
-var selfCheckErr error
-
-func init() {
-	const placeholder = `
-mixed-port: 7890
-proxies:
-  - name: placeholder
-    type: ss
-    server: example.com
-    port: 8388
-    cipher: aes-128-gcm
-    password: placeholder
-proxy-groups:
-  - name: PROXY
-    type: select
-    proxies:
-      - placeholder
-rules:
-  - MATCH,PROXY
-`
-	_, selfCheckErr = translateClash(placeholder)
-}
-
-//export FlboxVersion
-func FlboxVersion() *C.char {
-	return C.CString("flbox-core 0.1.0 (sing-box " + libbox.Version() + ")")
-}
-
-//export FlboxSelfCheck
-func FlboxSelfCheck() *C.char {
-	return recordErr(selfCheckErr)
-}
-
 //export FlboxSetup
 func FlboxSetup(basePath, workingPath, tempPath *C.char) *C.char {
 	return recordErr(setupCore(
@@ -101,36 +52,6 @@ func FlboxSetup(basePath, workingPath, tempPath *C.char) *C.char {
 		C.GoString(workingPath),
 		C.GoString(tempPath),
 	))
-}
-
-//export FlboxTranslate
-func FlboxTranslate(clashYAML *C.char) *C.char {
-	out, err := translateClash(C.GoString(clashYAML))
-	if err != nil {
-		recordErr(err)
-		return nil
-	}
-	return C.CString(out)
-}
-
-//export FlboxStart
-func FlboxStart(configJSON *C.char) (out *C.char) {
-	defer func() {
-		if r := recover(); r != nil {
-			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
-		}
-	}()
-	return recordErr(startCore(C.GoString(configJSON)))
-}
-
-//export FlboxStop
-func FlboxStop() (out *C.char) {
-	defer func() {
-		if r := recover(); r != nil {
-			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
-		}
-	}()
-	return recordErr(stopCore())
 }
 
 // Panic guard for the FFI boundary: an unrecovered Go panic in
@@ -177,11 +98,6 @@ func FlboxLastError() *C.char {
 	return C.CString(lastErr)
 }
 
-//export FlboxXrayVersion
-func FlboxXrayVersion() *C.char {
-	return C.CString("Xray " + xrayVersion())
-}
-
 //export FlboxXrayTranslate
 func FlboxXrayTranslate(clashYAML, mode, logPath *C.char) (out *C.char) {
 	defer func() {
@@ -193,25 +109,6 @@ func FlboxXrayTranslate(clashYAML, mode, logPath *C.char) (out *C.char) {
 	res, err := xrayTranslate(
 		C.GoString(clashYAML),
 		C.GoString(mode),
-		C.GoString(logPath),
-	)
-	if err != nil {
-		recordErr(err)
-		return nil
-	}
-	return C.CString(res)
-}
-
-//export FlboxXrayTranslateAll
-func FlboxXrayTranslateAll(clashYAML, logPath *C.char) (out *C.char) {
-	defer func() {
-		if r := recover(); r != nil {
-			recordErr(fmt.Errorf("core panic recovered: %v", r))
-			out = nil
-		}
-	}()
-	res, err := xrayTranslateAll(
-		C.GoString(clashYAML),
 		C.GoString(logPath),
 	)
 	if err != nil {
@@ -239,26 +136,6 @@ func FlboxXrayStop() (out *C.char) {
 		}
 	}()
 	return recordErr(xrayStop())
-}
-
-//export FlboxXrayTestStart
-func FlboxXrayTestStart(configJSON *C.char, port C.int) (out *C.char) {
-	defer func() {
-		if r := recover(); r != nil {
-			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
-		}
-	}()
-	return recordErr(xrayTestStart(C.GoString(configJSON), int(port)))
-}
-
-//export FlboxXrayTestStop
-func FlboxXrayTestStop(port C.int) (out *C.char) {
-	defer func() {
-		if r := recover(); r != nil {
-			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
-		}
-	}()
-	return recordErr(xrayTestStop(int(port)))
 }
 
 //export FlboxXrayMeasureDelay
@@ -291,6 +168,38 @@ func FlboxXrayMeasureAll(configsJSON, url *C.char) (out *C.char) {
 		return C.CString("")
 	}
 	return C.CString(res)
+}
+
+//export FlboxRootTunConfig
+func FlboxRootTunConfig(clashYAML, selectedNode *C.char, ipv6 C.int, includePkgs, excludePkgs *C.char) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			noteErr(fmt.Errorf("core panic recovered: %v", r))
+			out = nil
+		}
+	}()
+	parsePkgs := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		var pkgs []string
+		if err := json.Unmarshal([]byte(s), &pkgs); err != nil {
+			return nil
+		}
+		return pkgs
+	}
+	cfg, err := rootTunConfig(
+		C.GoString(clashYAML),
+		C.GoString(selectedNode),
+		ipv6 != 0,
+		parsePkgs(C.GoString(includePkgs)),
+		parsePkgs(C.GoString(excludePkgs)),
+	)
+	if err != nil {
+		noteErr(err)
+		return nil
+	}
+	return C.CString(cfg)
 }
 
 //export FlboxXrayStatus
