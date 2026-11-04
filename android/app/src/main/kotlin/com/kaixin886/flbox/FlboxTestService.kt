@@ -28,14 +28,31 @@ import java.io.File
 // entrypoint, which pulls the job and streams results back
 // through the channel below; each result is appended to the
 // results file the UI polls.
+//
+// When a job finishes, this process KILLS ITSELF (see the
+// "done" handler). stopSelf alone only stops the service -
+// the process, with the native library and all the state it
+// accumulated over the job (instances, connections,
+// goroutines), lingers on as a cached process, and the next
+// start would build its engine on top of that residue. The
+// 0.51 phone run showed exactly that cost: chunked testing
+// completed, but past roughly thirty nodes the measures
+// slowed down and reported timeouts for nodes that work fine
+// - the "fresh process per chunk" the design assumed was
+// never guaranteed, because the UI-side kill depends on a
+// process listing the platform may not even show it. A
+// process killing itself needs no one's permission and
+// always works, so the next chunk provably starts from zero.
 class FlboxTestService : Service() {
 
     private var engine: FlutterEngine? = null
     private val ioLock = Any()
+    private var startGeneration = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startGeneration++
         // A start always carries a new job: tear down any engine
         // left from a previous launch and build a fresh one.
         // Relaunches depend on this - when the process could not
@@ -102,6 +119,23 @@ class FlboxTestService : Service() {
                         }
                         result.success(null)
                         stopSelf()
+                        // Terminate this process shortly after
+                        // the reply, so the next chunk's start
+                        // creates a genuinely fresh one (see the
+                        // class comment). The generation guard
+                        // keeps the delayed kill from firing if
+                        // a new start already reused this process
+                        // inside the grace window - that start
+                        // rebuilt the engine and owns the
+                        // process now.
+                        val gen = startGeneration
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            if (startGeneration == gen) {
+                                android.os.Process.killProcess(
+                                    android.os.Process.myPid()
+                                )
+                            }
+                        }, 400)
                     }
                     else -> result.notImplemented()
                 }
