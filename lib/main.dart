@@ -61,7 +61,7 @@ Future<void> _bgRefreshDueSubs() async {
   var changed = false;
   final updatedNames = <String>[];
   for (final sub in subs) {
-    if (!sub.autoUpdate || sub.url == null || sub.updateViaProxy) {
+    if (!sub.enabled || !sub.autoUpdate || sub.url == null || sub.updateViaProxy) {
       continue;
     }
     if (nowMs - sub.updatedAtMs <= sub.autoIntervalHours * 3600000) {
@@ -70,7 +70,7 @@ Future<void> _bgRefreshDueSubs() async {
     final client = HttpClient();
     client.findProxy = (_) => 'DIRECT';
     try {
-      client.userAgent = 'ClashMeta/1.0';
+      client.userAgent = sub.ua;
       final request = await client
           .getUrl(Uri.parse(sub.url!))
           .timeout(const Duration(seconds: 20));
@@ -222,6 +222,8 @@ enum NavStyle {
 
 /// One saved subscription / local profile. Several can coexist; one
 /// is active at a time and feeds the core.
+const _defaultUa = 'ClashMeta/1.0';
+
 class SubProfile {
   SubProfile({
     required this.id,
@@ -235,6 +237,8 @@ class SubProfile {
     this.updateViaProxy = false,
     this.keepRegex = '',
     this.dropRegex = '',
+    this.enabled = true,
+    this.ua = _defaultUa,
   });
 
   final String id;
@@ -248,6 +252,8 @@ class SubProfile {
   bool updateViaProxy;
   String keepRegex;
   String dropRegex;
+  bool enabled;
+  String ua;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -261,6 +267,8 @@ class SubProfile {
         'updateViaProxy': updateViaProxy,
         'keepRegex': keepRegex,
         'dropRegex': dropRegex,
+        'enabled': enabled,
+        'ua': ua,
       };
 
   /// [autoUpdateSeed] migrates profiles saved before the per-sub
@@ -281,6 +289,8 @@ class SubProfile {
         updateViaProxy: (j['updateViaProxy'] as bool?) ?? false,
         keepRegex: j['keepRegex'] as String? ?? '',
         dropRegex: j['dropRegex'] as String? ?? '',
+        enabled: (j['enabled'] as bool?) ?? true,
+        ua: j['ua'] as String? ?? _defaultUa,
       );
 }
 
@@ -343,6 +353,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Set<String> _favNodes = {};
   bool _autoConnect = false;
   bool _notifyOnStart = true;
+  bool _ipv6Enabled = false;
   bool _notifySubUpdate = true;
   int _subAutoIntervalHours = 24;
   Set<String> _bypassPkgs = {};
@@ -447,6 +458,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _autoConnect = prefs.getBool('auto_connect') ?? false;
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
+    _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
     _subAutoIntervalHours = prefs.getInt('sub_auto_interval_hours') ?? 24;
     final legacySubAuto = prefs.getBool('sub_auto_update') ?? false;
     final favRaw = prefs.getString('fav_nodes');
@@ -611,7 +623,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             // session whose tunnel black-holes everything.
             try {
               await _ensureSbSetup();
-              CoreBridge().vpnForwardStart(_tunFd);
+              CoreBridge().vpnForwardStart(_tunFd, ipv6: _ipv6Enabled);
               _logEvent('resync: restarted the vpn forwarder');
             } catch (e) {
               _logEvent('resync: vpn forwarder restart failed: $e');
@@ -810,6 +822,40 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// Subscription editor (the netproxy-style form): name, link,
   /// per-subscription auto-update period, update route, and the
   /// node name filters applied on every refresh.
+  Future<void> _setIpv6Enabled(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('ipv6_enabled', value);
+    setState(() => _ipv6Enabled = value);
+  }
+
+  /// AsteriskNG-style group enable switch: a disabled group
+  /// leaves the proxy tabs and is skipped by auto-update.
+  /// Disabling the group in use stops the connection first
+  /// and moves the active slot to the next enabled group.
+  Future<void> _setSubEnabled(SubProfile sub, bool enabled) async {
+    if (sub.enabled == enabled) return;
+    setState(() => sub.enabled = enabled);
+    if (!enabled && sub.id == _activeSubId) {
+      if (_running) await _stopCore();
+      final rest = _subs
+          .where((x) => x.enabled && x.id != sub.id)
+          .toList();
+      if (rest.isNotEmpty) {
+        await _switchSub(rest.first);
+      } else {
+        setState(() {
+          _activeSubId = null;
+          _profile = null;
+          _profileName = '';
+          _selectedNode = null;
+        });
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('active_sub');
+      }
+    }
+    await _persistSubs();
+  }
+
   Future<void> _openSubEditor(SubProfile sub) async {
     final result = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
@@ -827,6 +873,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       sub.updateViaProxy = result['viaProxy'] as bool;
       sub.keepRegex = result['keep'] as String;
       sub.dropRegex = result['drop'] as String;
+      sub.ua = result['ua'] as String;
       if (sub.id == _activeSubId) _profileName = sub.name;
     });
     await _persistSubs();
@@ -1305,7 +1352,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Future<void> _runDueSubscriptionUpdates() async {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     for (final sub in _subs) {
-      if (!sub.autoUpdate || sub.url == null) continue;
+      if (!sub.enabled || !sub.autoUpdate || sub.url == null) continue;
       if (sub.updateViaProxy && !_running) continue;
       if (nowMs - sub.updatedAtMs > sub.autoIntervalHours * 3600000) {
         await _fetchSubscription(sub.url!, updateSub: sub, quiet: true);
@@ -1375,7 +1422,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         ? (_) => 'PROXY 127.0.0.1:7890'
         : (_) => 'DIRECT';
     try {
-      client.userAgent = 'ClashMeta/1.0';
+      client.userAgent = updateSub?.ua ?? _defaultUa;
       final request = await client
           .getUrl(Uri.parse(url))
           .timeout(const Duration(seconds: 20));
@@ -1600,6 +1647,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _tunReady = Completer<int>();
       await _vpnChannel.invokeMethod('startVpn', {
         'bypass': _bypassPkgs.toList(),
+        'ipv6': _ipv6Enabled,
       });
       final fd = await _tunReady!.future.timeout(const Duration(seconds: 15));
       _tunFd = fd;
@@ -1608,7 +1656,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       // The packet path: sing-box owns the tunnel fd and forwards
       // every flow into the mixed inbound Xray just opened.
       await _ensureSbSetup();
-      CoreBridge().vpnForwardStart(fd);
+      CoreBridge().vpnForwardStart(fd, ipv6: _ipv6Enabled);
       _logEvent('vpn forwarder started (sing-box tun -> 127.0.0.1:7890)');
       _logEvent('core started (rules=$_rulesMode, node=$_selectedNode)');
       _startedAt = DateTime.now();
@@ -1835,6 +1883,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           onAutoConnectChanged: _setAutoConnect,
           autoIntervalHours: _subAutoIntervalHours,
           onAutoIntervalChanged: _setSubAutoInterval,
+          ipv6Enabled: _ipv6Enabled,
+          onIpv6Changed: _setIpv6Enabled,
         ),
       ),
     );
@@ -1895,7 +1945,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onShowProxies: () => _select(1),
           ),
           ProxiesPage(
-            subs: _subs,
+            subs: _subs.where((x) => x.enabled).toList(),
             activeSubId: _activeSubId,
             onSwitchSub: _switchSub,
             onEditNode: _openNodeEditor,
@@ -1923,6 +1973,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onDelete: _deleteSub,
             onEditSub: _openSubEditor,
             onImportLink: _importFromLink,
+            onToggleEnabled: _setSubEnabled,
           ),
           LogsPage(),
         ],
@@ -2934,6 +2985,8 @@ class _SettingsPage extends StatefulWidget {
     required this.onAutoConnectChanged,
     required this.autoIntervalHours,
     required this.onAutoIntervalChanged,
+    required this.ipv6Enabled,
+    required this.onIpv6Changed,
   });
 
   final NavStyle navStyle;
@@ -2954,6 +3007,8 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<bool> onAutoConnectChanged;
   final int autoIntervalHours;
   final ValueChanged<int> onAutoIntervalChanged;
+  final bool ipv6Enabled;
+  final ValueChanged<bool> onIpv6Changed;
 
   @override
   State<_SettingsPage> createState() => _SettingsPageState();
@@ -3120,6 +3175,20 @@ class _SettingsPageState extends State<_SettingsPage> {
             ),
           ]),
           const SizedBox(height: 20),
+          section('高级', [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              secondary: const Icon(Icons.language_outlined),
+              title: const Text('IPv6 支持'),
+              subtitle: Text(
+                '开启后 VPN 同时接管 IPv6 流量（节点服务器需有 IPv6 出口）；下次启动 VPN 时生效',
+                style: TextStyle(color: muted),
+              ),
+              value: widget.ipv6Enabled,
+              onChanged: widget.onIpv6Changed,
+            ),
+          ]),
+          const SizedBox(height: 20),
           section('通知', [
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -3174,7 +3243,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.33.0 · app.flbox · Xray 内核',
+              'FlBox 0.34.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -4089,6 +4158,7 @@ class _SubEditPage extends StatefulWidget {
 class _SubEditPageState extends State<_SubEditPage> {
   late final TextEditingController _nameCtl;
   late final TextEditingController _urlCtl;
+  late final TextEditingController _uaCtl;
   late final TextEditingController _keepCtl;
   late final TextEditingController _dropCtl;
   late bool _autoUpdate;
@@ -4101,6 +4171,7 @@ class _SubEditPageState extends State<_SubEditPage> {
     final s = widget.sub;
     _nameCtl = TextEditingController(text: s.name);
     _urlCtl = TextEditingController(text: s.url ?? '');
+    _uaCtl = TextEditingController(text: s.ua);
     _keepCtl = TextEditingController(text: s.keepRegex);
     _dropCtl = TextEditingController(text: s.dropRegex);
     _autoUpdate = s.autoUpdate;
@@ -4112,6 +4183,7 @@ class _SubEditPageState extends State<_SubEditPage> {
   void dispose() {
     _nameCtl.dispose();
     _urlCtl.dispose();
+    _uaCtl.dispose();
     _keepCtl.dispose();
     _dropCtl.dispose();
     super.dispose();
@@ -4152,6 +4224,7 @@ class _SubEditPageState extends State<_SubEditPage> {
       'viaProxy': _viaProxy,
       'keep': keep,
       'drop': drop,
+      'ua': _uaCtl.text.trim().isEmpty ? _defaultUa : _uaCtl.text.trim(),
     });
   }
 
@@ -4222,7 +4295,24 @@ class _SubEditPageState extends State<_SubEditPage> {
               const SizedBox(height: 18),
               _textField(_nameCtl, '分组名称', fill),
               if (hasUrl) _textField(_urlCtl, '订阅地址', fill),
+              if (hasUrl) _textField(_uaCtl, 'User-Agent', fill),
               if (hasUrl) ...[
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final preset in const [
+                      'ClashMeta/1.0',
+                      'v2rayNG/2.3.10',
+                      'sing-box/1.14.4',
+                    ])
+                      ActionChip(
+                        label: Text(preset),
+                        onPressed: () =>
+                            setState(() => _uaCtl.text = preset),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 18),
                 SwitchListTile(
                   title: const Text('自动更新'),
                   contentPadding: EdgeInsets.zero,
@@ -4327,6 +4417,7 @@ class ProfilesPage extends StatelessWidget {
     required this.onDelete,
     required this.onEditSub,
     required this.onImportLink,
+    required this.onToggleEnabled,
   });
 
   final List<SubProfile> subs;
@@ -4339,6 +4430,7 @@ class ProfilesPage extends StatelessWidget {
   final ValueChanged<SubProfile> onDelete;
   final ValueChanged<SubProfile> onEditSub;
   final VoidCallback onImportLink;
+  final void Function(SubProfile, bool) onToggleEnabled;
 
   String _updatedLabel(int ms) {
     if (ms <= 0) return '';
@@ -4525,6 +4617,13 @@ class ProfilesPage extends StatelessWidget {
                               ),
                             ),
                           ),
+                        const SizedBox(width: 4),
+                        Switch(
+                          value: sub.enabled,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                          onChanged: (v) => onToggleEnabled(sub, v),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 3),

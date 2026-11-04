@@ -113,8 +113,8 @@ func FlboxStop() *C.char {
 }
 
 //export FlboxVpnForwardStart
-func FlboxVpnForwardStart(tunFd C.int) *C.char {
-	return recordErr(startVpnForward(int(tunFd)))
+func FlboxVpnForwardStart(tunFd C.int, ipv6 C.int) *C.char {
+	return recordErr(startVpnForward(int(tunFd), int(ipv6) != 0))
 }
 
 //export FlboxVpnForwardStop

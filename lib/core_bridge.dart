@@ -21,8 +21,8 @@ typedef _SetupNative = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
-typedef _FwdStartNative = Pointer<Utf8> Function(Int32);
-typedef _FwdStartDart = Pointer<Utf8> Function(int);
+typedef _FwdStartNative = Pointer<Utf8> Function(Int32, Int32);
+typedef _FwdStartDart = Pointer<Utf8> Function(int, int);
 typedef _FwdActiveNative = Int32 Function();
 typedef _FwdActiveDart = int Function();
 typedef _NodeDetailNative = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
@@ -255,8 +255,8 @@ class CoreBridge {
 
   /// Starts the sing-box TUN forwarder on the VpnService's fd: it
   /// owns the packet path and feeds the Xray mixed inbound.
-  void vpnForwardStart(int tunFd) {
-    final err = _take(_fwdStart(tunFd));
+  void vpnForwardStart(int tunFd, {bool ipv6 = false}) {
+    final err = _take(_fwdStart(tunFd, ipv6 ? 1 : 0));
     if (err != null) throw CoreException(err);
   }
 

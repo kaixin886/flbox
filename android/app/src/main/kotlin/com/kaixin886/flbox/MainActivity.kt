@@ -53,6 +53,10 @@ class MainActivity : FlutterActivity() {
                                 FlboxVpnService.EXTRA_BYPASS,
                                 ArrayList(bypass)
                             )
+                            .putExtra(
+                                FlboxVpnService.EXTRA_IPV6,
+                                call.argument<Boolean>("ipv6") ?: false
+                            )
                     )
                     result.success(null)
                 }

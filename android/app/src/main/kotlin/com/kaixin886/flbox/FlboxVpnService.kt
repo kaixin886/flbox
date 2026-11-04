@@ -42,7 +42,10 @@ class FlboxVpnService : VpnService() {
                 START_NOT_STICKY
             }
             ACTION_START -> {
-                startVpn(intent?.getStringArrayListExtra(EXTRA_BYPASS) ?: emptyList())
+                startVpn(
+                    intent?.getStringArrayListExtra(EXTRA_BYPASS) ?: emptyList(),
+                    intent?.getBooleanExtra(EXTRA_IPV6, false) ?: false
+                )
                 START_NOT_STICKY
             }
             else -> {
@@ -55,7 +58,7 @@ class FlboxVpnService : VpnService() {
         }
     }
 
-    private fun startVpn(bypass: List<String>) {
+    private fun startVpn(bypass: List<String>, ipv6: Boolean) {
         if (tun != null) return
         // Android 14+ refuses startForeground without a declared type
         // (MissingForegroundServiceTypeException). The manifest declares
@@ -78,6 +81,14 @@ class FlboxVpnService : VpnService() {
             .setMtu(1500)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
+        if (ipv6) {
+            // Dual-stack capture: without the v6 address and the
+            // ::/0 route, IPv6 traffic bypasses the tunnel
+            // entirely - the leak the settings toggle closes.
+            // The address matches the forwarder's tun config.
+            builder.addAddress("fdfe:dcba:9876::1", 126)
+            builder.addRoute("::", 0)
+        }
         try {
             // The core's own outbound connections must not loop back
             // into the tunnel it is serving.
@@ -232,6 +243,7 @@ class FlboxVpnService : VpnService() {
         const val ACTION_START = "com.kaixin886.flbox.VPN_START"
         const val ACTION_STOP = "com.kaixin886.flbox.VPN_STOP"
         const val EXTRA_BYPASS = "com.kaixin886.flbox.EXTRA_BYPASS"
+        const val EXTRA_IPV6 = "com.kaixin886.flbox.EXTRA_IPV6"
         private const val CHANNEL_ID = "flbox_vpn"
         private const val NOTIF_ID = 1
 

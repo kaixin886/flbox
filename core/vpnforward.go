@@ -23,6 +23,31 @@ import (
 
 var vpnTunFd atomic.Int32
 
+const vpnForwardConfig6 = `{
+  "log": {"level": "warn", "timestamp": false},
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+      "mtu": 1500,
+      "auto_route": false,
+      "strict_route": false,
+      "stack": "gvisor"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "out",
+      "server": "127.0.0.1",
+      "server_port": 7890,
+      "version": "5"
+    }
+  ],
+  "route": {"final": "out"}
+}`
+
 const vpnForwardConfig = `{
   "log": {"level": "warn", "timestamp": false},
   "inbounds": [
@@ -48,12 +73,16 @@ const vpnForwardConfig = `{
   "route": {"final": "out"}
 }`
 
-func startVpnForward(fd int) error {
+func startVpnForward(fd int, ipv6 bool) error {
 	if fd <= 0 {
 		return errors.New("invalid tun fd")
 	}
 	vpnTunFd.Store(int32(fd))
-	if err := startCore(vpnForwardConfig); err != nil {
+	cfg := vpnForwardConfig
+	if ipv6 {
+		cfg = vpnForwardConfig6
+	}
+	if err := startCore(cfg); err != nil {
 		vpnTunFd.Store(0)
 		return err
 	}
