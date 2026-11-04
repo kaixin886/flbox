@@ -109,21 +109,7 @@ func xrayMeasureDelay(configJSON, url string) (int64, error) {
 	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 		return -1, fmt.Errorf("measure config is not json: %w", err)
 	}
-	cfg["log"] = map[string]any{"loglevel": "warning", "access": "none"}
-	// Trim at the JSON level too (v2rayNG trims in its config
-	// builder before the native call, and its native side then
-	// drops the same sections again): in this core version the
-	// JSON loader resolves geosite references while PARSING the
-	// routing and DNS sections, so leaving them in would make
-	// every measure load the geo data files - or fail outright
-	// when the asset directory is not in play. The App filter
-	// below remains as the second line of defense.
-	delete(cfg, "inbounds")
-	delete(cfg, "routing")
-	delete(cfg, "dns")
-	delete(cfg, "fakedns")
-	delete(cfg, "stats")
-	delete(cfg, "policy")
+	trimMeasureSections(cfg)
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return -1, err
@@ -162,6 +148,27 @@ func xrayMeasureDelay(configJSON, url string) (int64, error) {
 	return measureInstDelay(ctx, inst, url)
 }
 
+// trimMeasureSections reduces a full node config to what a
+// latency probe needs, at the JSON level: the shared error
+// log is silenced, and the sections whose parsing alone would
+// resolve geosite references (routing, DNS) or serve no probe
+// purpose are dropped. In this core version the JSON loader
+// resolves geosite references while PARSING those sections,
+// so leaving them in would make every measure load the geo
+// data files - or fail outright when the asset directory is
+// not in play. Callers that build their own sections (the
+// combined measurement in measureall.go) re-add what they
+// need after trimming.
+func trimMeasureSections(cfg map[string]any) {
+	cfg["log"] = map[string]any{"loglevel": "warning", "access": "none"}
+	delete(cfg, "inbounds")
+	delete(cfg, "routing")
+	delete(cfg, "dns")
+	delete(cfg, "fakedns")
+	delete(cfg, "stats")
+	delete(cfg, "policy")
+}
+
 // measureInstDelay probes url through inst's default outbound
 // and returns the best of two attempts in milliseconds.
 func measureInstDelay(ctx context.Context, inst *xcore.Instance, url string) (int64, error) {
@@ -184,7 +191,15 @@ func measureInstDelay(ctx context.Context, inst *xcore.Instance, url string) (in
 	}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: 12 * time.Second}
+	return probeURL(ctx, client, url)
+}
 
+// probeURL runs the two-attempt latency probe over an HTTP
+// client whose transport already leads where the caller wants
+// the traffic to go (a core instance's default outbound, or a
+// chosen outbound of a combined instance via its SOCKS door).
+// The better of two successful attempts wins.
+func probeURL(ctx context.Context, client *http.Client, url string) (int64, error) {
 	var minDuration int64 = -1
 	success := false
 	var lastErr error

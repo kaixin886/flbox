@@ -277,6 +277,22 @@ func FlboxXrayMeasureDelay(configJSON, url *C.char) (out *C.char) {
 	return C.CString(fmt.Sprintf("%d", ms))
 }
 
+//export FlboxXrayMeasureAll
+func FlboxXrayMeasureAll(configsJSON, url *C.char) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			noteErr(fmt.Errorf("core panic recovered: %v", r))
+			out = C.CString("")
+		}
+	}()
+	res, err := xrayMeasureAll(C.GoString(configsJSON), C.GoString(url))
+	if err != nil {
+		noteErr(err)
+		return C.CString("")
+	}
+	return C.CString(res)
+}
+
 //export FlboxXrayStatus
 func FlboxXrayStatus() *C.char {
 	return C.CString(xrayStatus())

@@ -107,6 +107,10 @@ class CoreBridge {
         .lookupFunction<_NodeDetailNative, _NodeDetailNative>(
           'FlboxXrayMeasureDelay',
         );
+    _xrayMeasureAll = lib
+        .lookupFunction<_NodeDetailNative, _NodeDetailNative>(
+          'FlboxXrayMeasureAll',
+        );
     _xrayStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStop');
     _xrayStatus = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStatus');
     _xrayTraffic = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayTraffic');
@@ -167,6 +171,7 @@ class CoreBridge {
   late final _StartDart _xrayTestStart;
   late final _TestStopDart _xrayTestStop;
   late final _NodeDetailNative _xrayMeasureDelay;
+  late final _NodeDetailNative _xrayMeasureAll;
   late final _NoArg _xrayStop;
   late final _NoArg _xrayStatus;
   late final _NoArg _xrayTraffic;
@@ -289,6 +294,22 @@ class CoreBridge {
     malloc.free(a);
     malloc.free(b);
     return int.tryParse(res ?? '') ?? -1;
+  }
+
+  /// Measures a whole chunk of nodes in ONE core instance
+  /// (the Clash shape, see the Go side): [configsJson] is a
+  /// JSON array of per-node config strings; the result is a
+  /// JSON array of delays in the same order, -1 per failed
+  /// node. Returns an empty string when the combined instance
+  /// itself could not be built or started, which is the
+  /// caller's cue to fall back to per-node measurement.
+  String xrayMeasureAll(String configsJson, String url) {
+    final a = configsJson.toNativeUtf8();
+    final b = url.toNativeUtf8();
+    final res = _take(_xrayMeasureAll(a, b));
+    malloc.free(a);
+    malloc.free(b);
+    return res ?? '';
   }
 
   String xrayStatus() => _take(_xrayStatus()) ?? '(no status)';

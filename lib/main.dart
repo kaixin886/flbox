@@ -378,6 +378,9 @@ Color _delayColor(int? ms) {
 Future<int> _xrayMeasureInIsolate(String config, String url) =>
     Isolate.run(() => CoreBridge().xrayMeasureDelay(config, url));
 
+Future<String> _xrayMeasureAllInIsolate(String configsJson, String url) =>
+    Isolate.run(() => CoreBridge().xrayMeasureAll(configsJson, url));
+
 /// Entrypoint for the speed test process. The Kotlin
 /// FlboxTestService runs in its own ":tasks" process (the
 /// v2rayNG split) and starts a second Flutter engine aimed at
@@ -402,9 +405,41 @@ Future<void> testMain() async {
     final items = <Map<String, dynamic>>[
       for (final e in job['items'] as List) (e as Map).cast<String, dynamic>(),
     ];
-    var next = 0;
-    Future<void> worker() async {
-      while (next < items.length) {
+    // Combined measurement first: one core instance holds
+    // the whole chunk's outbounds and each node is probed
+    // through its own (the Clash shape - per-node instance
+    // churn is what degraded every earlier build's back
+    // half). An empty answer means the combined instance
+    // could not be built or started, and the chunk falls
+    // back to per-node measurement below.
+    var combinedDone = false;
+    try {
+      final out = await _xrayMeasureAllInIsolate(
+        jsonEncode([for (final item in items) item['config'] as String]),
+        url,
+      ).timeout(const Duration(seconds: 60), onTimeout: () => '');
+      if (out.isNotEmpty) {
+        final arr = jsonDecode(out) as List;
+        if (arr.length == items.length) {
+          for (var i = 0; i < items.length; i++) {
+            try {
+              await host.invokeMethod<void>(
+                'postResult',
+                jsonEncode({
+                  'name': items[i]['name'],
+                  'ms': (arr[i] as num).toInt(),
+                }),
+              );
+            } catch (_) {}
+          }
+          combinedDone = true;
+        }
+      }
+    } catch (_) {}
+    if (!combinedDone) {
+      var next = 0;
+      Future<void> worker() async {
+        while (next < items.length) {
         final item = items[next++];
         int ms;
         try {
@@ -432,7 +467,8 @@ Future<void> testMain() async {
       }
     }
 
-    await Future.wait([for (var i = 0; i < 8; i++) worker()]);
+      await Future.wait([for (var i = 0; i < 8; i++) worker()]);
+    }
   } catch (_) {}
   try {
     await host.invokeMethod<void>('done');
@@ -3971,7 +4007,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.52.0 · app.flbox · Xray 内核',
+              'FlBox 0.53.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
