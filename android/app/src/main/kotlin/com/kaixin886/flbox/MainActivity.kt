@@ -143,6 +143,21 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(null)
                 }
+                "testProcessAlive" -> {
+                    var alive = false
+                    try {
+                        val am = getSystemService(ActivityManager::class.java)
+                        val target = "$packageName:tasks"
+                        for (p in am.runningAppProcesses ?: emptyList()) {
+                            if (p.processName == target) {
+                                alive = true
+                                break
+                            }
+                        }
+                    } catch (e: Exception) {
+                    }
+                    result.success(alive)
+                }
                 "killTestProcess" -> {
                     // Force-stops the speed test process (same
                     // uid, so the signal is permitted) when a run

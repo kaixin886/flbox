@@ -2231,8 +2231,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// a launch is now treated as disposable: when polling
   /// stalls for 15 seconds the test process is force-killed
   /// and relaunched with only the nodes still missing, up to
-  /// four launches, stopping early when a launch yields
-  /// nothing at all. Each fresh process historically survives
+  /// five launches, tolerating one empty launch before giving
+  /// up (the 0.48 run's relaunch came up empty: its start was
+  /// lost, so 0.49 also waits for the killed process to
+  /// actually disappear and makes the service rebuild its
+  /// engine on every start). Each fresh process historically
+  /// survives
   /// another twenty-plus nodes, so two launches cover a big
   /// subscription. Returns false only when the first launch
   /// could not be started at all, so the caller can fall back
@@ -2242,7 +2246,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   ) async {
     final remaining = <MapEntry<String, String>>[...entries];
     var launches = 0;
-    while (remaining.isNotEmpty && launches < 4) {
+    var zeroLaunches = 0;
+    while (remaining.isNotEmpty && launches < 5) {
       launches++;
       var started = false;
       try {
@@ -2250,6 +2255,23 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         // service stopped or the engine dead; killing it is a
         // no-op when it already exited on its own.
         await _vpnChannel.invokeMethod('killTestProcess');
+        // Give a dying test process a moment to actually exit:
+        // starting the service while the old instance is still
+        // being torn down can hand the intent to the corpse,
+        // and the new job then never runs (one of the two ways
+        // the 0.48 relaunch silently produced nothing; the
+        // other - a start ignored because an engine already
+        // existed - is covered on the service side, which now
+        // rebuilds its engine on every start). When the
+        // platform hides the process from the scan this loop
+        // exits at once.
+        for (var i = 0; i < 15; i++) {
+          final alive =
+              await _vpnChannel.invokeMethod<bool>('testProcessAlive') ??
+                  false;
+          if (!alive) break;
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+        }
         final job = jsonEncode({
           'url': 'http://www.gstatic.com/generate_204',
           'items': [
@@ -2270,7 +2292,15 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (!mounted) return true;
       remaining.removeWhere((e) => got.contains(e.key));
       if (remaining.isEmpty) break;
-      if (got.isEmpty) break;
+      if (got.isEmpty) {
+        // A launch can still come up empty when its start was
+        // lost to platform timing; give it one retry before
+        // treating the remainder as unmeasurable.
+        zeroLaunches++;
+        if (zeroLaunches >= 2) break;
+      } else {
+        zeroLaunches = 0;
+      }
       _logEvent(
         'speed test: relaunching for ${remaining.length} remaining nodes',
       );
@@ -3913,7 +3943,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.48.0 · app.flbox · Xray 内核',
+              'FlBox 0.49.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -4077,7 +4107,8 @@ class _ProxiesPageState extends State<ProxiesPage> {
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                 ),
                 child: Text(widget.testing
-                    ? '测速中 ${widget.delays.length}/${profile.nodes.length}'
+                    ? '测速中 ${widget.delays.length}/'
+                        '${profile.nodes.where((n) => !isInfoNode(n.name)).length}'
                     : '全部测速'),
               ),
               IconButton(

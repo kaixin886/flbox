@@ -36,12 +36,25 @@ class FlboxTestService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (engine == null) {
+        // A start always carries a new job: tear down any engine
+        // left from a previous launch and build a fresh one.
+        // Relaunches depend on this - when the process could not
+        // be killed, or the start raced the old instance's
+        // teardown, an ignored start would leave the new job
+        // unrun and the UI would see a silent zero-result launch
+        // (the 0.48 phone run ended exactly that way: first half
+        // measured, remainder never started).
+        if (engine != null) {
             try {
-                startEngine()
+                engine?.destroy()
             } catch (e: Exception) {
-                stopSelf()
             }
+            engine = null
+        }
+        try {
+            startEngine()
+        } catch (e: Exception) {
+            stopSelf()
         }
         return START_NOT_STICKY
     }
