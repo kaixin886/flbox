@@ -232,3 +232,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.39 修复：后台划掉后系统 VPN 还在、面板却显示未启动（用户 2026-11-04 录屏）
 - 定案：对账信号选错。旧 _resyncCoreState 只看 companion 的 active 标志，而它在停止一开始就翻 false、服务实际销毁却被系统 VPN 绑定拖住——于是「隧道/服务还活着、active 已假、核心已被有序停止」的半死状态对账时完全隐形，面板显示未启动，与通知栏里还在的 VPN 会话互相矛盾。此前只在启动时对账一次也放大了问题。
 - 修法：对账改以（服务 alive && tunFd > 0）为「隧道存在」的准绳。隧道活＋核心活→接管（转发器死了就地重启）；隧道活＋核心死→在同一 fd 上重启核心＋转发器复活会话（不再拆掉系统还显示着的隧道）；只剩服务空壳（无隧道）→ stopVpn 清掉，让通知与系统 VPN 条目消失；核心孤儿→停核心。启动与每次回到前台（resumed，未运行且不忙时）都对账。
+
+## 0.40：VPN 改 v2rayNG 式常驻 + 修测速闪退（用户 2026-11-04 两报）
+- **常驻语义反转（用户拍板，覆盖 0.26/0.19 的旧契约）**：用户要求「和 v2rayNG 一样：后台划掉 VPN 服务仍然在，打开软件显示开启，点一下就可以关闭」。改法：① FlboxVpnService 删除 onTaskRemoved（不再喊 Dart 停、不再 800ms 自拆），清单给服务加 stopWithTask="false"；② Dart 删除 onTaskRemoved 通道处理；③ 常驻通知加 contentIntent，点击通知直接回到 App。会话生灭回归前台服务本身：进程还在→隧道＋核心＋转发器都在，重开靠 0.39 的对账接管（_running 直接延续或 adopt/revive），主开关一点即全拆；进程真被系统杀掉→隧道随进程消亡，null intent 仍 stopSelf 不复活僵尸（NOT_STICKY 不变）。休眠中的 FlboxCoreService 同步删 onTaskRemoved，免得日后复活时带回旧行为。注意：小米等 ROM 在划掉后强杀进程时 FGS 也保不住，那是系统层面的事，靠电池白名单缓解，不在本版范围。
+- **测速闪退**：_testAll 是全仓最后一个把整表活放主 isolate 的地方——translateAll（47 节点逐个 LoadConfig 验活）＋两次整实例 xrayStart（测速实例与恢复原节点）全同步堵 UI 线程数秒，与 0.31「切分组卡顿」同源，堵到系统杀掉/ANR 即表现为闪退。改法：三处 FFI 全部走 Isolate.run（先快照 yaml 与原节点配置到本地变量，闭包不捕获 this），主 isolate 只留 6 路 HTTP 探测；另加 _busy 守卫。加固：Go 侧 FFI 边界加 panic 兜底（XrayStart/Stop、Translate/TranslateAll、VpnForwardStart/Stop、sing-box Start/Stop）——未捕获的 Go panic 会直接杀进程无任何提示，今后一律转成错误字符串走既有 toast＋日志路径，真有内核 panic 也能拿到文本定位。

@@ -3,6 +3,7 @@ package com.kaixin886.flbox
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -18,11 +19,15 @@ import android.os.ParcelFileDescriptor
 // ownership of the fd (Xray's Android tun never closes it); closing
 // it here is what tears the tunnel down.
 //
-// Lifecycle rule: a session belongs to the process that started it.
-// The service is NOT sticky: if the process dies (task swiped away,
-// MIUI background kill), the tunnel dies with it instead of being
-// resurrected by the system as a coreless zombie that black-holes
-// all traffic and cannot be stopped from the UI.
+// Lifecycle rule (v2rayNG-style, user-requested 2026-11-04): the
+// session belongs to this foreground service, not to the UI task.
+// Swiping FlBox out of recents must NOT stop anything - the tunnel
+// and the core stay up, and reopening the app shows the session as
+// running (Dart reconciles against the flags below) with the main
+// toggle able to stop it. The service is still NOT sticky: if the
+// process itself dies (MIUI background kill, OOM), the tunnel dies
+// with it, and a null-intent restart never resurrects a coreless
+// zombie tunnel that would black-hole all traffic.
 class FlboxVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
@@ -126,19 +131,11 @@ class FlboxVpnService : VpnService() {
         stopSelf()
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        // Swiping FlBox out of recents ends the session: a
-        // tunnel that outlives its UI reads as "the VPN won't
-        // turn off". Dart gets a brief window to run its
-        // orderly stop (forwarder, core, tunnel); the delayed
-        // local teardown fires only if that never landed.
-        try {
-            VpnBridge.channel?.invokeMethod("onTaskRemoved", null)
-        } catch (_: Exception) {
-        }
-        Handler(Looper.getMainLooper()).postDelayed({ stopVpn() }, 800)
-        super.onTaskRemoved(rootIntent)
-    }
+    // No onTaskRemoved override on purpose: swiping the task away
+    // leaves this foreground service (and the session it hosts)
+    // running, v2rayNG-style. The manifest also sets
+    // stopWithTask="false" on this service so the system does not
+    // stop it when the task that started it is removed.
 
     override fun onDestroy() {
         active = false
@@ -221,10 +218,26 @@ class FlboxVpnService : VpnService() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
+        // Tapping the resident notification reopens the app,
+        // where the adopted session can be stopped from the
+        // main toggle - the v2rayNG flow the user asked for.
+        val launch = Intent(this, MainActivity::class.java)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+        val pending = PendingIntent.getActivity(
+            this,
+            0,
+            launch,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE
+        )
         return builder
             .setContentTitle(statusTitle ?: "FlBox VPN 运行中")
             .setContentText(statusText ?: "系统代理已接管流量")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(pending)
             .build()
     }
 

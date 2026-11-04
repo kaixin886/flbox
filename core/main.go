@@ -12,6 +12,7 @@ import "C"
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"unsafe"
 
@@ -103,22 +104,48 @@ func FlboxTranslate(clashYAML *C.char) *C.char {
 }
 
 //export FlboxStart
-func FlboxStart(configJSON *C.char) *C.char {
+func FlboxStart(configJSON *C.char) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
 	return recordErr(startCore(C.GoString(configJSON)))
 }
 
 //export FlboxStop
-func FlboxStop() *C.char {
+func FlboxStop() (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
 	return recordErr(stopCore())
 }
 
+// Panic guard for the FFI boundary: an unrecovered Go panic in
+// any of these entry points kills the whole app process (the
+// user sees a flash-crash with no message). Recovering turns it
+// into the ordinary error string Dart already handles, and the
+// message lands in the log page instead.
+
 //export FlboxVpnForwardStart
-func FlboxVpnForwardStart(tunFd C.int, ipv6 C.int) *C.char {
+func FlboxVpnForwardStart(tunFd C.int, ipv6 C.int) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
 	return recordErr(startVpnForward(int(tunFd), int(ipv6) != 0))
 }
 
 //export FlboxVpnForwardStop
-func FlboxVpnForwardStop() *C.char {
+func FlboxVpnForwardStop() (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
 	return recordErr(stopVpnForward())
 }
 
@@ -146,8 +173,14 @@ func FlboxXrayVersion() *C.char {
 }
 
 //export FlboxXrayTranslate
-func FlboxXrayTranslate(clashYAML, mode, logPath *C.char) *C.char {
-	out, err := xrayTranslate(
+func FlboxXrayTranslate(clashYAML, mode, logPath *C.char) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			recordErr(fmt.Errorf("core panic recovered: %v", r))
+			out = nil
+		}
+	}()
+	res, err := xrayTranslate(
 		C.GoString(clashYAML),
 		C.GoString(mode),
 		C.GoString(logPath),
@@ -156,12 +189,18 @@ func FlboxXrayTranslate(clashYAML, mode, logPath *C.char) *C.char {
 		recordErr(err)
 		return nil
 	}
-	return C.CString(out)
+	return C.CString(res)
 }
 
 //export FlboxXrayTranslateAll
-func FlboxXrayTranslateAll(clashYAML, logPath *C.char) *C.char {
-	out, err := xrayTranslateAll(
+func FlboxXrayTranslateAll(clashYAML, logPath *C.char) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			recordErr(fmt.Errorf("core panic recovered: %v", r))
+			out = nil
+		}
+	}()
+	res, err := xrayTranslateAll(
 		C.GoString(clashYAML),
 		C.GoString(logPath),
 	)
@@ -169,16 +208,26 @@ func FlboxXrayTranslateAll(clashYAML, logPath *C.char) *C.char {
 		recordErr(err)
 		return nil
 	}
-	return C.CString(out)
+	return C.CString(res)
 }
 
 //export FlboxXrayStart
-func FlboxXrayStart(configJSON *C.char, tunFd C.int) *C.char {
+func FlboxXrayStart(configJSON *C.char, tunFd C.int) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
 	return recordErr(xrayStart(C.GoString(configJSON), int(tunFd)))
 }
 
 //export FlboxXrayStop
-func FlboxXrayStop() *C.char {
+func FlboxXrayStop() (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
 	return recordErr(xrayStop())
 }
 

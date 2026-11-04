@@ -420,11 +420,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
       } else if (call.method == 'onNetworkChanged') {
         _onNetworkChanged();
-      } else if (call.method == 'onTaskRemoved') {
-        // The user swiped FlBox out of recents: end the session
-        // in an orderly way instead of leaving a host behind.
-        if (_running) await _stopCore();
       }
+      // No onTaskRemoved handling: swiping FlBox out of recents
+      // leaves the VPN session running (v2rayNG-style); the
+      // service is a foreground service with stopWithTask off,
+      // and _resyncCoreState adopts the live session when the
+      // app is reopened.
       return null;
     });
     WidgetsBinding.instance.addObserver(this);
@@ -1860,10 +1861,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _lastStatusText = null;
   }
 
-  /// Full session teardown, shared by the toggle and the
-  /// task-removed signal from the services: packet forwarder
-  /// and core first, then the host (the VPN tunnel or the
-  /// local foreground service). The VPN stop is verified
+  /// Full session teardown, run from the main toggle (and from
+  /// resync when it clears a dead session's leftovers): packet
+  /// forwarder and core first, then the host (the VPN tunnel or
+  /// the local foreground service). The VPN stop is verified
   /// against the service's own state - a stop that only landed
   /// in Dart leaves a black-holing tunnel behind, which reads
   /// as "the VPN won't turn off".
@@ -2057,17 +2058,34 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// Parallel latency test: one temporary instance carries every node
   /// on its own local port, and six workers probe them concurrently.
   /// The previously running node (if any) is restored afterwards.
+  ///
+  /// Every FFI call here runs on a worker isolate: translate-all
+  /// validates each outbound with the real loader and starting the
+  /// combined instance blocks for seconds on a big profile, and
+  /// doing that on the UI isolate froze the app until the system
+  /// killed it - the "speed test crashes the app" report of
+  /// 2026-11-04 (the same trap the group switch hit in 0.31).
+  /// Only the probes (plain HTTP through the test ports) stay on
+  /// this isolate. Locals are snapshotted first: an isolate
+  /// closure may only capture sendable values, never `this`.
   Future<void> _testAll() async {
-    if (_testing || _profile == null || _profileYaml == null) return;
+    if (_testing || _busy || _profile == null || _profileYaml == null) {
+      return;
+    }
     final wasRunning = _running;
     final prevNode = _selectedNode;
+    final yaml = _profileYaml!;
+    final prevConfig =
+        prevNode != null ? _profile!.configs[prevNode] : null;
     setState(() {
       _testing = true;
       _delays = {};
     });
     try {
-      final all = CoreBridge().translateAllXray(_profileYaml!, logPath: '');
-      CoreBridge().xrayStart(all.config, 0);
+      final all = await Isolate.run(
+        () => CoreBridge().translateAllXray(yaml, logPath: ''),
+      );
+      await Isolate.run(() => CoreBridge().xrayStart(all.config, 0));
       final entries = all.ports.entries
           .where((e) => !isInfoNode(e.key))
           .toList();
@@ -2084,13 +2102,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
       await Future.wait([for (var i = 0; i < 6; i++) worker()]);
     } catch (e) {
+      _logEvent('speed test failed: $e');
       _toast('测速失败：$e');
     } finally {
       try {
-        if (wasRunning && prevNode != null) {
-          CoreBridge().xrayStart(_profile!.configs[prevNode]!, 0);
+        if (wasRunning && prevConfig != null) {
+          await Isolate.run(() => CoreBridge().xrayStart(prevConfig, 0));
         } else if (!wasRunning) {
-          CoreBridge().xrayStop();
+          await Isolate.run(() => CoreBridge().xrayStop());
         }
       } catch (_) {}
       if (mounted) setState(() => _testing = false);
@@ -3625,7 +3644,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.39.0 · app.flbox · Xray 内核',
+              'FlBox 0.40.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

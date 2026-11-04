@@ -67,21 +67,11 @@ class FlboxCoreService : Service() {
         return START_NOT_STICKY
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        // Same contract as the VPN service: swiping the app
-        // away ends the session. Dart runs its orderly stop;
-        // the delayed local teardown is the backstop.
-        try {
-            VpnBridge.channel?.invokeMethod("onTaskRemoved", null)
-        } catch (_: Exception) {
-        }
-        Handler(Looper.getMainLooper()).postDelayed({
-            active = false
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        }, 800)
-        super.onTaskRemoved(rootIntent)
-    }
+    // No onTaskRemoved override: same contract as the VPN
+    // service - swiping the task away must not end the session
+    // (v2rayNG-style). This host is currently dormant (no Dart
+    // caller since the non-VPN mode was removed), kept in step
+    // so it cannot reintroduce the old behaviour if revived.
 
     override fun onDestroy() {
         active = false
