@@ -10,7 +10,6 @@ import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
-import android.os.SELinux
 import android.system.Os
 import android.system.OsConstants
 import android.os.Handler
@@ -152,6 +151,28 @@ class MainActivity : FlutterActivity() {
         return lines.joinToString("\n")
     }
 
+    // android.os.SELinux is a hidden API and not in the
+    // SDK stubs, so read the state the way native tools
+    // do: the enforce node, with getenforce as fallback.
+    private fun selinuxState(): String {
+        try {
+            val v = File("/sys/fs/selinux/enforce").readText().trim()
+            if (v == "1") return "enforcing"
+            if (v == "0") return "permissive"
+        } catch (e: Exception) {
+        }
+        try {
+            val proc = ProcessBuilder("getenforce")
+                .redirectErrorStream(true)
+                .start()
+            val out = proc.inputStream.bufferedReader().readText().trim()
+            proc.waitFor()
+            if (out.isNotEmpty()) return out.lowercase()
+        } catch (e: Exception) {
+        }
+        return "unknown"
+    }
+
     // The device block for the start-failure dialog, in the
     // same shape other proxy apps print: app version,
     // model, Android, kernel, SELinux - the facts a log
@@ -177,7 +198,7 @@ class MainActivity : FlutterActivity() {
             -1L
         }
         val pageText = if (pageSize > 0) "${pageSize / 1024} KB" else "unknown"
-        val selinux = if (SELinux.isSELinuxEnforced()) "enforcing" else "permissive"
+        val selinux = selinuxState()
         return listOf(
             appLine,
             "model: ${Build.MODEL} (${Build.DEVICE})",
