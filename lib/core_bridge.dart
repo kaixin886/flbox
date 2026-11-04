@@ -16,6 +16,15 @@ typedef _TranslateAllNative = Pointer<Utf8> Function(
 );
 typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
 typedef _StartDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
+typedef _SetupNative = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+typedef _FwdStartNative = Pointer<Utf8> Function(Int32);
+typedef _FwdStartDart = Pointer<Utf8> Function(int);
+typedef _FwdActiveNative = Int32 Function();
+typedef _FwdActiveDart = int Function();
 typedef _FreeNative = Void Function(Pointer<Utf8>);
 
 class CoreException implements Exception {
@@ -63,8 +72,8 @@ class XrayAllTest {
   final Map<String, int> ports;
 }
 
-/// FFI bridge to libflbox.so. Xray trial surface only; the sing-box
-/// exports stay unused until that engine is wired up.
+/// FFI bridge to libflbox.so. Xray carries the proxying; sing-box
+/// is wired in as the VPN tunnel's packet forwarder (0.23).
 class CoreBridge {
   CoreBridge._() {
     final lib = DynamicLibrary.open('libflbox.so');
@@ -82,6 +91,14 @@ class CoreBridge {
     _xrayStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStop');
     _xrayStatus = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStatus');
     _xrayTraffic = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayTraffic');
+    _setup = lib.lookupFunction<_SetupNative, _SetupNative>('FlboxSetup');
+    _fwdStart = lib.lookupFunction<_FwdStartNative, _FwdStartDart>(
+      'FlboxVpnForwardStart',
+    );
+    _fwdStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxVpnForwardStop');
+    _fwdActive = lib.lookupFunction<_FwdActiveNative, _FwdActiveDart>(
+      'FlboxVpnForwardActive',
+    );
     _lastError = lib.lookupFunction<_NoArg, _NoArg>('FlboxLastError');
     _free = lib.lookupFunction<_FreeNative, void Function(Pointer<Utf8>)>(
       'FlboxFree',
@@ -92,6 +109,10 @@ class CoreBridge {
 
   factory CoreBridge() => _instance ??= CoreBridge._();
 
+  late final _SetupNative _setup;
+  late final _FwdStartDart _fwdStart;
+  late final _NoArg _fwdStop;
+  late final _FwdActiveDart _fwdActive;
   late final _NoArg _xrayVersion;
   late final _TranslateNative _xrayTranslate;
   late final _TranslateAllNative _xrayTranslateAll;
@@ -188,6 +209,32 @@ class CoreBridge {
   }
 
   String xrayStatus() => _take(_xrayStatus()) ?? '(no status)';
+
+  /// One-time libbox setup (paths must exist).
+  void sbSetup(String basePath, String workingPath, String tempPath) {
+    final a = basePath.toNativeUtf8();
+    final b = workingPath.toNativeUtf8();
+    final c = tempPath.toNativeUtf8();
+    final err = _take(_setup(a, b, c));
+    malloc.free(a);
+    malloc.free(b);
+    malloc.free(c);
+    if (err != null) throw CoreException(err);
+  }
+
+  /// Starts the sing-box TUN forwarder on the VpnService's fd: it
+  /// owns the packet path and feeds the Xray mixed inbound.
+  void vpnForwardStart(int tunFd) {
+    final err = _take(_fwdStart(tunFd));
+    if (err != null) throw CoreException(err);
+  }
+
+  void vpnForwardStop() {
+    final err = _take(_fwdStop());
+    if (err != null) throw CoreException(err);
+  }
+
+  bool vpnForwardActive() => _fwdActive() != 0;
 
   /// Cumulative proxy traffic counters as JSON ({"up":n,"down":n}).
   String xrayTraffic() => _take(_xrayTraffic()) ?? '{"up":0,"down":0}';

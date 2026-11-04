@@ -256,23 +256,12 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 			},
 		},
 	}
-	if opts.VPN {
-		// The Android VpnService owns the TUN device; its fd reaches
-		// the core through the xray.tun.fd environment variable, which
-		// the tun inbound reads when the instance is created.
-		inbounds = append(inbounds, map[string]any{
-			"tag":      "tun",
-			"protocol": "tun",
-			"settings": map[string]any{
-				"name": "xray0",
-				"MTU":  1500,
-			},
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": []string{"http", "tls", "quic"},
-			},
-		})
-	}
+	// VPN mode deliberately gets no tun inbound any more: the
+	// Android tunnel is owned by the sing-box forwarder, which feeds
+	// this core through the mixed inbound (see vpnforward.go in the
+	// core package). Xray's native tun stack dropped some apps'
+	// connections mid-transfer on the user's phone. opts.VPN now
+	// only records that the session runs behind the system tunnel.
 	domainStrategy := "AsIs"
 	routingRules := []any{}
 	if opts.Rules {

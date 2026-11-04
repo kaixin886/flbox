@@ -4,13 +4,14 @@ import (
 	"errors"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
+	"golang.org/x/sys/unix"
 )
 
 // corePlatform is the Go-side PlatformInterface for libbox. In sing-box's
 // own Android client this interface is implemented in Kotlin; FlBox keeps
 // the core self-contained, so platform services that only a real Android
-// runtime can provide are stubbed here. Milestone 1 is proxy-only: TUN
-// stays closed and OpenTun reports that directly.
+// runtime can provide are stubbed here. TUN is served: OpenTun hands
+// sing-box a duplicate of the VpnService's fd (see vpnforward.go).
 //
 // TODO(M1): the default-interface monitor never calls back, so interface
 // changes are invisible to the core; verify outbound behaviour on device
@@ -26,7 +27,18 @@ func (corePlatform) UsePlatformAutoDetectInterfaceControl() bool { return false 
 func (corePlatform) AutoDetectInterfaceControl(fd int32) error { return nil }
 
 func (corePlatform) OpenTun(options libbox.TunOptions) (int32, error) {
-	return 0, errors.New("tun is not available until milestone M2")
+	fd := vpnTunFd.Load()
+	if fd <= 0 {
+		return 0, errors.New("no vpn tun fd was provided")
+	}
+	// sing-box closes the descriptor it is given when the tun shuts
+	// down; hand it a duplicate so the Android VpnService keeps
+	// ownership of the original (it closes that one itself).
+	dup, err := unix.Dup(int(fd))
+	if err != nil {
+		return 0, err
+	}
+	return int32(dup), nil
 }
 
 func (corePlatform) FindConnectionOwner(

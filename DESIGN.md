@@ -141,3 +141,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **运行中切模式**：_setRulesMode 原本在 _running 时直接拒绝（「先停止再切换」）。改为：照常保存＋重翻译，若运行中则用新配置在同一隧道上原地重启核心（xrayStart 换实例、fd 不变、VPN 不断），与网络切换重启同一机制；失败才落到停止态并提示。
 - **自动选最快排除信息节点**：机场订阅里的伪节点（剩余流量/套餐到期/重置倒计时）按名识别（isInfoNode 正则：剩余|流量|到期|重置|套餐|官网|公告|订阅|客服|expire|traffic|reset|remaining）——全部测速跳过它们（不再白测）、⚡自动选最快跳过它们（原 _pickFastest 不排除、可能选中流量卡）、节点卡片给它们打「订阅信息」灰标。手动点选不受限。
 - 顺带确认：0.21 截图里普通导航栏选中图标已变蓝，0.20 修复真机生效。
+
+## 0.23（2026-11-04）VPN 数据通路换 sing-box 转发器
+
+- **定案过程**：Telegram 规则/全局模式间歇卡「连接中」。先后排除：机场节点出口（换自建 NTT 节点同症）、确定性配置错误（间歇性、且 0.10 曾通过）、出境环境干扰（其他代理软件同机同网无此病）。决定性 A/B：Termux 经 127.0.0.1:7890 直连 TG 数据中心 149.154.175.52:443 拿到了回应字节（DC 讲 MTProto，curl 报 wrong version number 正是连通的证据）——核心与节点健康，坏的是应用流量进核心的那一段，即 Xray 原生 tun 入站的 gVisor 协议栈（日志里 gVisor 系错误 endpoint is closed for send + proxy/tun connection was refused 刷屏，与此互证）。
+- **新通路**：VPN 模式下由一个专用 sing-box 实例接管隧道：tun 入站（172.19.0.1/30、MTU 1500、gVisor 栈、auto_route 关）→ SOCKS5 出站 127.0.0.1:7890 → Xray 混合入站，即经典 tun2socks 结构；sing-box 的栈正是用户其他客户端在用的那套。fd 由 VpnService 交 Dart、Dart 经新 FFI FlboxVpnForwardStart 传入 Go，platform 的 OpenTun 返回该 fd 的 dup（sing-box 关它自己的副本，VpnService 保持原 fd 所有权）。Xray 配置不再带 tun 入站（翻译器去掉、冒烟测试改为断言其缺席）；fd 只归转发器，Xray 的所有 xrayStart 调用一律 fd=0。
+- **生命周期接线**：启动顺序＝起隧道→起 Xray→起转发器，转发器启动失败走既有失败清理（连 Xray 一起拆）；停止＝先停转发器、再停 Xray、再拆隧道；网络切换/切节点/切模式只重启 Xray，转发器的 SOCKS 出站按连接重拨、无需动；启动对账新增一支：隧道与 Xray 都活着但转发器死了时，用找回的 fd 原地把转发器拉起来，拉不起来才整场拆掉，绝不认领一个会黑洞的会话。测速换实例期间转发器照常指向 7890（与旧行为等价：测速实例不接隧道流量，测完恢复）。
+- 本地验证：Go 三包测试全过（新增转发器代码、OpenTun dup、翻译器去掉 tun 入站均编译入内）；flutter analyze 干净。转发器在真机上的启动（libbox Setup + OpenTun 路径）只能真机验：重点看 VPN 模式开启后 Telegram 是否秒连、网页/视频是否照常。

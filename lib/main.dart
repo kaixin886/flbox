@@ -403,6 +403,23 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  bool _sbReady = false;
+
+  /// libbox needs a one-time Setup with its directories before the
+  /// VPN forwarder can start.
+  Future<void> _ensureSbSetup() async {
+    if (_sbReady) return;
+    final docs = await getApplicationDocumentsDirectory();
+    final base = Directory('${docs.path}/sb');
+    final work = Directory('${base.path}/work');
+    final temp = Directory('${base.path}/tmp');
+    for (final d in [base, work, temp]) {
+      await d.create(recursive: true);
+    }
+    CoreBridge().sbSetup(base.path, work.path, temp.path);
+    _sbReady = true;
+  }
+
   /// Keeps the error log bounded: past ~2MB only the last ~256KB
   /// survive. Runs before a core start, when the previous instance
   /// is stopped and nothing holds the file open.
@@ -455,6 +472,25 @@ class _HomeShellState extends State<HomeShell> {
         if (vpnActive && coreRunning) {
           final fd = await _vpnChannel.invokeMethod<int>('tunFd') ?? -1;
           if (fd > 0) _tunFd = fd;
+          if (!CoreBridge().vpnForwardActive()) {
+            // Core and tunnel survived but the packet forwarder did
+            // not: restart it on the same fd instead of adopting a
+            // session whose tunnel black-holes everything.
+            try {
+              await _ensureSbSetup();
+              CoreBridge().vpnForwardStart(_tunFd);
+              _logEvent('resync: restarted the vpn forwarder');
+            } catch (e) {
+              _logEvent('resync: vpn forwarder restart failed: $e');
+              try {
+                CoreBridge().xrayStop();
+              } catch (_) {}
+              await _vpnChannel.invokeMethod('stopVpn');
+              _tunFd = 0;
+              _toast('已清理失效的 VPN 会话');
+              return;
+            }
+          }
           _logEvent('resync: adopted live VPN session');
           setState(() {
             _running = true;
@@ -463,6 +499,9 @@ class _HomeShellState extends State<HomeShell> {
           _startPolling();
         } else if (vpnActive) {
           _logEvent('resync: tunnel without core (zombie), tearing down');
+          try {
+            CoreBridge().vpnForwardStop();
+          } catch (_) {}
           await _vpnChannel.invokeMethod('stopVpn');
           _toast('已清理上次残留的 VPN 隧道');
         } else if (coreRunning) {
@@ -510,7 +549,7 @@ class _HomeShellState extends State<HomeShell> {
     _logEvent('network changed: restarting core in place');
     try {
       CoreBridge().xrayStop();
-      CoreBridge().xrayStart(config, _modeVpn ? _tunFd : 0);
+      CoreBridge().xrayStart(config, 0);
       _startedAt = DateTime.now();
     } catch (e) {
       _logEvent('network-change restart failed: $e');
@@ -613,7 +652,7 @@ class _HomeShellState extends State<HomeShell> {
       final config = _profile?.configs[_selectedNode];
       if (config != null) {
         try {
-          CoreBridge().xrayStart(config, _modeVpn ? _tunFd : 0);
+          CoreBridge().xrayStart(config, 0);
           _logEvent('core restarted for mode switch (rules=$rules)');
           _startedAt = DateTime.now();
         } on CoreException catch (e) {
@@ -980,6 +1019,11 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _toggleCore() async {
     if (_busy) return;
     if (_running) {
+      if (_modeVpn) {
+        try {
+          CoreBridge().vpnForwardStop();
+        } catch (_) {}
+      }
       try {
         CoreBridge().xrayStop();
       } catch (_) {}
@@ -1032,7 +1076,14 @@ class _HomeShellState extends State<HomeShell> {
         await _vpnChannel.invokeMethod('startCoreService');
       }
       await _rotateLogIfHuge();
-      CoreBridge().xrayStart(config, fd);
+      CoreBridge().xrayStart(config, 0);
+      if (_modeVpn) {
+        // The packet path: sing-box owns the tunnel fd and forwards
+        // every flow into the mixed inbound Xray just opened.
+        await _ensureSbSetup();
+        CoreBridge().vpnForwardStart(fd);
+        _logEvent('vpn forwarder started (sing-box tun -> 127.0.0.1:7890)');
+      }
       _logEvent(
           'core started (vpn=$_modeVpn, rules=$_rulesMode, node=$_selectedNode)');
       _startedAt = DateTime.now();
@@ -1040,6 +1091,12 @@ class _HomeShellState extends State<HomeShell> {
       _startPolling();
     } catch (e) {
       if (_modeVpn) {
+        try {
+          CoreBridge().vpnForwardStop();
+        } catch (_) {}
+        try {
+          CoreBridge().xrayStop();
+        } catch (_) {}
         try {
           await _vpnChannel.invokeMethod('stopVpn');
         } catch (_) {}
@@ -1108,7 +1165,6 @@ class _HomeShellState extends State<HomeShell> {
     if (_testing || _profile == null || _profileYaml == null) return;
     final wasRunning = _running;
     final prevNode = _selectedNode;
-    final fd = _modeVpn ? _tunFd : 0;
     setState(() {
       _testing = true;
       _delays = {};
@@ -1136,7 +1192,7 @@ class _HomeShellState extends State<HomeShell> {
     } finally {
       try {
         if (wasRunning && prevNode != null) {
-          CoreBridge().xrayStart(_profile!.configs[prevNode]!, fd);
+          CoreBridge().xrayStart(_profile!.configs[prevNode]!, 0);
         } else if (!wasRunning) {
           CoreBridge().xrayStop();
         }
@@ -1175,7 +1231,7 @@ class _HomeShellState extends State<HomeShell> {
       final config = _profile?.configs[name];
       if (config == null) return;
       try {
-        CoreBridge().xrayStart(config, _modeVpn ? _tunFd : 0);
+        CoreBridge().xrayStart(config, 0);
         _toast('已切换到 $name');
       } on CoreException catch (e) {
         setState(() => _running = false);
@@ -2268,7 +2324,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.22.0 · app.flbox · Xray 内核',
+              'FlBox 0.23.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

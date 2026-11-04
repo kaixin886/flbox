@@ -60,7 +60,8 @@ func TestXraySmoke(t *testing.T) {
 	}
 	t.Logf("xray version %s, config loads OK", xcore.Version())
 
-	// The VPN variant (tun inbound + error log path) must parse too.
+	// The VPN variant (error log path; the tunnel itself is fed by
+	// the sing-box forwarder, so no tun inbound) must parse too.
 	vpnResult, err := xraytranslate.Translate([]byte(smokeYAML), xraytranslate.Options{
 		VPN:     true,
 		LogPath: "/tmp/xray-error.log",
@@ -69,8 +70,8 @@ func TestXraySmoke(t *testing.T) {
 		t.Fatalf("vpn translate: %v", err)
 	}
 	for name, vpnCfg := range vpnResult.Configs {
-		if !strings.Contains(vpnCfg, `"tun"`) {
-			t.Errorf("node %s: vpn config missing tun inbound", name)
+		if strings.Contains(vpnCfg, `"protocol":"tun"`) {
+			t.Errorf("node %s: vpn config must not carry a tun inbound", name)
 		}
 		if _, err := xcore.LoadConfig("json", strings.NewReader(vpnCfg)); err != nil {
 			t.Errorf("node %s: vpn config rejected by Xray: %v", name, err)

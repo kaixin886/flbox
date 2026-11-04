@@ -110,6 +110,24 @@ func FlboxStop() *C.char {
 	return recordErr(stopCore())
 }
 
+//export FlboxVpnForwardStart
+func FlboxVpnForwardStart(tunFd C.int) *C.char {
+	return recordErr(startVpnForward(int(tunFd)))
+}
+
+//export FlboxVpnForwardStop
+func FlboxVpnForwardStop() *C.char {
+	return recordErr(stopVpnForward())
+}
+
+//export FlboxVpnForwardActive
+func FlboxVpnForwardActive() C.int {
+	if vpnForwardActive() {
+		return 1
+	}
+	return 0
+}
+
 //export FlboxLastError
 func FlboxLastError() *C.char {
 	lastErrMu.Lock()
