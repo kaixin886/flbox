@@ -2196,13 +2196,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// run, not the app. Since 0.47 the default path is the
   /// same split: the job goes to the FlboxTestService process
   /// (see testMain) and results stream back through a results
-  /// file this method polls. The 0.47 phone run still stopped
-  /// at 23 completions - inside the test process, which is
-  /// exactly where that failure belongs - so since 0.48 a
-  /// stalled launch is force-killed and relaunched with only
-  /// the nodes still missing (see _testAllViaService). The
-  /// in-process workers below remain as a fallback for when
-  /// the service cannot be started at all.
+  /// file this method polls. Every build through 0.50 still
+  /// stopped at exactly 23 completions - inside the test
+  /// process, which is exactly where that failure belongs -
+  /// so since 0.51 the list is measured in chunks of six,
+  /// each chunk in a fresh test process with a bounded blast
+  /// radius (see _testAllViaService). The in-process workers
+  /// below remain as a fallback for when the service cannot
+  /// be started at all.
   ///
   /// Nodes are logged before the run and each result is logged
   /// as it lands, so the log page still shows exactly how far
@@ -2235,47 +2236,50 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   /// Ships the job to the test process and polls its results
   /// file (through the platform channel) until every node has
-  /// a result. The 0.47 phone run showed the test process
-  /// still dies or wedges at the same point an in-process run
-  /// used to crash (about 23 completions) - the isolation did
-  /// its job, the app survived, but the run stopped there. So
-  /// a launch is now treated as disposable: when polling
-  /// stalls for 15 seconds the test process is force-killed
-  /// and relaunched with only the nodes still missing, up to
-  /// five launches, tolerating one empty launch before giving
-  /// up (the 0.48 run's relaunch came up empty: its start was
-  /// lost, so 0.49 also waits for the killed process to
-  /// actually disappear and makes the service rebuild its
-  /// engine on every start). Each fresh process historically
-  /// survives
-  /// another twenty-plus nodes, so two launches cover a big
-  /// subscription. Returns false only when the first launch
+  /// a result. Six builds (0.45-0.50) all stopped at exactly
+  /// 23 results on this subscription, in every process shape
+  /// tried, with the missing results scattered - the signature
+  /// of one node's instance wedging the shared machinery
+  /// while its neighbours were in flight, not of a counting
+  /// or channel bug (the close-out-of-lock theory of 0.50 was
+  /// falsified by its own run: closes no longer gate results,
+  /// yet the count froze at 23 again). Rather than hunt the
+  /// poison node through more theories, the blast radius is
+  /// now bounded by construction: the list is measured in
+  /// chunks of six, each chunk in a fresh test process. A
+  /// chunk that wedges is force-killed at the stall, its
+  /// unreported nodes are recorded as timeouts, and the run
+  /// moves on - the tail of the list, which no earlier build
+  /// ever reached, finally gets measured, and the chunk
+  /// boundary lines in the log narrow any poison node down
+  /// to six names. Returns false only when the first chunk
   /// could not be started at all, so the caller can fall back
   /// to measuring in-process.
   Future<bool> _testAllViaService(
     List<MapEntry<String, String>> entries,
   ) async {
-    final remaining = <MapEntry<String, String>>[...entries];
-    var launches = 0;
-    var zeroLaunches = 0;
-    while (remaining.isNotEmpty && launches < 5) {
-      launches++;
+    const chunkSize = 6;
+    var anyLaunched = false;
+    for (var start = 0; start < entries.length; start += chunkSize) {
+      final end = start + chunkSize > entries.length
+          ? entries.length
+          : start + chunkSize;
+      final chunk = entries.sublist(start, end);
+      _logEvent(
+        'speed test: chunk ${start ~/ chunkSize + 1} '
+        '(${chunk.length} nodes)',
+      );
       var started = false;
       try {
-        // A previous launch's process may be wedged with the
-        // service stopped or the engine dead; killing it is a
-        // no-op when it already exited on its own.
+        // Every chunk gets a fresh test process: killing the
+        // previous one is a no-op when it exited on its own.
         await _vpnChannel.invokeMethod('killTestProcess');
-        // Give a dying test process a moment to actually exit:
-        // starting the service while the old instance is still
-        // being torn down can hand the intent to the corpse,
-        // and the new job then never runs (one of the two ways
-        // the 0.48 relaunch silently produced nothing; the
-        // other - a start ignored because an engine already
-        // existed - is covered on the service side, which now
-        // rebuilds its engine on every start). When the
-        // platform hides the process from the scan this loop
-        // exits at once.
+        // Give a dying process a moment to actually exit, so
+        // the start is not handed to an instance that is still
+        // being torn down (the 0.48 relaunch was lost exactly
+        // that way). When the platform hides the process from
+        // the scan this exits at once, and the service's
+        // rebuild-on-start covers that case.
         for (var i = 0; i < 15; i++) {
           final alive =
               await _vpnChannel.invokeMethod<bool>('testProcessAlive') ??
@@ -2286,7 +2290,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         final job = jsonEncode({
           'url': 'http://www.gstatic.com/generate_204',
           'items': [
-            for (final e in remaining) {'name': e.key, 'config': e.value},
+            for (final e in chunk) {'name': e.key, 'config': e.value},
           ],
         });
         final written =
@@ -2298,25 +2302,38 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       } catch (_) {
         started = false;
       }
-      if (!started) return launches > 1;
-      final got = await _pollTestResults({for (final e in remaining) e.key});
-      if (!mounted) return true;
-      remaining.removeWhere((e) => got.contains(e.key));
-      if (remaining.isEmpty) break;
-      if (got.isEmpty) {
-        // A launch can still come up empty when its start was
-        // lost to platform timing; give it one retry before
-        // treating the remainder as unmeasurable.
-        zeroLaunches++;
-        if (zeroLaunches >= 2) break;
-      } else {
-        zeroLaunches = 0;
+      if (!started) {
+        if (!anyLaunched) return false;
+        // A later chunk that cannot even start counts as
+        // timed out wholesale; the run still continues.
+        if (mounted) {
+          setState(() {
+            _delays = {..._delays, for (final e in chunk) e.key: null};
+          });
+        }
+        _logEvent('speed test: chunk failed to start');
+        continue;
       }
-      _logEvent(
-        'speed test: relaunching for ${remaining.length} remaining nodes',
-      );
+      anyLaunched = true;
+      final got = await _pollTestResults({for (final e in chunk) e.key});
+      if (!mounted) return true;
+      // Whatever the chunk did not report - wedged instance,
+      // dead process - is a timeout for those nodes; the run
+      // moves on to the next chunk regardless.
+      final missing = [
+        for (final e in chunk)
+          if (!got.contains(e.key)) e.key,
+      ];
+      if (missing.isNotEmpty) {
+        setState(() {
+          _delays = {..._delays, for (final name in missing) name: null};
+        });
+        _logEvent(
+          'speed test: chunk gave up on ${missing.length} nodes',
+        );
+      }
     }
-    return true;
+    return anyLaunched;
   }
 
   /// One launch's polling: applies result lines as they land
@@ -3954,7 +3971,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.50.0 · app.flbox · Xray 内核',
+              'FlBox 0.51.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
