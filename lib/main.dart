@@ -807,11 +807,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     setState(() => _subAutoIntervalHours = hours);
   }
 
-  Future<void> _toggleSubAutoUpdate(SubProfile sub) async {
-    setState(() => sub.autoUpdate = !sub.autoUpdate);
-    await _persistSubs();
-  }
-
   /// Subscription editor (the netproxy-style form): name, link,
   /// per-subscription auto-update period, update route, and the
   /// node name filters applied on every refresh.
@@ -1910,7 +1905,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onSwitch: _switchSub,
             onUpdate: (sub) => _fetchSubscription(sub.url!, updateSub: sub),
             onDelete: _deleteSub,
-            onToggleAutoUpdate: _toggleSubAutoUpdate,
             onEditSub: _openSubEditor,
             onImportLink: _importFromLink,
           ),
@@ -2322,6 +2316,75 @@ Color _cardColor(BuildContext context) =>
           alpha: Theme.of(context).brightness == Brightness.dark ? 0.07 : 0.045,
         );
 
+/// Card surface with depth: the shared fill plus a hairline
+/// border and, in light mode, a faint shadow. Flat fills alone
+/// read as unfinished; every page's cards use this.
+BoxDecoration _cardDecoration(BuildContext context) {
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return BoxDecoration(
+    color: _cardColor(context),
+    borderRadius: BorderRadius.circular(20),
+    border: Border.all(
+      color: Theme.of(context)
+          .colorScheme
+          .onSurface
+          .withValues(alpha: dark ? 0.09 : 0.05),
+    ),
+    boxShadow: dark
+        ? const []
+        : [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.045),
+              blurRadius: 12,
+              offset: const Offset(0, 3),
+            ),
+          ],
+  );
+}
+
+/// Rounded-square tinted icon tile (card and section leads).
+Widget _iconTile(IconData icon, {Color color = _accent, double size = 40}) {
+  return Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.13),
+      borderRadius: BorderRadius.circular(size * 0.3),
+    ),
+    child: Icon(icon, color: color, size: size * 0.52),
+  );
+}
+
+/// Latency as a pill: colored dot and value on a tinted ground.
+Widget _delayPill(int? delay, Color color) {
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.12),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          delay == null ? '超时' : '$delay ms',
+          style: TextStyle(
+            color: color,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 class _DashboardPage extends StatelessWidget {
   const _DashboardPage({
     required this.onOpenSettings,
@@ -2358,19 +2421,24 @@ class _DashboardPage extends StatelessWidget {
   final VoidCallback onShowProxies;
 
   Widget _card(BuildContext context, {required Widget child, VoidCallback? onTap}) {
-    return Material(
-      color: _cardColor(context),
-      borderRadius: BorderRadius.circular(20),
-      child: InkWell(
+    return Container(
+      decoration: _cardDecoration(context),
+      child: Material(
+        type: MaterialType.transparency,
         borderRadius: BorderRadius.circular(20),
-        onTap: onTap,
-        child: Padding(padding: const EdgeInsets.all(16), child: child),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: onTap,
+          child: Padding(padding: const EdgeInsets.all(16), child: child),
+        ),
       ),
     );
   }
 
   Widget _speedCard(
     BuildContext context, {
+    required IconData icon,
+    required Color tint,
     required String label,
     required String speed,
     required String total,
@@ -2378,19 +2446,30 @@ class _DashboardPage extends StatelessWidget {
   }) {
     return _card(
       context,
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: TextStyle(color: muted, fontSize: 13)),
-          const SizedBox(height: 8),
-          Text(
-            speed,
-            style: Theme.of(context).textTheme.titleLarge,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          _iconTile(icon, color: tint, size: 36),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: TextStyle(color: muted, fontSize: 12.5)),
+                const SizedBox(height: 2),
+                Text(
+                  speed,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(total, style: TextStyle(color: muted, fontSize: 12)),
+              ],
+            ),
           ),
-          const SizedBox(height: 4),
-          Text(total, style: TextStyle(color: muted, fontSize: 12.5)),
         ],
       ),
     );
@@ -2507,33 +2586,56 @@ class _DashboardPage extends StatelessWidget {
                       children: [
                         Row(
                           children: [
-                            Container(
-                              width: 10,
-                              height: 10,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: running
-                                    ? const Color(0xFF34A853)
-                                    : muted,
+                            _iconTile(
+                              running
+                                  ? Icons.bolt
+                                  : Icons.power_settings_new,
+                              color: running
+                                  ? const Color(0xFF34A853)
+                                  : muted,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    running ? '运行中' : '未启动',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    statusDetail,
+                                    style: TextStyle(
+                                        color: muted, fontSize: 12.5),
+                                  ),
+                                ],
                               ),
                             ),
-                            const SizedBox(width: 10),
-                            Text(
-                              running ? '运行中' : '未启动',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                            if (running && startedAt != null) ...[
-                              const Spacer(),
-                              Text(
-                                _fmtDuration(
-                                    DateTime.now().difference(startedAt!)),
-                                style: TextStyle(color: muted),
+                            if (running && startedAt != null)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF34A853)
+                                      .withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  _fmtDuration(DateTime.now()
+                                      .difference(startedAt!)),
+                                  style: const TextStyle(
+                                    color: Color(0xFF34A853),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ),
-                            ],
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        Text(statusDetail, style: TextStyle(color: muted)),
                       ],
                     ),
                   ),
@@ -2544,7 +2646,9 @@ class _DashboardPage extends StatelessWidget {
                       Expanded(
                         child: _speedCard(
                           context,
-                          label: '↑ 上行',
+                          icon: Icons.arrow_upward,
+                          tint: const Color(0xFF34A853),
+                          label: '上行',
                           speed: _fmtSpeed(traffic.speedUp),
                           total: '共 ${_fmtBytes(traffic.up)}',
                           muted: muted,
@@ -2554,7 +2658,9 @@ class _DashboardPage extends StatelessWidget {
                       Expanded(
                         child: _speedCard(
                           context,
-                          label: '↓ 下行',
+                          icon: Icons.arrow_downward,
+                          tint: _accent,
+                          label: '下行',
                           speed: _fmtSpeed(traffic.speedDown),
                           total: '共 ${_fmtBytes(traffic.down)}',
                           muted: muted,
@@ -2666,46 +2772,38 @@ class _DashboardPage extends StatelessWidget {
             _card(
               context,
               onTap: onShowProxies,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Row(
                 children: [
-                  Row(
-                    children: [
-                      Text('当前节点',
-                          style: TextStyle(color: muted, fontSize: 13)),
-                      const Spacer(),
-                      Icon(Icons.chevron_right, size: 18, color: muted),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    currentNode ?? '-',
-                    style: Theme.of(context).textTheme.titleMedium,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          '订阅：${profileName ?? '-'}',
-                          style: TextStyle(color: muted, fontSize: 12.5),
+                  _iconTile(Icons.dns_outlined),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('当前节点',
+                            style: TextStyle(color: muted, fontSize: 12)),
+                        const SizedBox(height: 2),
+                        Text(
+                          currentNode ?? '-',
+                          style: Theme.of(context).textTheme.titleMedium,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                      if (currentDelay != null)
+                        const SizedBox(height: 2),
                         Text(
-                          ' · $currentDelay ms',
-                          style: TextStyle(
-                            color: _delayColor(currentDelay),
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w600,
-                          ),
+                          '订阅：${profileName ?? '-'}',
+                          style: TextStyle(color: muted, fontSize: 12),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                    ],
+                      ],
+                    ),
                   ),
+                  if (currentDelay != null) ...[
+                    _delayPill(currentDelay, _delayColor(currentDelay)),
+                    const SizedBox(width: 6),
+                  ],
+                  Icon(Icons.chevron_right, size: 18, color: muted),
                 ],
               ),
             ),
@@ -2866,6 +2964,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 8),
           ListTile(
             contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.apps_outlined),
             title: const Text('分应用代理'),
             subtitle: Text(
               widget.bypassPkgs.isEmpty
@@ -2890,6 +2989,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 8),
           ListTile(
             contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.public_outlined),
             title: const Text('全局模式'),
             subtitle: Text('所有流量都走代理', style: TextStyle(color: muted)),
             trailing: !widget.rulesMode
@@ -2899,6 +2999,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.alt_route),
             title: const Text('规则模式（分流）'),
             subtitle:
                 Text('v2ray 原版绕过大陆：国内域名与 IP 直连，其余走代理', style: TextStyle(color: muted)),
@@ -2909,6 +3010,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.library_books_outlined),
             title: const Text('分流规则库'),
             subtitle: Text(
               widget.geoReady ? '已内置于安装包，点按可刷新' : '内置于安装包（开启规则模式时自动释放）',
@@ -2919,6 +3021,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.power_settings_new),
             title: const Text('启动后自动连接'),
             subtitle:
                 Text('打开 FlBox 时自动启动上次的节点', style: TextStyle(color: muted)),
@@ -2930,6 +3033,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 8),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.notifications_outlined),
             title: const Text('常驻通知信息'),
             subtitle: Text('在 VPN 常驻通知里实时显示当前节点、延迟与上下行速度',
                 style: TextStyle(color: muted)),
@@ -2938,6 +3042,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.update),
             title: const Text('订阅自动更新通知'),
             subtitle: Text('订阅自动更新成功后推送通知',
                 style: TextStyle(color: muted)),
@@ -2946,6 +3051,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.schedule_outlined),
             title: const Text('新订阅默认更新周期'),
             subtitle: Text(
               '每份订阅的自动更新开关、周期、更新网络和节点过滤在配置页点订阅的「编辑」设置；到期后应用在前台和后台都会自动更新',
@@ -2972,6 +3078,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 8),
           ListTile(
             contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.battery_saver_outlined),
             title: const Text('电池优化'),
             subtitle: Text(
               widget.batteryIgnored
@@ -3000,7 +3107,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.31.0 · app.flbox · Xray 内核',
+              'FlBox 0.32.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -3305,7 +3412,12 @@ class _NodeTile extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
             border: selected
                 ? Border.all(color: _accent, width: 1.5)
-                : null,
+                : Border.all(
+                    color: Theme.of(context)
+                        .colorScheme
+                        .onSurface
+                        .withValues(alpha: 0.05),
+                  ),
           ),
           padding: const EdgeInsets.fromLTRB(12, 8, 4, 10),
           child: Column(
@@ -3368,20 +3480,21 @@ class _NodeTile extends StatelessWidget {
               else
                 Row(
                 children: [
-                  Text(
-                    node.type,
-                    style: TextStyle(color: muted, fontSize: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: muted.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      node.type,
+                      style: TextStyle(color: muted, fontSize: 11),
+                    ),
                   ),
                   const Spacer(),
                   if (hasDelay)
-                    Text(
-                      delay == null ? '超时' : '$delay ms',
-                      style: TextStyle(
-                        color: delayColor,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12.5,
-                      ),
-                    )
+                    _delayPill(delay, delayColor)
                   else if (selected)
                     const Padding(
                       padding: EdgeInsets.only(right: 8),
@@ -4078,7 +4191,6 @@ class ProfilesPage extends StatelessWidget {
     required this.onSwitch,
     required this.onUpdate,
     required this.onDelete,
-    required this.onToggleAutoUpdate,
     required this.onEditSub,
     required this.onImportLink,
   });
@@ -4091,7 +4203,6 @@ class ProfilesPage extends StatelessWidget {
   final ValueChanged<SubProfile> onSwitch;
   final ValueChanged<SubProfile> onUpdate;
   final ValueChanged<SubProfile> onDelete;
-  final ValueChanged<SubProfile> onToggleAutoUpdate;
   final ValueChanged<SubProfile> onEditSub;
   final VoidCallback onImportLink;
 
@@ -4156,10 +4267,7 @@ class ProfilesPage extends StatelessWidget {
             ],
             const SizedBox(height: 12),
             Container(
-              decoration: BoxDecoration(
-                color: _cardColor(context),
-                borderRadius: BorderRadius.circular(16),
-              ),
+              decoration: _cardDecoration(context),
               child: Column(
                 children: [
                   ListTile(
@@ -4200,52 +4308,121 @@ class ProfilesPage extends StatelessWidget {
       ..write(sub.url != null ? '订阅链接' : '本地文件');
     final updated = _updatedLabel(sub.updatedAtMs);
     if (updated.isNotEmpty) meta.write(' · $updated');
+    // The auto-update switch itself lives in the editor (the
+    // card face only reports the state), per the user's call.
+    if (sub.url != null) {
+      meta.write(
+        sub.autoUpdate
+            ? ' · 自动更新 ${sub.autoIntervalHours}h'
+            : ' · 自动更新关',
+      );
+    }
+    double? trafficRatio;
+    if (sub.subInfo != null) {
+      final m = RegExp(r'已用 ([\d.]+) / 共 ([\d.]+) GB')
+          .firstMatch(sub.subInfo!);
+      if (m != null) {
+        final used = double.tryParse(m.group(1)!);
+        final total = double.tryParse(m.group(2)!);
+        if (used != null && total != null && total > 0) {
+          trafficRatio = (used / total).clamp(0.0, 1.0).toDouble();
+        }
+      }
+    }
     return Container(
       decoration: BoxDecoration(
-        color: _cardColor(context),
-        borderRadius: BorderRadius.circular(16),
-        border: active ? Border.all(color: _accent, width: 1.5) : null,
+        color: active
+            ? _accent.withValues(alpha: 0.07)
+            : _cardColor(context),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: active
+              ? _accent.withValues(alpha: 0.55)
+              : Theme.of(context)
+                  .colorScheme
+                  .onSurface
+                  .withValues(alpha: 0.05),
+          width: active ? 1.2 : 1,
+        ),
       ),
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              _iconTile(
+                sub.id == 'manual'
+                    ? Icons.edit_note_outlined
+                    : sub.url != null
+                        ? Icons.cloud_outlined
+                        : Icons.description_outlined,
+              ),
+              const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  sub.name,
-                  style: Theme.of(context).textTheme.titleMedium,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            sub.name,
+                            style: Theme.of(context).textTheme.titleMedium,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (active)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: _accent,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Text(
+                              '使用中',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      meta.toString(),
+                      style: TextStyle(color: muted, fontSize: 12.5),
+                    ),
+                  ],
                 ),
               ),
-              if (active)
-                const Text(
-                  '使用中',
-                  style: TextStyle(
-                    color: _accent,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
             ],
           ),
-          const SizedBox(height: 8),
-          Text(meta.toString(), style: TextStyle(color: muted)),
-          if (sub.subInfo != null) ...[
-            const SizedBox(height: 4),
-            Text(sub.subInfo!, style: TextStyle(color: muted)),
-          ],
-          if (sub.url != null)
-            Row(
-              children: [
-                Text('自动更新', style: TextStyle(color: muted)),
-                const Spacer(),
-                Switch(
-                  value: sub.autoUpdate,
-                  onChanged: (_) => onToggleAutoUpdate(sub),
-                ),
-              ],
+          if (trafficRatio != null) ...[
+            const SizedBox(height: 12),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: trafficRatio,
+                minHeight: 5,
+                backgroundColor: muted.withValues(alpha: 0.15),
+                color: _accent,
+              ),
             ),
-          const SizedBox(height: 8),
+          ],
+          if (sub.subInfo != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              sub.subInfo!,
+              style: TextStyle(color: muted, fontSize: 12.5),
+            ),
+          ],
+          const SizedBox(height: 6),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
