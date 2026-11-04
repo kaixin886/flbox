@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"flbox/core/sbtranslate"
+	"flbox/core/xraytranslate"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
 )
@@ -188,6 +189,60 @@ func FlboxXrayStatus() *C.char {
 //export FlboxXrayTraffic
 func FlboxXrayTraffic() *C.char {
 	return C.CString(xrayTraffic())
+}
+
+//export FlboxNodeDetail
+func FlboxNodeDetail(clashYAML, name *C.char) *C.char {
+	out, err := xraytranslate.NodeDetail(
+		[]byte(C.GoString(clashYAML)),
+		C.GoString(name),
+	)
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
+}
+
+//export FlboxNodeUpsert
+func FlboxNodeUpsert(clashYAML, entryJSON, originalName *C.char) *C.char {
+	out, err := xraytranslate.UpsertNode(
+		[]byte(C.GoString(clashYAML)),
+		C.GoString(entryJSON),
+		C.GoString(originalName),
+	)
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
+}
+
+//export FlboxNodeDelete
+func FlboxNodeDelete(clashYAML, name *C.char) *C.char {
+	out, err := xraytranslate.DeleteNode(
+		[]byte(C.GoString(clashYAML)),
+		C.GoString(name),
+	)
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
+}
+
+//export FlboxFilterNodes
+func FlboxFilterNodes(clashYAML, keep, drop *C.char) *C.char {
+	out, err := xraytranslate.FilterNodes(
+		[]byte(C.GoString(clashYAML)),
+		C.GoString(keep),
+		C.GoString(drop),
+	)
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
 }
 
 //export FlboxFree

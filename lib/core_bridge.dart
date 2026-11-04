@@ -25,6 +25,12 @@ typedef _FwdStartNative = Pointer<Utf8> Function(Int32);
 typedef _FwdStartDart = Pointer<Utf8> Function(int);
 typedef _FwdActiveNative = Int32 Function();
 typedef _FwdActiveDart = int Function();
+typedef _NodeDetailNative = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _NodeUpsertNative = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
 typedef _FreeNative = Void Function(Pointer<Utf8>);
 
 class CoreException implements Exception {
@@ -99,6 +105,18 @@ class CoreBridge {
     _fwdActive = lib.lookupFunction<_FwdActiveNative, _FwdActiveDart>(
       'FlboxVpnForwardActive',
     );
+    _nodeDetail = lib.lookupFunction<_NodeDetailNative, _NodeDetailNative>(
+      'FlboxNodeDetail',
+    );
+    _nodeUpsert = lib.lookupFunction<_NodeUpsertNative, _NodeUpsertNative>(
+      'FlboxNodeUpsert',
+    );
+    _nodeDelete = lib.lookupFunction<_NodeDetailNative, _NodeDetailNative>(
+      'FlboxNodeDelete',
+    );
+    _filterNodes = lib.lookupFunction<_NodeUpsertNative, _NodeUpsertNative>(
+      'FlboxFilterNodes',
+    );
     _lastError = lib.lookupFunction<_NoArg, _NoArg>('FlboxLastError');
     _free = lib.lookupFunction<_FreeNative, void Function(Pointer<Utf8>)>(
       'FlboxFree',
@@ -113,6 +131,10 @@ class CoreBridge {
   late final _FwdStartDart _fwdStart;
   late final _NoArg _fwdStop;
   late final _FwdActiveDart _fwdActive;
+  late final _NodeDetailNative _nodeDetail;
+  late final _NodeUpsertNative _nodeUpsert;
+  late final _NodeDetailNative _nodeDelete;
+  late final _NodeUpsertNative _filterNodes;
   late final _NoArg _xrayVersion;
   late final _TranslateNative _xrayTranslate;
   late final _TranslateAllNative _xrayTranslateAll;
@@ -235,6 +257,69 @@ class CoreBridge {
   }
 
   bool vpnForwardActive() => _fwdActive() != 0;
+
+  /// The named node's raw fields from a profile's YAML, for the
+  /// node editor form.
+  Map<String, dynamic> nodeDetail(String yaml, String name) {
+    final a = yaml.toNativeUtf8();
+    final b = name.toNativeUtf8();
+    final out = _take(_nodeDetail(a, b));
+    malloc.free(a);
+    malloc.free(b);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'node detail failed');
+    }
+    return jsonDecode(out) as Map<String, dynamic>;
+  }
+
+  /// Splices [entry] (typed JSON values) into the profile YAML:
+  /// replaces the node named [originalName] (or the same-named
+  /// node), else appends. Returns the rewritten YAML.
+  String nodeUpsert(
+    String yaml,
+    Map<String, dynamic> entry,
+    String originalName,
+  ) {
+    final a = yaml.toNativeUtf8();
+    final b = jsonEncode(entry).toNativeUtf8();
+    final c = originalName.toNativeUtf8();
+    final out = _take(_nodeUpsert(a, b, c));
+    malloc.free(a);
+    malloc.free(b);
+    malloc.free(c);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'node upsert failed');
+    }
+    return out;
+  }
+
+  /// Applies keep/drop name regexes to a profile's node list
+  /// (subscription update filters). Returns the rewritten YAML.
+  String filterNodes(String yaml, String keep, String drop) {
+    final a = yaml.toNativeUtf8();
+    final b = keep.toNativeUtf8();
+    final c = drop.toNativeUtf8();
+    final out = _take(_filterNodes(a, b, c));
+    malloc.free(a);
+    malloc.free(b);
+    malloc.free(c);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'node filter failed');
+    }
+    return out;
+  }
+
+  String nodeDelete(String yaml, String name) {
+    final a = yaml.toNativeUtf8();
+    final b = name.toNativeUtf8();
+    final out = _take(_nodeDelete(a, b));
+    malloc.free(a);
+    malloc.free(b);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'node delete failed');
+    }
+    return out;
+  }
 
   /// Cumulative proxy traffic counters as JSON ({"up":n,"down":n}).
   String xrayTraffic() => _take(_xrayTraffic()) ?? '{"up":0,"down":0}';

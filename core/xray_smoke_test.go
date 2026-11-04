@@ -30,7 +30,20 @@ proxies:
     type: hysteria2
     server: 203.0.113.10
     port: 443
-    password: placeholder
+    password: test-auth-secret
+    obfs: salamander
+    obfs-password: obfs-secret
+    sni: www.apple.com
+    up: 50
+    down: 200
+  - name: WG-TEST
+    type: wireguard
+    server: 203.0.113.20
+    port: 51820
+    private-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    public-key: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+    ip: 10.0.0.2
+    mtu: 1280
 rules:
   - MATCH,PROXY
 `
@@ -40,11 +53,16 @@ func TestXraySmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if len(result.Nodes) != 1 || result.Nodes[0].Name != "NTT-Xray-443" {
+	if len(result.Nodes) != 3 {
 		t.Fatalf("nodes = %+v", result.Nodes)
 	}
-	if len(result.Skipped) != 1 || result.Skipped[0].Name != "SB-HY2" {
+	if len(result.Skipped) != 0 {
 		t.Fatalf("skipped = %+v", result.Skipped)
+	}
+	for name, cfgJSON := range result.Configs {
+		if _, err := xcore.LoadConfig("json", strings.NewReader(cfgJSON)); err != nil {
+			t.Errorf("node %s: config rejected by Xray: %v", name, err)
+		}
 	}
 	cfgJSON := result.Configs["NTT-Xray-443"]
 	var probe map[string]any

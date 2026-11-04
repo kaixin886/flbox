@@ -9,11 +9,100 @@ import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:workmanager/workmanager.dart';
 
 import 'core_bridge.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  // True background subscription updates (netproxy-style): an
+  // hourly WorkManager check refreshes due subscriptions even
+  // when the app is closed. Best-effort by design — the in-app
+  // due-check (startup + timer) covers the rest, and scheduling
+  // failures must never block startup.
+  try {
+    Workmanager().initialize(flboxBgDispatcher);
+    Workmanager().registerPeriodicTask(
+      'flbox-sub-auto-update',
+      'subAutoUpdate',
+      frequency: const Duration(hours: 1),
+      constraints: Constraints(networkType: NetworkType.connected),
+      existingWorkPolicy: ExistingPeriodicWorkPolicy.update,
+    );
+  } catch (_) {}
   runApp(const FlboxApp());
+}
+
+/// WorkManager entry point (runs in a background isolate). It can
+/// only touch files and preferences; the UI picks the changes up
+/// through the bg_subs_changed flag on next launch/resume.
+@pragma('vm:entry-point')
+void flboxBgDispatcher() {
+  Workmanager().executeTask((task, inputData) async {
+    try {
+      await _bgRefreshDueSubs();
+    } catch (_) {}
+    return true;
+  });
+}
+
+Future<void> _bgRefreshDueSubs() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString('subs_v2');
+  if (raw == null) return;
+  final subs = [
+    for (final e in jsonDecode(raw) as List)
+      SubProfile.fromJson(e as Map<String, dynamic>),
+  ];
+  final docs = await getApplicationDocumentsDirectory();
+  final nowMs = DateTime.now().millisecondsSinceEpoch;
+  var changed = false;
+  for (final sub in subs) {
+    if (!sub.autoUpdate || sub.url == null || sub.updateViaProxy) {
+      continue;
+    }
+    if (nowMs - sub.updatedAtMs <= sub.autoIntervalHours * 3600000) {
+      continue;
+    }
+    final client = HttpClient();
+    client.findProxy = (_) => 'DIRECT';
+    try {
+      client.userAgent = 'ClashMeta/1.0';
+      final request = await client
+          .getUrl(Uri.parse(sub.url!))
+          .timeout(const Duration(seconds: 20));
+      final response =
+          await request.close().timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) continue;
+      var text = await response.transform(utf8.decoder).join();
+      if (sub.keepRegex.isNotEmpty || sub.dropRegex.isNotEmpty) {
+        text = CoreBridge().filterNodes(text, sub.keepRegex, sub.dropRegex);
+      }
+      final profile = CoreBridge().translateXray(
+        text,
+        vpn: false,
+        logPath: '',
+        rules: false,
+      );
+      if (profile.nodes.isEmpty) continue;
+      await File('${docs.path}/sub_${sub.id}.yaml').writeAsString(text);
+      sub.nodeCount = profile.nodes.length;
+      sub.updatedAtMs = DateTime.now().millisecondsSinceEpoch;
+      changed = true;
+    } catch (_) {
+      continue;
+    } finally {
+      client.close(force: true);
+    }
+  }
+  if (changed) {
+    await prefs.setString(
+      'subs_v2',
+      jsonEncode([for (final s in subs) s.toJson()]),
+    );
+    await prefs.setBool('bg_subs_changed', true);
+  }
 }
 
 // Visual baseline (see DESIGN.md): one background color, one accent color,
@@ -139,6 +228,10 @@ class SubProfile {
     this.nodeCount = 0,
     required this.updatedAtMs,
     this.autoUpdate = false,
+    this.autoIntervalHours = 24,
+    this.updateViaProxy = false,
+    this.keepRegex = '',
+    this.dropRegex = '',
   });
 
   final String id;
@@ -148,6 +241,10 @@ class SubProfile {
   int nodeCount;
   int updatedAtMs;
   bool autoUpdate;
+  int autoIntervalHours;
+  bool updateViaProxy;
+  String keepRegex;
+  String dropRegex;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -157,6 +254,10 @@ class SubProfile {
         'nodeCount': nodeCount,
         'updatedAtMs': updatedAtMs,
         'autoUpdate': autoUpdate,
+        'autoIntervalHours': autoIntervalHours,
+        'updateViaProxy': updateViaProxy,
+        'keepRegex': keepRegex,
+        'dropRegex': dropRegex,
       };
 
   /// [autoUpdateSeed] migrates profiles saved before the per-sub
@@ -173,6 +274,10 @@ class SubProfile {
         nodeCount: (j['nodeCount'] as num?)?.toInt() ?? 0,
         updatedAtMs: (j['updatedAtMs'] as num?)?.toInt() ?? 0,
         autoUpdate: (j['autoUpdate'] as bool?) ?? autoUpdateSeed,
+        autoIntervalHours: (j['autoIntervalHours'] as num?)?.toInt() ?? 24,
+        updateViaProxy: (j['updateViaProxy'] as bool?) ?? false,
+        keepRegex: j['keepRegex'] as String? ?? '',
+        dropRegex: j['dropRegex'] as String? ?? '',
       );
 }
 
@@ -188,6 +293,24 @@ class _Traffic {
   final double speedDown;
 }
 
+/// One point of the dashboard's live-rate history.
+class _RateSample {
+  const _RateSample(this.up, this.down);
+
+  final double up;
+  final double down;
+}
+
+/// Latency color bands, tight enough that the color carries
+/// information on this user's routes (most nodes sit at 50-250ms,
+/// so the old 300/800 bands painted nearly everything green).
+Color _delayColor(int? ms) {
+  if (ms == null) return Colors.redAccent;
+  if (ms < 120) return const Color(0xFF34A853);
+  if (ms < 280) return Colors.orange;
+  return Colors.redAccent;
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -195,7 +318,7 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   final _pageController = PageController();
   int _index = 0;
   NavStyle _navStyle = NavStyle.slidingGlass;
@@ -222,8 +345,10 @@ class _HomeShellState extends State<HomeShell> {
   bool _netBlocked = false;
   bool _batteryIgnored = false;
   final _traffic = ValueNotifier<_Traffic>(const _Traffic());
+  final _rateHistory = ValueNotifier<List<_RateSample>>(const []);
   DateTime? _startedAt;
   Timer? _pollTimer;
+  Timer? _subTimer;
   DateTime? _lastCoreRestart;
 
   static const _vpnChannel = MethodChannel('flbox/vpn');
@@ -242,9 +367,20 @@ class _HomeShellState extends State<HomeShell> {
       }
       return null;
     });
+    WidgetsBinding.instance.addObserver(this);
     _restore();
     _checkNetwork();
     _askNotifications();
+    _subTimer = Timer.periodic(const Duration(minutes: 30), (_) {
+      _runDueSubscriptionUpdates();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkBgSubUpdates();
+    }
   }
 
   Future<void> _askNotifications() async {
@@ -385,18 +521,12 @@ class _HomeShellState extends State<HomeShell> {
     if (_rulesMode && !_geoReady) {
       await _ensureGeoData();
     }
-    // Per-subscription auto-update: each URL subscription opts in
-    // on its own card; the check interval is a global setting.
-    // Runs once at startup, like the old daily check did.
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final intervalMs = _subAutoIntervalHours * 3600000;
-    for (final sub in _subs) {
-      if (sub.autoUpdate &&
-          sub.url != null &&
-          nowMs - sub.updatedAtMs > intervalMs) {
-        await _fetchSubscription(sub.url!, updateSub: sub);
-      }
-    }
+    // Per-subscription auto-update: each subscription carries its
+    // own opt-in and interval (netproxy-style). Runs at startup,
+    // on a 30-minute timer while the app lives, and hourly in the
+    // background via WorkManager.
+    await _checkBgSubUpdates();
+    await _runDueSubscriptionUpdates();
     await _resyncCoreState();
     if (_autoConnect && _profile != null && !_running && mounted) {
       await _toggleCore();
@@ -685,6 +815,29 @@ class _HomeShellState extends State<HomeShell> {
     await _persistSubs();
   }
 
+  /// Subscription editor (the netproxy-style form): name, link,
+  /// per-subscription auto-update period, update route, and the
+  /// node name filters applied on every refresh.
+  Future<void> _openSubEditor(SubProfile sub) async {
+    final result = await Navigator.of(context).push<Map<String, dynamic>>(
+      MaterialPageRoute(builder: (_) => _SubEditPage(sub: sub)),
+    );
+    if (result == null) return;
+    setState(() {
+      sub.name = result['name'] as String;
+      final url = result['url'] as String?;
+      if (sub.url != null) sub.url = url;
+      sub.autoUpdate = result['autoUpdate'] as bool;
+      sub.autoIntervalHours = result['interval'] as int;
+      sub.updateViaProxy = result['viaProxy'] as bool;
+      sub.keepRegex = result['keep'] as String;
+      sub.dropRegex = result['drop'] as String;
+      if (sub.id == _activeSubId) _profileName = sub.name;
+    });
+    await _persistSubs();
+    _toast('订阅设置已保存');
+  }
+
   Future<void> _toggleFav(String name) async {
     setState(() {
       if (!_favNodes.remove(name)) _favNodes.add(name);
@@ -745,6 +898,7 @@ class _HomeShellState extends State<HomeShell> {
       name: name,
       url: url,
       subInfo: subInfo,
+      autoIntervalHours: _subAutoIntervalHours,
       nodeCount: profile.nodes.length,
       updatedAtMs: DateTime.now().millisecondsSinceEpoch,
     );
@@ -816,6 +970,118 @@ class _HomeShellState extends State<HomeShell> {
       });
     }
     _toast('已删除 ${sub.name}');
+  }
+
+  /// Node editor entry point. Editing targets the active
+  /// subscription's own file (a subscription refresh replaces it,
+  /// like every other client); adding creates the node in the
+  /// local "手动节点" profile instead, which no update overwrites.
+  Future<void> _openNodeEditor([String? editName]) async {
+    if (_running) {
+      _toast('先停止再编辑节点');
+      return;
+    }
+    final isNew = editName == null;
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      SubProfile? targetSub;
+      var targetYaml = '';
+      if (isNew) {
+        for (final s in _subs) {
+          if (s.id == 'manual') targetSub = s;
+        }
+        if (targetSub != null) {
+          final f = _subFile(docs, targetSub.id);
+          if (await f.exists()) targetYaml = await f.readAsString();
+        }
+      } else {
+        targetSub = _activeSub;
+        if (targetSub == null) return;
+        targetYaml = _profileYaml ?? '';
+      }
+      var detail = <String, dynamic>{};
+      if (!isNew) {
+        detail = CoreBridge().nodeDetail(targetYaml, editName);
+      }
+      var siblingNames = <String>{};
+      if (targetYaml.isNotEmpty) {
+        try {
+          final p = CoreBridge().translateXray(
+            targetYaml,
+            vpn: _modeVpn,
+            logPath: '',
+            rules: _rulesMode,
+          );
+          siblingNames = {for (final n in p.nodes) n.name};
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      final result = await Navigator.of(context).push<Map<String, dynamic>>(
+        MaterialPageRoute(
+          builder: (_) => _NodeEditPage(
+            isNew: isNew,
+            detail: detail,
+            siblingNames: siblingNames,
+            fromSubscription: !isNew && targetSub?.url != null,
+          ),
+        ),
+      );
+      if (result == null) return;
+      final String newYaml;
+      if (result['delete'] == true) {
+        newYaml = CoreBridge().nodeDelete(targetYaml, editName!);
+      } else {
+        newYaml = CoreBridge().nodeUpsert(
+          targetYaml,
+          result['entry'] as Map<String, dynamic>,
+          isNew ? '' : editName,
+        );
+      }
+      final profile = CoreBridge().translateXray(
+        newYaml,
+        vpn: _modeVpn,
+        logPath: _logPath,
+        rules: _rulesMode,
+      );
+      var sub = targetSub;
+      if (sub == null) {
+        sub = SubProfile(
+          id: 'manual',
+          name: '手动节点',
+          updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        );
+        _subs = [..._subs, sub];
+      }
+      await _subFile(docs, sub.id).writeAsString(newYaml);
+      sub.nodeCount = profile.nodes.length;
+      sub.updatedAtMs = DateTime.now().millisecondsSinceEpoch;
+      await _persistSubs();
+      if (profile.nodes.isEmpty) {
+        if (sub.id == _activeSubId) {
+          setState(() {
+            _profile = null;
+            _profileName = null;
+            _profileYaml = null;
+            _selectedNode = null;
+            _delays = {};
+          });
+        }
+        _toast('已删除，该配置已无可用节点');
+        return;
+      }
+      if (!isNew && result['entry'] != null && _selectedNode == editName) {
+        _selectedNode =
+            (result['entry'] as Map<String, dynamic>)['name'] as String?;
+      }
+      _activeSubId = sub.id;
+      await _persistSubs();
+      await _activateYaml(newYaml, name: sub.name);
+      _toast(result['delete'] == true ? '已删除节点' : '已保存节点');
+    } on CoreException catch (e) {
+      _toast('保存失败：${e.message}');
+    } catch (e) {
+      _toast('保存失败：$e');
+    }
   }
 
   Future<void> _importProfile() async {
@@ -897,16 +1163,72 @@ class _HomeShellState extends State<HomeShell> {
     return out;
   }
 
+  /// Silent due-check used by startup, the in-app timer and (in
+  /// its own isolate) the WorkManager task: refreshes every opted-in
+  /// subscription whose own interval has elapsed. Via-proxy subs
+  /// are skipped while the core is down.
+  Future<void> _runDueSubscriptionUpdates() async {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    for (final sub in _subs) {
+      if (!sub.autoUpdate || sub.url == null) continue;
+      if (sub.updateViaProxy && !_running) continue;
+      if (nowMs - sub.updatedAtMs > sub.autoIntervalHours * 3600000) {
+        await _fetchSubscription(sub.url!, updateSub: sub, quiet: true);
+      }
+    }
+  }
+
+  /// Picks up subscription files the WorkManager task refreshed:
+  /// reloads the saved metadata and, when the active subscription
+  /// changed under us and the core is stopped, re-activates it.
+  Future<void> _checkBgSubUpdates() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool('bg_subs_changed') != true) return;
+      await prefs.remove('bg_subs_changed');
+      final raw = prefs.getString('subs_v2');
+      if (raw == null) return;
+      final list = jsonDecode(raw) as List<dynamic>;
+      final fresh = [
+        for (final e in list)
+          SubProfile.fromJson(e as Map<String, dynamic>),
+      ];
+      final activeBefore = _activeSub;
+      setState(() => _subs = fresh);
+      if (activeBefore != null && !_running) {
+        final docs = await getApplicationDocumentsDirectory();
+        final f = _subFile(docs, activeBefore.id);
+        if (await f.exists()) {
+          final yaml = await f.readAsString();
+          if (yaml != _profileYaml) {
+            await _activateYaml(yaml, name: activeBefore.name);
+            _logEvent(
+              'subscription refreshed in background: ${activeBefore.name}',
+            );
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
   /// Fetches a subscription URL. With [updateSub] it refreshes that
   /// entry in place; without, it adds a new entry.
-  Future<void> _fetchSubscription(String url, {SubProfile? updateSub}) async {
+  Future<void> _fetchSubscription(
+    String url, {
+    SubProfile? updateSub,
+    bool quiet = false,
+  }) async {
     final client = HttpClient();
-    // Subscription traffic never goes through a proxy: not the
-    // core's own local listener, not a system proxy. An update must
+    // Subscription traffic goes direct by default: an update must
     // still succeed when every node is dead — that is usually when
     // it is needed most. (The app is also excluded from its own
-    // VPN tunnel, so this fetch is direct end to end.)
-    client.findProxy = (_) => 'DIRECT';
+    // VPN tunnel, so this fetch is direct end to end.) A
+    // subscription can opt into updating through the running core
+    // instead (some providers rate-limit direct datacenter exits
+    // less than home IPs, or the reverse).
+    client.findProxy = updateSub?.updateViaProxy == true
+        ? (_) => 'PROXY 127.0.0.1:7890'
+        : (_) => 'DIRECT';
     try {
       client.userAgent = 'ClashMeta/1.0';
       final request = await client
@@ -916,12 +1238,20 @@ class _HomeShellState extends State<HomeShell> {
             const Duration(seconds: 20),
           );
       if (response.statusCode != 200) {
-        _toast('拉取失败：HTTP ${response.statusCode}');
+        if (!quiet) _toast('拉取失败：HTTP ${response.statusCode}');
         return;
       }
       final subInfo =
           _formatSubInfo(response.headers.value('subscription-userinfo'));
-      final text = await response.transform(utf8.decoder).join();
+      var text = await response.transform(utf8.decoder).join();
+      if (updateSub != null &&
+          (updateSub.keepRegex.isNotEmpty || updateSub.dropRegex.isNotEmpty)) {
+        text = CoreBridge().filterNodes(
+          text,
+          updateSub.keepRegex,
+          updateSub.dropRegex,
+        );
+      }
       if (updateSub != null) {
         final docs = await getApplicationDocumentsDirectory();
         _logPath = '${docs.path}/xray-error.log';
@@ -942,7 +1272,14 @@ class _HomeShellState extends State<HomeShell> {
         } else {
           setState(() {});
         }
-        _toast('订阅已更新：${profile.nodes.length} 个节点');
+        if (quiet) {
+          _logEvent(
+            'auto-update: ${updateSub.name} refreshed '
+            '(${profile.nodes.length} nodes)',
+          );
+        } else {
+          _toast('订阅已更新：${profile.nodes.length} 个节点');
+        }
       } else {
         final host = Uri.parse(url).host;
         await _addSubFromYaml(
@@ -953,9 +1290,9 @@ class _HomeShellState extends State<HomeShell> {
         );
       }
     } on CoreException catch (e) {
-      _toast('订阅内容不可用：${e.message}');
+      if (!quiet) _toast('订阅内容不可用：${e.message}');
     } catch (e) {
-      _toast('拉取失败：$e');
+      if (!quiet) _toast('拉取失败：$e');
     } finally {
       client.close(force: true);
     }
@@ -981,6 +1318,7 @@ class _HomeShellState extends State<HomeShell> {
     var speedDown = 0.0;
     var lastTick = DateTime.now();
     _traffic.value = const _Traffic();
+    _rateHistory.value = const [];
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!mounted || !_running) return;
       try {
@@ -1003,6 +1341,9 @@ class _HomeShellState extends State<HomeShell> {
           speedUp: speedUp,
           speedDown: speedDown,
         );
+        final hist = [..._rateHistory.value, _RateSample(speedUp, speedDown)];
+        if (hist.length > 45) hist.removeRange(0, hist.length - 45);
+        _rateHistory.value = hist;
       } catch (_) {
         // A failed poll just skips a beat; the next one retries.
       }
@@ -1014,6 +1355,7 @@ class _HomeShellState extends State<HomeShell> {
     _pollTimer = null;
     _startedAt = null;
     _traffic.value = const _Traffic();
+    _rateHistory.value = const [];
   }
 
   Future<void> _toggleCore() async {
@@ -1283,8 +1625,11 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
+    _subTimer?.cancel();
     _traffic.dispose();
+    _rateHistory.dispose();
     _pageController.dispose();
     super.dispose();
   }
@@ -1320,6 +1665,7 @@ class _HomeShellState extends State<HomeShell> {
             currentNode: _selectedNode,
             modeVpn: _modeVpn,
             traffic: _traffic,
+            rates: _rateHistory,
             startedAt: _startedAt,
             netBlocked: _netBlocked,
             onOpenNetSettings: _openNetSettings,
@@ -1332,6 +1678,11 @@ class _HomeShellState extends State<HomeShell> {
             onShowProxies: () => _select(1),
           ),
           ProxiesPage(
+            subs: _subs,
+            activeSubId: _activeSubId,
+            onSwitchSub: _switchSub,
+            onEditNode: _openNodeEditor,
+            onAddNode: () => _openNodeEditor(),
             profile: _profile,
             profileName: _profileName,
             selectedNode: _selectedNode,
@@ -1353,6 +1704,7 @@ class _HomeShellState extends State<HomeShell> {
             onUpdate: (sub) => _fetchSubscription(sub.url!, updateSub: sub),
             onDelete: _deleteSub,
             onToggleAutoUpdate: _toggleSubAutoUpdate,
+            onEditSub: _openSubEditor,
           ),
           LogsPage(),
         ],
@@ -1796,6 +2148,7 @@ class _DashboardPage extends StatelessWidget {
     required this.currentNode,
     required this.modeVpn,
     required this.traffic,
+    required this.rates,
     required this.startedAt,
     required this.netBlocked,
     required this.onOpenNetSettings,
@@ -1813,6 +2166,7 @@ class _DashboardPage extends StatelessWidget {
   final String? currentNode;
   final bool modeVpn;
   final ValueListenable<_Traffic> traffic;
+  final ValueListenable<List<_RateSample>> rates;
   final DateTime? startedAt;
   final bool netBlocked;
   final VoidCallback onOpenNetSettings;
@@ -1904,7 +2258,7 @@ class _DashboardPage extends StatelessWidget {
     final String statusDetail;
     if (running) {
       statusDetail = modeVpn
-          ? 'Xray 内核 · VPN 模式（系统代理）'
+          ? 'Xray 核心 · sing-box 数据通路 · VPN 模式'
           : 'Xray 内核 · 普通模式 127.0.0.1:7890';
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
@@ -2034,6 +2388,75 @@ class _DashboardPage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
+            ValueListenableBuilder<List<_RateSample>>(
+              valueListenable: rates,
+              builder: (context, samples, _) {
+                var peakDown = 0.0;
+                var peakUp = 0.0;
+                for (final s in samples) {
+                  if (s.down > peakDown) peakDown = s.down;
+                  if (s.up > peakUp) peakUp = s.up;
+                }
+                return _card(
+                  context,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text('实时速率',
+                              style: TextStyle(color: muted, fontSize: 13)),
+                          const Spacer(),
+                          Text(
+                            samples.length < 2
+                                ? '暂无数据'
+                                : '峰值 ↓ ${_fmtSpeed(peakDown)} · ↑ ${_fmtSpeed(peakUp)}',
+                            style: TextStyle(color: muted, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        height: 72,
+                        width: double.infinity,
+                        child: CustomPaint(
+                          painter: _RateChartPainter(samples),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: _accent,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text('下行',
+                              style: TextStyle(color: muted, fontSize: 12)),
+                          const SizedBox(width: 16),
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Color(0xFF34A853),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text('上行',
+                              style: TextStyle(color: muted, fontSize: 12)),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 12),
             _card(
               context,
               child: Column(
@@ -2084,11 +2507,26 @@ class _DashboardPage extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 4),
-                  Text(
-                    '订阅：${profileName ?? '-'}${currentDelay != null ? ' · $currentDelay ms' : ''}',
-                    style: TextStyle(color: muted, fontSize: 12.5),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          '订阅：${profileName ?? '-'}',
+                          style: TextStyle(color: muted, fontSize: 12.5),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (currentDelay != null)
+                        Text(
+                          ' · $currentDelay ms',
+                          style: TextStyle(
+                            color: _delayColor(currentDelay),
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               ),
@@ -2098,6 +2536,73 @@ class _DashboardPage extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Two-series rate history: download in the accent color with a
+/// soft fill, upload in green. Right-aligned fixed window (the
+/// sampler keeps at most 45 points, about 90 seconds).
+class _RateChartPainter extends CustomPainter {
+  _RateChartPainter(this.samples);
+
+  final List<_RateSample> samples;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final baseline = Paint()
+      ..color = Colors.grey.withValues(alpha: 0.25)
+      ..strokeWidth = 1;
+    canvas.drawLine(
+      Offset(0, size.height - 1),
+      Offset(size.width, size.height - 1),
+      baseline,
+    );
+    if (samples.length < 2) return;
+    var maxV = 0.0;
+    for (final s in samples) {
+      if (s.down > maxV) maxV = s.down;
+      if (s.up > maxV) maxV = s.up;
+    }
+    if (maxV <= 0) maxV = 1;
+    final stepX = size.width / 44;
+    double x(int i) => size.width - (samples.length - 1 - i) * stepX;
+    double y(double v) => size.height - 3 - (v / maxV) * (size.height - 8);
+
+    final fill = Path()
+      ..moveTo(x(0), y(samples[0].down));
+    for (var i = 1; i < samples.length; i++) {
+      fill.lineTo(x(i), y(samples[i].down));
+    }
+    fill
+      ..lineTo(x(samples.length - 1), size.height)
+      ..lineTo(x(0), size.height)
+      ..close();
+    canvas.drawPath(
+      fill,
+      Paint()..color = _accent.withValues(alpha: 0.10),
+    );
+
+    void stroke(double Function(_RateSample) pick, Color color) {
+      final path = Path()..moveTo(x(0), y(pick(samples[0])));
+      for (var i = 1; i < samples.length; i++) {
+        path.lineTo(x(i), y(pick(samples[i])));
+      }
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.8
+          ..strokeJoin = StrokeJoin.round
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+
+    stroke((s) => s.down, _accent);
+    stroke((s) => s.up, const Color(0xFF34A853));
+  }
+
+  @override
+  bool shouldRepaint(_RateChartPainter old) => old.samples != samples;
 }
 
 // Settings live on their own page, reached from the dashboard gear, so
@@ -2270,9 +2775,9 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('订阅自动更新间隔'),
+            title: const Text('新订阅默认更新周期'),
             subtitle: Text(
-              '启动时检查已开启自动更新的订阅；每个订阅的开关在配置页的订阅卡片上',
+              '每份订阅的自动更新开关、周期、更新网络和节点过滤在配置页点订阅的「编辑」设置；到期后应用在前台和后台都会自动更新',
               style: TextStyle(color: muted),
             ),
           ),
@@ -2324,7 +2829,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.23.0 · app.flbox · Xray 内核',
+              'FlBox 0.24.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2347,6 +2852,11 @@ class ProxiesPage extends StatefulWidget {
     required this.favorites,
     required this.onToggleFav,
     required this.onPickFastest,
+    required this.onEditNode,
+    required this.onAddNode,
+    required this.subs,
+    required this.activeSubId,
+    required this.onSwitchSub,
   });
 
   final XrayProfile? profile;
@@ -2359,6 +2869,11 @@ class ProxiesPage extends StatefulWidget {
   final Set<String> favorites;
   final ValueChanged<String> onToggleFav;
   final VoidCallback? onPickFastest;
+  final ValueChanged<String> onEditNode;
+  final VoidCallback onAddNode;
+  final List<SubProfile> subs;
+  final String? activeSubId;
+  final ValueChanged<SubProfile> onSwitchSub;
 
   @override
   State<ProxiesPage> createState() => _ProxiesPageState();
@@ -2368,13 +2883,6 @@ class _ProxiesPageState extends State<ProxiesPage> {
   String _query = '';
   int _sortMode = 0; // 0 智能（测速优先）· 1 按延迟 · 2 按名称
   bool _sortOpen = false; // 排序选项行是否展开（不用弹出菜单：模态层会挡住滑动）
-
-  Color _delayColor(int? ms) {
-    if (ms == null) return Colors.redAccent;
-    if (ms < 300) return const Color(0xFF34A853);
-    if (ms < 800) return Colors.orange;
-    return Colors.redAccent;
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -2436,6 +2944,26 @@ class _ProxiesPageState extends State<ProxiesPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Subscription tabs, like FlClash's group tabs: switching
+          // here reuses the profiles page's switch path.
+          if (widget.subs.length > 1) ...[
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (var i = 0; i < widget.subs.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 8),
+                    ChoiceChip(
+                      label: Text(widget.subs[i].name),
+                      selected: widget.subs[i].id == widget.activeSubId,
+                      onSelected: (_) => widget.onSwitchSub(widget.subs[i]),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           Row(
             children: [
               Text(
@@ -2445,6 +2973,11 @@ class _ProxiesPageState extends State<ProxiesPage> {
                 style: TextStyle(color: muted),
               ),
               const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.add),
+                tooltip: '手动添加节点',
+                onPressed: widget.onAddNode,
+              ),
               FilledButton.tonal(
                 onPressed: widget.testing ? null : widget.onTestAll,
                 child: Text(widget.testing
@@ -2532,6 +3065,7 @@ class _ProxiesPageState extends State<ProxiesPage> {
                   selected: node.name == widget.selectedNode,
                   onTap: () => widget.onSelect(node.name),
                   onFav: () => widget.onToggleFav(node.name),
+                  onEdit: () => widget.onEditNode(node.name),
                 );
               },
             ),
@@ -2557,6 +3091,7 @@ class _NodeTile extends StatelessWidget {
     required this.selected,
     required this.onTap,
     required this.onFav,
+    required this.onEdit,
   });
 
   final XrayNode node;
@@ -2569,6 +3104,7 @@ class _NodeTile extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback onFav;
+  final VoidCallback onEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -2604,6 +3140,15 @@ class _NodeTile extends StatelessWidget {
                         style: const TextStyle(fontSize: 13.5, height: 1.3),
                       ),
                     ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    tooltip: '编辑',
+                    color: muted,
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    onPressed: onEdit,
                   ),
                   IconButton(
                     icon: Icon(
@@ -2669,6 +3214,675 @@ class _NodeTile extends StatelessWidget {
   }
 }
 
+enum _FieldKind { text, number, toggle, choice }
+
+class _FieldSpec {
+  const _FieldSpec(this.key, this.label,
+      {this.kind = _FieldKind.text, this.options});
+
+  final String key;
+  final String label;
+  final _FieldKind kind;
+  final List<String>? options;
+}
+
+List<_FieldSpec> _specsFor(String type) {
+  const network = _FieldSpec(
+    'network',
+    '传输方式',
+    kind: _FieldKind.choice,
+    options: ['tcp', 'ws', 'grpc'],
+  );
+  switch (type) {
+    case 'vless':
+      return [
+        const _FieldSpec('uuid', 'UUID'),
+        const _FieldSpec('flow', 'Flow（可空）'),
+        network,
+        const _FieldSpec('tls', 'TLS', kind: _FieldKind.toggle),
+        const _FieldSpec('servername', 'SNI'),
+        const _FieldSpec('client-fingerprint', '指纹（可空）'),
+        const _FieldSpec('reality-opts.public-key', 'REALITY 公钥'),
+        const _FieldSpec('reality-opts.short-id', 'REALITY Short ID'),
+        const _FieldSpec('ws-opts.path', 'WS 路径'),
+        const _FieldSpec('ws-opts.headers.Host', 'WS Host'),
+        const _FieldSpec('skip-cert-verify', '跳过证书验证',
+            kind: _FieldKind.toggle),
+        const _FieldSpec('pinned-cert-sha256', '证书指纹 SHA-256（可空）'),
+      ];
+    case 'vmess':
+      return [
+        const _FieldSpec('uuid', 'UUID'),
+        const _FieldSpec('alterId', 'Alter ID', kind: _FieldKind.number),
+        const _FieldSpec(
+          'cipher',
+          '加密方式',
+          kind: _FieldKind.choice,
+          options: ['auto', 'aes-128-gcm', 'chacha20-poly1305', 'none'],
+        ),
+        network,
+        const _FieldSpec('tls', 'TLS', kind: _FieldKind.toggle),
+        const _FieldSpec('servername', 'SNI'),
+        const _FieldSpec('ws-opts.path', 'WS 路径'),
+        const _FieldSpec('ws-opts.headers.Host', 'WS Host'),
+        const _FieldSpec('skip-cert-verify', '跳过证书验证',
+            kind: _FieldKind.toggle),
+      ];
+    case 'trojan':
+      return [
+        const _FieldSpec('password', '密码'),
+        network,
+        const _FieldSpec('servername', 'SNI'),
+        const _FieldSpec('skip-cert-verify', '跳过证书验证',
+            kind: _FieldKind.toggle),
+        const _FieldSpec('pinned-cert-sha256', '证书指纹 SHA-256（可空）'),
+      ];
+    case 'ss':
+      return [
+        const _FieldSpec(
+          'cipher',
+          '加密方式',
+          kind: _FieldKind.choice,
+          options: [
+            'aes-256-gcm',
+            'aes-128-gcm',
+            'chacha20-ietf-poly1305',
+            'xchacha20-ietf-poly1305',
+            '2022-blake3-aes-128-gcm',
+            '2022-blake3-aes-256-gcm',
+            '2022-blake3-chacha20-poly1305',
+          ],
+        ),
+        const _FieldSpec('password', '密码'),
+      ];
+    case 'hysteria2':
+      return [
+        const _FieldSpec('password', '密码（auth）'),
+        const _FieldSpec(
+          'obfs',
+          '混淆',
+          kind: _FieldKind.choice,
+          options: ['', 'salamander'],
+        ),
+        const _FieldSpec('obfs-password', '混淆密码'),
+        const _FieldSpec('sni', 'SNI'),
+        const _FieldSpec('up', '带宽上行（如 50 或 50 Mbps）'),
+        const _FieldSpec('down', '带宽下行（如 200 或 200 Mbps）'),
+        const _FieldSpec('skip-cert-verify', '跳过证书验证',
+            kind: _FieldKind.toggle),
+        const _FieldSpec('pinned-cert-sha256', '证书指纹 SHA-256（可空）'),
+      ];
+    case 'wireguard':
+      return [
+        const _FieldSpec('private-key', '私钥'),
+        const _FieldSpec('public-key', '对端公钥'),
+        const _FieldSpec('ip', '内网 IP（如 10.0.0.2）'),
+        const _FieldSpec('ipv6', '内网 IPv6（可空）'),
+        const _FieldSpec('pre-shared-key', '预共享密钥（可空）'),
+        const _FieldSpec('mtu', 'MTU（可空）', kind: _FieldKind.number),
+        const _FieldSpec('allowed-ips', 'Allowed IPs（逗号分隔，可空）'),
+        const _FieldSpec('reserved', 'Reserved（逗号分隔 3 个数，可空）'),
+      ];
+  }
+  return const [];
+}
+
+/// The per-protocol node form (the v2rayNG-style editor): common
+/// fields on top, protocol fields below. Saving returns the full
+/// entry map (the original entry overlaid with the form, so fields
+/// the form does not know survive an edit); the Go side splices it
+/// into the profile YAML.
+class _NodeEditPage extends StatefulWidget {
+  const _NodeEditPage({
+    required this.isNew,
+    required this.detail,
+    required this.siblingNames,
+    required this.fromSubscription,
+  });
+
+  final bool isNew;
+  final Map<String, dynamic> detail;
+  final Set<String> siblingNames;
+  final bool fromSubscription;
+
+  @override
+  State<_NodeEditPage> createState() => _NodeEditPageState();
+}
+
+class _NodeEditPageState extends State<_NodeEditPage> {
+  static const _types = [
+    'vless',
+    'vmess',
+    'trojan',
+    'ss',
+    'hysteria2',
+    'wireguard',
+  ];
+
+  late String _type;
+  late final TextEditingController _nameCtl;
+  late final TextEditingController _serverCtl;
+  late final TextEditingController _portCtl;
+  final _text = <String, TextEditingController>{};
+  final _flags = <String, bool>{};
+  final _choices = <String, String>{};
+
+  dynamic _dig(Map<String, dynamic> m, String dotted) {
+    dynamic cur = m;
+    for (final part in dotted.split('.')) {
+      if (cur is Map && cur.containsKey(part)) {
+        cur = cur[part];
+      } else {
+        return null;
+      }
+    }
+    return cur;
+  }
+
+  String _stringify(dynamic v) {
+    if (v == null) return '';
+    if (v is List) return v.join(',');
+    return v.toString();
+  }
+
+  void _initSpecs() {
+    for (final c in _text.values) {
+      c.dispose();
+    }
+    _text.clear();
+    _flags.clear();
+    _choices.clear();
+    for (final spec in _specsFor(_type)) {
+      final v = _dig(widget.detail, spec.key);
+      switch (spec.kind) {
+        case _FieldKind.toggle:
+          _flags[spec.key] = v == true;
+        case _FieldKind.choice:
+          final s = _stringify(v);
+          _choices[spec.key] =
+              spec.options!.contains(s) ? s : spec.options!.first;
+        default:
+          _text[spec.key] = TextEditingController(text: _stringify(v));
+      }
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _type = _stringify(widget.detail['type']);
+    if (!_types.contains(_type)) _type = 'vless';
+    _nameCtl = TextEditingController(text: _stringify(widget.detail['name']));
+    _serverCtl =
+        TextEditingController(text: _stringify(widget.detail['server']));
+    _portCtl = TextEditingController(text: _stringify(widget.detail['port']));
+    _initSpecs();
+  }
+
+  @override
+  void dispose() {
+    _nameCtl.dispose();
+    _serverCtl.dispose();
+    _portCtl.dispose();
+    for (final c in _text.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  dynamic _deepCopy(dynamic v) {
+    if (v is Map) {
+      return <String, dynamic>{
+        for (final e in v.entries) e.key.toString(): _deepCopy(e.value),
+      };
+    }
+    if (v is List) return [for (final e in v) _deepCopy(e)];
+    return v;
+  }
+
+  void _setDotted(Map<String, dynamic> entry, String dotted, Object? value) {
+    final parts = dotted.split('.');
+    var cur = entry;
+    for (var i = 0; i < parts.length - 1; i++) {
+      final next = cur[parts[i]];
+      if (next is Map<String, dynamic>) {
+        cur = next;
+      } else {
+        final fresh = <String, dynamic>{};
+        cur[parts[i]] = fresh;
+        cur = fresh;
+      }
+    }
+    if (value == null) {
+      cur.remove(parts.last);
+    } else {
+      cur[parts.last] = value;
+    }
+  }
+
+  void _pruneEmpties(Map<String, dynamic> entry, String key) {
+    final v = entry[key];
+    if (v is Map<String, dynamic>) {
+      v.removeWhere((_, sub) => sub is Map && sub.isEmpty);
+      if (v.isEmpty) entry.remove(key);
+    }
+  }
+
+  String _textOf(String key) => _text[key]?.text.trim() ?? '';
+
+  void _save() {
+    final name = _nameCtl.text.trim();
+    final server = _serverCtl.text.trim();
+    final port = int.tryParse(_portCtl.text.trim());
+    String? error;
+    if (name.isEmpty) {
+      error = '名称不能为空';
+    } else if (name != widget.detail['name'] &&
+        widget.siblingNames.contains(name)) {
+      error = '已存在同名节点';
+    } else if (server.isEmpty) {
+      error = '地址不能为空';
+    } else if (port == null || port < 1 || port > 65535) {
+      error = '端口不合法';
+    } else if ((_type == 'vless' || _type == 'vmess') &&
+        _textOf('uuid').isEmpty) {
+      error = 'UUID 不能为空';
+    } else if ((_type == 'trojan' ||
+            _type == 'ss' ||
+            _type == 'hysteria2') &&
+        _textOf('password').isEmpty) {
+      error = '密码不能为空';
+    } else if (_type == 'wireguard' &&
+        (_textOf('private-key').isEmpty ||
+            _textOf('public-key').isEmpty ||
+            _textOf('ip').isEmpty)) {
+      error = 'WireGuard 需要私钥、对端公钥和内网 IP';
+    }
+    if (error != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    final entry = _deepCopy(widget.detail) as Map<String, dynamic>;
+    entry['name'] = name;
+    entry['type'] = _type;
+    entry['server'] = server;
+    entry['port'] = port;
+    for (final spec in _specsFor(_type)) {
+      switch (spec.kind) {
+        case _FieldKind.toggle:
+          _setDotted(entry, spec.key, _flags[spec.key] ?? false);
+        case _FieldKind.choice:
+          final v = _choices[spec.key] ?? '';
+          _setDotted(entry, spec.key, v.isEmpty ? null : v);
+        case _FieldKind.number:
+          final raw = _textOf(spec.key);
+          _setDotted(entry, spec.key, raw.isEmpty ? null : int.tryParse(raw));
+        case _FieldKind.text:
+          final raw = _textOf(spec.key);
+          if (raw.isEmpty) {
+            _setDotted(entry, spec.key, null);
+          } else if (spec.key == 'allowed-ips') {
+            _setDotted(entry, spec.key,
+                [for (final s in raw.split(',')) s.trim()]);
+          } else if (spec.key == 'reserved') {
+            _setDotted(entry, spec.key, [
+              for (final s in raw.split(',')) int.tryParse(s.trim()) ?? 0,
+            ]);
+          } else if (spec.key == 'up' || spec.key == 'down') {
+            _setDotted(entry, spec.key, num.tryParse(raw) ?? raw);
+          } else {
+            _setDotted(entry, spec.key, raw);
+          }
+      }
+    }
+    _pruneEmpties(entry, 'reality-opts');
+    _pruneEmpties(entry, 'ws-opts');
+    Navigator.of(context).pop({'entry': entry});
+  }
+
+  Future<void> _delete() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        content: Text('删除节点「${widget.detail['name']}」？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && mounted) {
+      Navigator.of(context).pop({'delete': true});
+    }
+  }
+
+  Widget _field(_FieldSpec spec) {
+    switch (spec.kind) {
+      case _FieldKind.toggle:
+        return SwitchListTile(
+          title: Text(spec.label),
+          contentPadding: EdgeInsets.zero,
+          value: _flags[spec.key] ?? false,
+          onChanged: (v) => setState(() => _flags[spec.key] = v),
+        );
+      case _FieldKind.choice:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: InputDecorator(
+            decoration: InputDecoration(
+              labelText: spec.label,
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+            child: DropdownButton<String>(
+              value: _choices[spec.key],
+              isExpanded: true,
+              underline: const SizedBox.shrink(),
+              items: [
+                for (final o in spec.options!)
+                  DropdownMenuItem(
+                    value: o,
+                    child: Text(o.isEmpty ? '无' : o),
+                  ),
+              ],
+              onChanged: (v) =>
+                  setState(() => _choices[spec.key] = v ?? ''),
+            ),
+          ),
+        );
+      default:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: TextField(
+            controller: _text[spec.key],
+            keyboardType: spec.kind == _FieldKind.number
+                ? TextInputType.number
+                : TextInputType.text,
+            decoration: InputDecoration(
+              labelText: spec.label,
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final muted =
+        Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5);
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.isNew ? '添加节点' : '编辑节点'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.check),
+            tooltip: '保存',
+            onPressed: _save,
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (widget.fromSubscription)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                '该节点来自订阅：订阅更新后，对它的修改会被覆盖。',
+                style: TextStyle(color: muted),
+              ),
+            ),
+          TextField(
+            controller: _nameCtl,
+            decoration: const InputDecoration(
+              labelText: '名称',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 14),
+          if (widget.isNew)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Wrap(
+                spacing: 8,
+                children: [
+                  for (final t in _types)
+                    ChoiceChip(
+                      label: Text(t),
+                      selected: _type == t,
+                      onSelected: (_) => setState(() {
+                        _type = t;
+                        _initSpecs();
+                      }),
+                    ),
+                ],
+              ),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Text('协议：$_type', style: TextStyle(color: muted)),
+            ),
+          TextField(
+            controller: _serverCtl,
+            decoration: const InputDecoration(
+              labelText: '地址',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _portCtl,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: '端口',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 14),
+          for (final spec in _specsFor(_type)) _field(spec),
+          if (!widget.isNew) ...[
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: _delete,
+              child: const Text(
+                '删除节点',
+                style: TextStyle(color: Colors.redAccent),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Subscription settings form: name/link, the per-subscription
+/// auto-update opt-in and period, the update route (direct or via
+/// the running core), and the keep/drop name filters applied to
+/// every refresh.
+class _SubEditPage extends StatefulWidget {
+  const _SubEditPage({required this.sub});
+
+  final SubProfile sub;
+
+  @override
+  State<_SubEditPage> createState() => _SubEditPageState();
+}
+
+class _SubEditPageState extends State<_SubEditPage> {
+  late final TextEditingController _nameCtl;
+  late final TextEditingController _urlCtl;
+  late final TextEditingController _keepCtl;
+  late final TextEditingController _dropCtl;
+  late bool _autoUpdate;
+  late int _interval;
+  late bool _viaProxy;
+
+  @override
+  void initState() {
+    super.initState();
+    final s = widget.sub;
+    _nameCtl = TextEditingController(text: s.name);
+    _urlCtl = TextEditingController(text: s.url ?? '');
+    _keepCtl = TextEditingController(text: s.keepRegex);
+    _dropCtl = TextEditingController(text: s.dropRegex);
+    _autoUpdate = s.autoUpdate;
+    _interval = s.autoIntervalHours;
+    _viaProxy = s.updateViaProxy;
+  }
+
+  @override
+  void dispose() {
+    _nameCtl.dispose();
+    _urlCtl.dispose();
+    _keepCtl.dispose();
+    _dropCtl.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final name = _nameCtl.text.trim();
+    final url = _urlCtl.text.trim();
+    final keep = _keepCtl.text.trim();
+    final drop = _dropCtl.text.trim();
+    String? error;
+    if (name.isEmpty) {
+      error = '名称不能为空';
+    } else if (widget.sub.url != null &&
+        (url.isEmpty || Uri.tryParse(url)?.host.isEmpty != false)) {
+      error = '订阅链接不合法';
+    } else {
+      for (final pattern in [keep, drop]) {
+        if (pattern.isEmpty) continue;
+        try {
+          RegExp(pattern);
+        } catch (_) {
+          error = '正则表达式不合法：$pattern';
+          break;
+        }
+      }
+    }
+    if (error != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    Navigator.of(context).pop({
+      'name': name,
+      'url': widget.sub.url == null ? null : url,
+      'autoUpdate': _autoUpdate,
+      'interval': _interval,
+      'viaProxy': _viaProxy,
+      'keep': keep,
+      'drop': drop,
+    });
+  }
+
+  Widget _textField(TextEditingController ctl, String label) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: TextField(
+        controller: ctl,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+          isDense: true,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final muted =
+        Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5);
+    final hasUrl = widget.sub.url != null;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('编辑订阅'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.check),
+            tooltip: '保存',
+            onPressed: _save,
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _textField(_nameCtl, '订阅名称'),
+          if (hasUrl) _textField(_urlCtl, '订阅链接'),
+          if (hasUrl) ...[
+            SwitchListTile(
+              title: const Text('自动更新'),
+              contentPadding: EdgeInsets.zero,
+              value: _autoUpdate,
+              onChanged: (v) => setState(() => _autoUpdate = v),
+            ),
+            const SizedBox(height: 6),
+            Text('自动更新周期', style: TextStyle(color: muted)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final h in const [6, 12, 24, 48, 72])
+                  ChoiceChip(
+                    label: Text('$h 小时'),
+                    selected: _interval == h,
+                    onSelected: (_) => setState(() => _interval = h),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Text('更新网络', style: TextStyle(color: muted)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                ChoiceChip(
+                  label: const Text('直连'),
+                  selected: !_viaProxy,
+                  onSelected: (_) => setState(() => _viaProxy = false),
+                ),
+                ChoiceChip(
+                  label: const Text('经当前代理'),
+                  selected: _viaProxy,
+                  onSelected: (_) => setState(() => _viaProxy = true),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            _textField(_keepCtl, '仅保留（正则，可选）'),
+            _textField(_dropCtl, '排除（正则，可选）'),
+            Text(
+              '过滤按节点名匹配，在每次更新时应用；手动添加的节点在「手动节点」里，不受订阅更新影响。',
+              style: TextStyle(color: muted, fontSize: 13),
+            ),
+          ] else
+            Text(
+              '本地配置没有链接，不参与自动更新。',
+              style: TextStyle(color: muted),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class ProfilesPage extends StatelessWidget {
   const ProfilesPage({
     super.key,
@@ -2681,6 +3895,7 @@ class ProfilesPage extends StatelessWidget {
     required this.onUpdate,
     required this.onDelete,
     required this.onToggleAutoUpdate,
+    required this.onEditSub,
   });
 
   final List<SubProfile> subs;
@@ -2692,6 +3907,7 @@ class ProfilesPage extends StatelessWidget {
   final ValueChanged<SubProfile> onUpdate;
   final ValueChanged<SubProfile> onDelete;
   final ValueChanged<SubProfile> onToggleAutoUpdate;
+  final ValueChanged<SubProfile> onEditSub;
 
   String _updatedLabel(int ms) {
     if (ms <= 0) return '';
@@ -2840,6 +4056,10 @@ class ProfilesPage extends StatelessWidget {
                   onPressed: () => onUpdate(sub),
                   child: const Text('更新'),
                 ),
+              TextButton(
+                onPressed: () => onEditSub(sub),
+                child: const Text('编辑'),
+              ),
               TextButton(
                 onPressed: () => _confirmDelete(context, sub),
                 child: const Text(

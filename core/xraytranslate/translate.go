@@ -1,8 +1,9 @@
 // Package xraytranslate converts a Clash YAML profile into per-node
-// Xray-core JSON configs. Trial scope: vless, vmess, trojan and
-// shadowsocks nodes in global mode (one mixed inbound, private ranges
-// direct, everything else through the selected node). Hysteria2 and
-// other types are reported as skipped rather than silently dropped.
+// Xray-core JSON configs. Scope: vless, vmess, trojan, shadowsocks,
+// hysteria2 and wireguard nodes (one mixed inbound, private ranges
+// direct, everything else through the selected node). Types Xray
+// does not have (tuic, anytls, ...) are reported as skipped rather
+// than silently dropped.
 package xraytranslate
 
 import (
@@ -38,6 +39,26 @@ type clashProxy struct {
 		Path    string            `yaml:"path"`
 		Headers map[string]string `yaml:"headers"`
 	} `yaml:"ws-opts"`
+	// Hysteria2 fields. Up/Down arrive as either a number (Mbps) or
+	// a string like "50 Mbps" depending on the provider.
+	Obfs         string `yaml:"obfs"`
+	ObfsPassword string `yaml:"obfs-password"`
+	Auth         string `yaml:"auth"`
+	Up           any    `yaml:"up"`
+	Down         any    `yaml:"down"`
+	// FlBox extension for locally created nodes: a SHA-256 cert pin
+	// for self-signed servers (Xray dropped allowInsecure in favour
+	// of pins). Subscriptions never carry it.
+	PinnedCert string `yaml:"pinned-cert-sha256"`
+	// WireGuard fields.
+	PrivateKey   string   `yaml:"private-key"`
+	PublicKey    string   `yaml:"public-key"`
+	PreSharedKey string   `yaml:"pre-shared-key"`
+	IP           string   `yaml:"ip"`
+	IPv6         string   `yaml:"ipv6"`
+	AllowedIPs   []string `yaml:"allowed-ips"`
+	MTU          int      `yaml:"mtu"`
+	Reserved     []int    `yaml:"reserved"`
 	GRPCOpts struct {
 		ServiceName string `yaml:"grpc-service-name"`
 	} `yaml:"grpc-opts"`
@@ -133,6 +154,20 @@ func streamSettings(p clashProxy) map[string]any {
 	return stream
 }
 
+// bandwidthString normalises a Clash up/down value (number = Mbps,
+// or a ready-made string) into the bandwidth string Xray parses.
+func bandwidthString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case int:
+		return fmt.Sprintf("%d Mbps", t)
+	case float64:
+		return fmt.Sprintf("%v Mbps", t)
+	}
+	return ""
+}
+
 func nodeOutbound(p clashProxy) (map[string]any, error) {
 	switch strings.ToLower(p.Type) {
 	case "vless":
@@ -216,6 +251,122 @@ func nodeOutbound(p clashProxy) (map[string]any, error) {
 					},
 				},
 			},
+		}, nil
+	case "hysteria2", "hy2":
+		// Xray splits a hy2 client across two config blocks: the
+		// outbound settings carry version/address/port, the auth
+		// lives in the hysteria transport settings, obfs became a
+		// finalmask (salamander) and bandwidth the finalmask's
+		// quicParams (brutal). Port hopping is not mapped yet.
+		auth := p.Password
+		if auth == "" {
+			auth = p.Auth
+		}
+		fingerprint := p.ClientFingerprint
+		if fingerprint == "" {
+			fingerprint = "chrome"
+		}
+		alpn := p.ALPN
+		if len(alpn) == 0 {
+			alpn = []string{"h3"}
+		}
+		tlsSettings := map[string]any{
+			"serverName":  sniOf(p),
+			"fingerprint": fingerprint,
+			"alpn":        alpn,
+		}
+		if p.SkipCertVerify {
+			tlsSettings["allowInsecure"] = true
+		}
+		if p.PinnedCert != "" {
+			tlsSettings["pinnedPeerCertSha256"] = p.PinnedCert
+		}
+		stream := map[string]any{
+			"network":     "hysteria",
+			"security":    "tls",
+			"tlsSettings": tlsSettings,
+			"hysteriaSettings": map[string]any{
+				"version": 2,
+				"auth":    auth,
+			},
+		}
+		finalmask := map[string]any{}
+		if strings.EqualFold(p.Obfs, "salamander") && p.ObfsPassword != "" {
+			finalmask["udp"] = []any{
+				map[string]any{
+					"type":     "salamander",
+					"settings": map[string]any{"password": p.ObfsPassword},
+				},
+			}
+		}
+		quicParams := map[string]any{}
+		if up := bandwidthString(p.Up); up != "" {
+			quicParams["brutalUp"] = up
+		}
+		if down := bandwidthString(p.Down); down != "" {
+			quicParams["brutalDown"] = down
+		}
+		if len(quicParams) > 0 {
+			finalmask["quicParams"] = quicParams
+		}
+		if len(finalmask) > 0 {
+			stream["finalmask"] = finalmask
+		}
+		return map[string]any{
+			"tag":      "proxy",
+			"protocol": "hysteria",
+			"settings": map[string]any{
+				"version": 2,
+				"address": p.Server,
+				"port":    p.Port,
+			},
+			"streamSettings": stream,
+		}, nil
+	case "wireguard":
+		addrs := []string{}
+		for _, raw := range []string{p.IP, p.IPv6} {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			if !strings.Contains(raw, "/") {
+				if strings.Contains(raw, ":") {
+					raw += "/128"
+				} else {
+					raw += "/32"
+				}
+			}
+			addrs = append(addrs, raw)
+		}
+		allowed := p.AllowedIPs
+		if len(allowed) == 0 {
+			allowed = []string{"0.0.0.0/0", "::/0"}
+		}
+		peer := map[string]any{
+			"publicKey":  p.PublicKey,
+			"endpoint":   fmt.Sprintf("%s:%d", p.Server, p.Port),
+			"allowedIPs": allowed,
+		}
+		if p.PreSharedKey != "" {
+			peer["preSharedKey"] = p.PreSharedKey
+		}
+		settings := map[string]any{
+			"secretKey": p.PrivateKey,
+			"address":   addrs,
+			"peers":     []any{peer},
+		}
+		if p.MTU > 0 {
+			settings["mtu"] = p.MTU
+		}
+		if len(p.Reserved) == 3 {
+			settings["reserved"] = []byte{
+				byte(p.Reserved[0]), byte(p.Reserved[1]), byte(p.Reserved[2]),
+			}
+		}
+		return map[string]any{
+			"tag":      "proxy",
+			"protocol": "wireguard",
+			"settings": settings,
 		}, nil
 	}
 	return nil, fmt.Errorf("unsupported in xray trial")
