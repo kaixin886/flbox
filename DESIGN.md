@@ -191,3 +191,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 
 - 用户 0.29 实测：启动通知能收到，但一次性的点「清除」就没了。改法：节点/延迟/速度不再发一次性通知，改为写进 VPN 服务那条**前台常驻通知**（运行期间不可划掉、不可清除，停止才消失）。Dart 每 2 秒流量轮询顺带推送状态行（节点 · 延迟 X ms · ↓速率 ↑速率，文本变了才发通道）；启动时仍探一发延迟回填；切节点时立即刷新。FlboxVpnService 新增 companion statusTitle/statusText＋updateStatus（同 NOTIF_ID 重发 buildNotification 原地更新），MainActivity 新增 updateVpnStatus 通道方法。原 _probeSpeedMbps 一次性测速删除（常驻显示的是实时速率）。
 - 设置开关沿用同一 pref（notify_on_start），文案改「常驻通知信息」；关掉则常驻通知保持默认文案。订阅自动更新通知按用户要求不変。
+
+## 0.31（2026-11-04）常驻通知跟随切节点
+
+- 用户要求：运行中换节点，常驻通知也要实时跟着变。0.30 已有切节点即推＋2 秒轮询兜底，0.31 补齐：切节点/运行中切订阅后除立即推送新节点名外，再 _primeStatus 重探新节点延迟填进通知（此前新节点没测速过时通知缺延迟段）；顺带修轮询的计数器回绕——原地重启核心后流量计数从 0 重来，旧算法会算出负速率闪进仪表盘与通知，现钳为 0。
+- 追加（用户报「开启时切换分组卡顿」）：卡顿源是切分组时整表翻译＋逐节点 LoadConfig 校验（47 节点近一秒）与原地重启全在 UI 线程同步跑。_activateYaml 等全部主 isolate 的 translateXray 改走 Isolate.run（新增 _translate 助手，先快照字段再进 isolate——闭包不得捕获 this），四处原地重启（切节点/切订阅/切模式/网络变化）改走 _restartCoreInPlace。后台 isolate 与测速路径不动。

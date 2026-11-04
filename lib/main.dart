@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
@@ -506,12 +507,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         if (await file.exists()) {
           final yaml = await file.readAsString();
           _profileYaml = yaml;
-          final profile = CoreBridge().translateXray(
-            yaml,
-            vpn: true,
-            logPath: _logPath,
-            rules: _rulesMode,
-          );
+          final profile = await _translate(yaml);
           final stored = prefs.getString('selected_node');
           setState(() {
             _profile = profile;
@@ -668,7 +664,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _logEvent('network changed: restarting core in place');
     try {
       CoreBridge().xrayStop();
-      CoreBridge().xrayStart(config, 0);
+      await _restartCoreInPlace(config);
       _startedAt = DateTime.now();
     } catch (e) {
       _logEvent('network-change restart failed: $e');
@@ -771,7 +767,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final config = _profile?.configs[_selectedNode];
       if (config != null) {
         try {
-          CoreBridge().xrayStart(config, 0);
+          await _restartCoreInPlace(config);
           _logEvent('core restarted for mode switch (rules=$rules)');
           _startedAt = DateTime.now();
         } on CoreException catch (e) {
@@ -852,18 +848,38 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Translation on a worker isolate: building every node's
+  /// config and LoadConfig-validating each outbound takes the
+  /// better part of a second for a big subscription, which
+  /// froze the UI whenever a group was switched (worst while
+  /// running). Field values are snapshotted first - an isolate
+  /// closure may only capture sendable values, never `this`.
+  Future<XrayProfile> _translate(String text) {
+    final logPath = _logPath;
+    final rules = _rulesMode;
+    return Isolate.run(
+      () => CoreBridge().translateXray(
+        text,
+        vpn: true,
+        logPath: logPath,
+        rules: rules,
+      ),
+    );
+  }
+
+  /// In-place core restart on a worker isolate, for the same
+  /// reason: xrayStart blocks while the old instance drains.
+  Future<void> _restartCoreInPlace(String config) {
+    return Isolate.run(() => CoreBridge().xrayStart(config, 0));
+  }
+
   /// Translates [text] and makes it the live profile (used whenever a
   /// subscription becomes active). The node selection survives when
   /// the new profile has a node with the same name.
   Future<void> _activateYaml(String text, {required String name}) async {
     final docs = await getApplicationDocumentsDirectory();
     _logPath = '${docs.path}/xray-error.log';
-    final profile = CoreBridge().translateXray(
-      text,
-      vpn: true,
-      logPath: _logPath,
-      rules: _rulesMode,
-    );
+    final profile = await _translate(text);
     _profileYaml = text;
     final prefs = await SharedPreferences.getInstance();
     final selected =
@@ -894,12 +910,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final converted = CoreBridge().convertImport(text);
     text = converted['yaml'] as String;
     final kind = converted['kind'] as String;
-    final profile = CoreBridge().translateXray(
-      text,
-      vpn: true,
-      logPath: _logPath,
-      rules: _rulesMode,
-    );
+    final profile = await _translate(text);
     final sub = SubProfile(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       name: name,
@@ -935,11 +946,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         final config = _profile?.configs[_selectedNode];
         if (config != null) {
           try {
-            CoreBridge().xrayStart(config, 0);
+            await _restartCoreInPlace(config);
             _logEvent(
               'core restarted for subscription switch (${sub.name})',
             );
             _startedAt = DateTime.now();
+            _pushVpnStatus();
+            unawaited(_primeStatus());
           } catch (e) {
             await _stopCore();
             _toast('切换后重启失败，已停止：$e');
@@ -1031,12 +1044,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       var siblingNames = <String>{};
       if (targetYaml.isNotEmpty) {
         try {
-          final p = CoreBridge().translateXray(
-            targetYaml,
-            vpn: true,
-            logPath: '',
-            rules: _rulesMode,
-          );
+          final p = await _translate(targetYaml);
           siblingNames = {for (final n in p.nodes) n.name};
         } catch (_) {}
       }
@@ -1062,12 +1070,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           isNew ? '' : editName,
         );
       }
-      final profile = CoreBridge().translateXray(
-        newYaml,
-        vpn: true,
-        logPath: _logPath,
-        rules: _rulesMode,
-      );
+      final profile = await _translate(newYaml);
       var sub = targetSub;
       if (sub == null) {
         sub = SubProfile(
@@ -1208,12 +1211,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       for (final entry in entries) {
         yaml = CoreBridge().nodeUpsert(yaml, entry, '');
       }
-      final profile = CoreBridge().translateXray(
-        yaml,
-        vpn: true,
-        logPath: _logPath,
-        rules: _rulesMode,
-      );
+      final profile = await _translate(yaml);
       var sub = manual;
       if (sub == null) {
         sub = SubProfile(
@@ -1410,12 +1408,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (updateSub != null) {
         final docs = await getApplicationDocumentsDirectory();
         _logPath = '${docs.path}/xray-error.log';
-        final profile = CoreBridge().translateXray(
-          text,
-          vpn: true,
-          logPath: _logPath,
-          rules: _rulesMode,
-        );
+        final profile = await _translate(text);
         await _subFile(docs, updateSub.id).writeAsString(text);
         updateSub
           ..subInfo = subInfo ?? updateSub.subInfo
@@ -1485,8 +1478,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         final now = DateTime.now();
         final dt = now.difference(lastTick).inMilliseconds / 1000.0;
         if (dt > 0) {
-          speedUp = (up - lastUp) / dt;
-          speedDown = (down - lastDown) / dt;
+          // Counters restart from zero on an in-place core
+          // restart (node/subscription/mode switch): a negative
+          // delta is that reset, not negative traffic.
+          speedUp = up >= lastUp ? (up - lastUp) / dt : 0;
+          speedDown = down >= lastDown ? (down - lastDown) / dt : 0;
         }
         lastUp = up;
         lastDown = down;
@@ -1780,8 +1776,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final config = _profile?.configs[name];
       if (config == null) return;
       try {
-        CoreBridge().xrayStart(config, 0);
+        await _restartCoreInPlace(config);
         _pushVpnStatus();
+        unawaited(_primeStatus());
         _toast('已切换到 $name');
       } on CoreException catch (e) {
         setState(() => _running = false);
@@ -3003,7 +3000,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.30.0 · app.flbox · Xray 内核',
+              'FlBox 0.31.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
