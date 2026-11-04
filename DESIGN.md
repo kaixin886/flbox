@@ -175,3 +175,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **修法**：OpenTun 改为把 VpnService 的原始 fd 原样交回（所有权仍在 Kotlin 服务手里、由它 stop 时关闭），libbox 内部 dup 自管。platform.go 注释已换成源码核实过的契约，并注明旧注释「sing-box 会关掉给它的 fd」是错误假设、勿再 dup。
 - **校验口径纠正**：0.26 的 _stopCore 轮询 vpnActive 判「down」是假证据——active 在 stopVpn() 入口就被置 false、远早于系统拆完。VpnService 新增 alive 标志（onCreate→onDestroy）经通道 vpnServiceAlive 暴露，_stopCore 改为轮询服务是否真被销毁才记 core stopped (vpn service down)，没销毁则记 still alive 并重试。
 - 0.26 的 onTaskRemoved 与 stopService 兜底保留（无害），但它们治不了绑定不撤——本版 fd 修复才是根子。
+
+## 0.28（2026-11-04）文件选择器白名单撤回：yaml 在用户 ROM 上被灰掉
+
+- 0.25 的 FileType.custom 扩展名白名单真机翻车：用户截图实锤 config.yaml 在系统选择器里不可选（同目录 .json 可选）。根子是安卓选择器按扩展名→MIME 映射过滤、yaml 无标准映射。按预定 fallback 撤回：选择器恢复 FileType.any，防加错改为选后双闸——①扩展名拦截（非 yaml/yml/json/txt 当场 toast 拒绝）；②ConvertImport 内容校验（不是配置的文件导不进去）。代价：无关文件恢复「能点」，但点错也只是被拒、导不进来。

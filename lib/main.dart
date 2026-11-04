@@ -1098,17 +1098,27 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _importProfile() async {
-    // Restricted to importable extensions so unrelated files stay
-    // unselectable and a wrong tap is impossible. History: this
-    // used to be FileType.any because .yaml carries no consistent
-    // MIME on many ROMs and files greyed out — if that ever bites
-    // again, the fallback is any-type picking plus the converter's
-    // validation (ConvertImport rejects non-config content anyway).
+    // FileType.any, with the guard moved to AFTER the pick: an
+    // extension whitelist at picker level greys out .yaml files
+    // on the user's ROM (Android maps extensions to MIME types
+    // for the picker intent, and yaml has no standard mapping,
+    // so his config.yaml sat unselectable while .json worked -
+    // device-verified 2026-11-04). Instead the picker opens
+    // wide and this gate rejects anything that is not a config
+    // file on the spot; ConvertImport then validates content,
+    // so a wrong file can be tapped but never imported.
     final picked = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['yaml', 'yml', 'json', 'txt'],
+      type: FileType.any,
     );
     if (picked == null || picked.files.single.path == null) return;
+    final lowerName = picked.files.single.name.toLowerCase();
+    if (!lowerName.endsWith('.yaml') &&
+        !lowerName.endsWith('.yml') &&
+        !lowerName.endsWith('.json') &&
+        !lowerName.endsWith('.txt')) {
+      _toast('只支持导入 yaml / json / txt 配置文件');
+      return;
+    }
     final file = File(picked.files.single.path!);
     try {
       final text = await file.readAsString();
@@ -2994,7 +3004,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.27.0 · app.flbox · Xray 内核',
+              'FlBox 0.28.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
