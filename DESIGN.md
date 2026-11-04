@@ -343,3 +343,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 0.57 真机：主功能通（浏览器走香港出口）但新连接随运行时间死亡——浏览器对谷歌/百度均 ERR_CONNECTION_CLOSED，已建长连的电报/Play 独活；NTT（443 与 8444）与 Muse App 亦连不上。两份 info 日志（守护进程各自只活了 50 秒/9 秒）均零错误、流量全经香港高速03——失败窗口从未被日志覆盖到（每次重启截断日志＋用户切节点测试即重启）。
 - **配置剥离分组**（rootconfig）：翻译后只保留所选节点出站＋direct/block，route.final 与 dns-remote 的 detour 一并钉死该节点。动因：原配置继承订阅的 urltest 分组——日志一半以上是它对 47 个出站（含伪节点）的 gstatic 健康检查，且它能在会话中途改选出口，与「新连接死、长连活」的症状形态完全吻合；VPN 模式全天正常正因 Xray 路径钉死所选节点。剥离后出口确定、无测速风暴、守护进程内存亦降。
 - **日志改追加**：Kotlin rootStart 的重定向由 `>` 改 `>>`，Dart 启动前写会话分隔行（时间/节点/ipv6）、超 1MB 才重置。此后失败窗口必在日志内，不再被重启抹掉。
+
+## 0.59：新增 Root eBPF 模式（重定向接管，TUN 保留不动）
+- 0.58 真机仍「还是一样」。其会话日志定案最后一层：全日志仅 2 条错误，均为并行 Google v6 连接的 `report handshake success: connection refused`——出站拨号已成功，死在 gVisor 持有式握手向应用交还的一步；该层在上游协议栈内部、无配置旋钮。用户拍板：TUN 保留不动，新增 eBPF 模式。
+- 机制（netproxy/Asterisk 的交接结构）：守护进程仍是同一个 flboxd、同一套控制面与状态文件；配置改为 redirect 入站（TCP，127.0.0.1:7892）＋tproxy 入站（UDP，0.0.0.0:7893），单节点剥离同 0.58，route.default_mark=0x2B2B。应用连接的握手在本机监听处即时完成，不再被出站拨号绑架。
+- 转向规则由 App 经 su 安装（Kotlin netRules）：nat OUTPUT→FLBOX_NAT（mark 豁免→本地地址豁免→分应用 uid 规则→REDIRECT）、mangle OUTPUT→FLBOX_MNG（同前置→TPROXY --tproxy-mark 0x2B2C）、ip rule fwmark 0x2B2C→table 100（local 0.0.0.0/0 dev lo）、ip6tables FLBOX_6 丢弃非本地 v6（本阶段只转向 IPv4，宁断不漏）。守护进程自身流量带 mark 天然豁免，自捕获不可能。
+- 生命周期：启动＝守护进程确认 running 后才装规则（装失败回滚停守护进程）；停止＝先拆规则再杀进程；resync 发现守护进程已死时自动拆规则，绝不留指向死监听的规则。运行中切节点重启守护进程时规则不动（端口不变）。
+- 边界：全局模式（分应用按 uid 支持包含/排除两档）；无流量曲线（同 TUN）；IPv6 开关在此模式不生效（v6 一律拦截）；开机自启未接。

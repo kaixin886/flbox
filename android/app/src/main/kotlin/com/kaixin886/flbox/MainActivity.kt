@@ -56,6 +56,87 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun uidFor(pkg: String): Int? {
+        return try {
+            @Suppress("DEPRECATION")
+            packageManager.getApplicationInfo(pkg, 0).uid
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // Builds the su script for the eBPF mode netfilter
+    // steering. Ports and marks mirror core/ebpfconfig.go:
+    // TCP lands on the redirect listener at 7892, UDP is
+    // TPROXY-marked 0x2B2C into the local-route table 100
+    // and the tproxy listener at 7893, and the daemon's own
+    // sockets carry mark 0x2B2B, which every chain exempts
+    // first - self-capture is impossible. The IPv6 chain
+    // drops non-local v6 instead of leaking it (this stage
+    // steers IPv4 only). Clearing unhooks and deletes all
+    // three chains and is safe to run anytime.
+    private fun buildNetRulesScript(
+        install: Boolean,
+        includePkgs: List<String>,
+        excludePkgs: List<String>,
+    ): String {
+        val lines = mutableListOf<String>()
+        if (!install) {
+            lines += "iptables -t nat -D OUTPUT -j FLBOX_NAT 2>/dev/null"
+            lines += "iptables -t nat -F FLBOX_NAT 2>/dev/null"
+            lines += "iptables -t nat -X FLBOX_NAT 2>/dev/null"
+            lines += "iptables -t mangle -D OUTPUT -j FLBOX_MNG 2>/dev/null"
+            lines += "iptables -t mangle -F FLBOX_MNG 2>/dev/null"
+            lines += "iptables -t mangle -X FLBOX_MNG 2>/dev/null"
+            lines += "ip6tables -D OUTPUT -j FLBOX_6 2>/dev/null"
+            lines += "ip6tables -F FLBOX_6 2>/dev/null"
+            lines += "ip6tables -X FLBOX_6 2>/dev/null"
+            lines += "ip rule del fwmark 0x2B2C lookup 100 2>/dev/null"
+            lines += "ip route flush table 100 2>/dev/null"
+            lines += "true"
+            return lines.joinToString("\n")
+        }
+        val includeUids = includePkgs.mapNotNull { uidFor(it) }
+        val excludeUids = excludePkgs.mapNotNull { uidFor(it) }
+        fun steer(chain: String, table: String, action: String) {
+            lines += "iptables -t $table -A $chain -m mark --mark 0x2B2B -j RETURN"
+            lines += "iptables -t $table -A $chain -m addrtype --dst-type LOCAL -j RETURN"
+            if (includeUids.isNotEmpty()) {
+                for (uid in includeUids) {
+                    lines += "iptables -t $table -A $chain -m owner --uid-owner $uid $action"
+                }
+                lines += "iptables -t $table -A $chain -j RETURN"
+            } else {
+                for (uid in excludeUids) {
+                    lines += "iptables -t $table -A $chain -m owner --uid-owner $uid -j RETURN"
+                }
+                lines += "iptables -t $table -A $chain $action"
+            }
+        }
+        lines += "iptables -t nat -N FLBOX_NAT 2>/dev/null"
+        lines += "iptables -t nat -F FLBOX_NAT"
+        steer("FLBOX_NAT", "nat", "-p tcp -j REDIRECT --to-ports 7892")
+        lines += "iptables -t nat -C OUTPUT -j FLBOX_NAT 2>/dev/null || iptables -t nat -A OUTPUT -j FLBOX_NAT"
+        lines += "iptables -t mangle -N FLBOX_MNG 2>/dev/null"
+        lines += "iptables -t mangle -F FLBOX_MNG"
+        steer("FLBOX_MNG", "mangle", "-p udp -j TPROXY --on-port 7893 --tproxy-mark 0x2B2C")
+        lines += "iptables -t mangle -C OUTPUT -j FLBOX_MNG 2>/dev/null || iptables -t mangle -A OUTPUT -j FLBOX_MNG"
+        lines += "ip rule del fwmark 0x2B2C lookup 100 2>/dev/null"
+        lines += "ip rule add fwmark 0x2B2C lookup 100 pref 8000"
+        lines += "ip route replace local 0.0.0.0/0 dev lo table 100"
+        lines += "ip6tables -N FLBOX_6 2>/dev/null"
+        lines += "ip6tables -F FLBOX_6"
+        lines += "ip6tables -A FLBOX_6 -m mark --mark 0x2B2B -j RETURN"
+        lines += "ip6tables -A FLBOX_6 -m addrtype --dst-type LOCAL -j RETURN"
+        lines += "ip6tables -A FLBOX_6 -p tcp -j DROP"
+        lines += "ip6tables -A FLBOX_6 -p udp -j DROP"
+        lines += "ip6tables -C OUTPUT -j FLBOX_6 2>/dev/null || ip6tables -A OUTPUT -j FLBOX_6"
+        // The exit code reports whether the hooks landed.
+        lines += "iptables -t nat -C OUTPUT -j FLBOX_NAT"
+        lines += "iptables -t mangle -C OUTPUT -j FLBOX_MNG"
+        return lines.joinToString("\n")
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "flbox/vpn")
@@ -251,6 +332,30 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                         }
                         runOnUiThread { result.success(null) }
+                    }.start()
+                }
+                "netRules" -> {
+                    // eBPF mode steering: installs or clears
+                    // the netfilter chains that feed the
+                    // daemon's redirect and tproxy listeners.
+                    val args = call.arguments as? Map<*, *>
+                    val install = (args?.get("action") as? String) == "install"
+                    val include = (args?.get("includePkgs") as? List<*>)
+                        ?.mapNotNull { it as? String } ?: emptyList()
+                    val exclude = (args?.get("excludePkgs") as? List<*>)
+                        ?.mapNotNull { it as? String } ?: emptyList()
+                    Thread {
+                        var ok = false
+                        try {
+                            val script = buildNetRulesScript(install, include, exclude)
+                            val proc = ProcessBuilder("su", "-c", script)
+                                .redirectErrorStream(true)
+                                .start()
+                            proc.inputStream.bufferedReader().readText()
+                            ok = proc.waitFor() == 0
+                        } catch (e: Exception) {
+                        }
+                        runOnUiThread { result.success(ok) }
                     }.start()
                 }
                 "writeTestJob" -> {

@@ -95,6 +95,9 @@ class CoreBridge {
         .lookupFunction<_RootConfigNative, _RootConfigDart>(
           'FlboxRootTunConfig',
         );
+    _ebpfConfig = lib.lookupFunction<_RootConfigNative, _RootConfigDart>(
+      'FlboxEbpfConfig',
+    );
     _xrayStart = lib.lookupFunction<_StartNative, _StartDart>(
       'FlboxXrayStart',
     );
@@ -161,6 +164,7 @@ class CoreBridge {
   late final _ParseLinksNative _convertImport;
   late final _TranslateNative _xrayTranslate;
   late final _RootConfigDart _rootTunConfig;
+  late final _RootConfigDart _ebpfConfig;
   late final _StartDart _xrayStart;
   late final _NodeDetailNative _xrayMeasureDelay;
   late final _NodeDetailNative _xrayMeasureAll;
@@ -203,6 +207,35 @@ class CoreBridge {
     malloc.free(d);
     if (out == null) {
       throw CoreException(_lastErrorText() ?? 'root config failed');
+    }
+    return out;
+  }
+
+  /// Builds the sing-box configuration for eBPF mode: the
+  /// same pinned single node as the daemon modes, but the
+  /// inbounds are a redirect (TCP) and a tproxy (UDP)
+  /// listener on loopback; netfilter rules the app installs
+  /// steer traffic into them. The ipv6/package arguments
+  /// keep the FFI shape uniform - the steering layer owns
+  /// those decisions in this mode.
+  String ebpfConfig(
+    String clashYaml,
+    String selectedNode, {
+    required bool ipv6,
+    required List<String> includePkgs,
+    required List<String> excludePkgs,
+  }) {
+    final a = clashYaml.toNativeUtf8();
+    final b = selectedNode.toNativeUtf8();
+    final c = jsonEncode(includePkgs).toNativeUtf8();
+    final d = jsonEncode(excludePkgs).toNativeUtf8();
+    final out = _take(_ebpfConfig(a, b, ipv6 ? 1 : 0, c, d));
+    malloc.free(a);
+    malloc.free(b);
+    malloc.free(c);
+    malloc.free(d);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'ebpf config failed');
     }
     return out;
   }

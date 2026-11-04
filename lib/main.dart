@@ -508,6 +508,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _notifyOnStart = true;
   bool _ipv6Enabled = false;
   String _runMode = 'vpn';
+
+  /// Both root modes run the external sing-box daemon; they
+  /// differ only in how traffic reaches it (TUN device vs
+  /// netfilter steering).
+  bool get _daemonMode => _runMode == 'root_tun' || _runMode == 'ebpf';
   bool _notifySubUpdate = true;
   int _subAutoIntervalHours = 24;
   Set<String> _bypassPkgs = {};
@@ -784,7 +789,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// swipe-away on ROMs that keep the service process.
   Future<void> _resyncCoreState() async {
     if (_busy || _running) return;
-    if (_runMode == 'root_tun') {
+    if (_daemonMode) {
       // The root daemon lives outside the app process; its
       // status file is the ground truth. A live daemon is
       // adopted as-is - nothing else needs reconciling.
@@ -792,6 +797,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (status.startsWith('running')) {
         _logEvent('resync: adopted live root daemon session');
         _adoptSession();
+      } else if (_runMode == 'ebpf') {
+        // A dead daemon must not leave netfilter rules
+        // steering traffic into listeners nobody owns.
+        unawaited(_netRules(false));
       }
       return;
     }
@@ -900,7 +909,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     if (!_running || _busy) return;
     // The root daemon is a full sing-box: it watches interface
     // changes itself, no in-place restart needed.
-    if (_runMode == 'root_tun') return;
+    if (_daemonMode) return;
     final last = _lastCoreRestart;
     if (last != null &&
         DateTime.now().difference(last) < const Duration(seconds: 15)) {
@@ -1958,7 +1967,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void _startPolling() {
     // Root mode has no in-process core to poll traffic from;
     // the dashboard simply shows the session as running.
-    if (_runMode == 'root_tun') return;
+    if (_daemonMode) return;
     _pollTimer?.cancel();
     var lastUp = 0;
     var lastDown = 0;
@@ -2067,14 +2076,23 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final exclude = (_splitEnabled && !_splitAllow)
         ? _bypassPkgs.toList()
         : <String>[];
+    final ebpf = _runMode == 'ebpf';
     final config = await Isolate.run(
-      () => CoreBridge().rootTunConfig(
-        yaml,
-        node,
-        ipv6: ipv6,
-        includePkgs: include,
-        excludePkgs: exclude,
-      ),
+      () => ebpf
+          ? CoreBridge().ebpfConfig(
+              yaml,
+              node,
+              ipv6: ipv6,
+              includePkgs: include,
+              excludePkgs: exclude,
+            )
+          : CoreBridge().rootTunConfig(
+              yaml,
+              node,
+              ipv6: ipv6,
+              includePkgs: include,
+              excludePkgs: exclude,
+            ),
     );
     final docs = await getApplicationDocumentsDirectory();
     final cfgFile = File('${docs.path}/root-config.json');
@@ -2093,7 +2111,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       }
       await daemonLog.writeAsString(
         '\n===== flboxd session ${DateTime.now().toIso8601String()} '
-        'node=$node ipv6=$ipv6 =====\n',
+        'mode=$_runMode node=$node ipv6=$ipv6 =====\n',
         mode: FileMode.append,
       );
     } catch (_) {}
@@ -2114,6 +2132,28 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     throw '守护进程启动超时';
   }
 
+  /// Installs or clears the eBPF mode netfilter steering
+  /// (Kotlin side, via su): the TCP REDIRECT and UDP TPROXY
+  /// chains scoped by the split-routing package selection,
+  /// plus the IPv6 drop chain. Clearing is idempotent and
+  /// always safe to call.
+  Future<bool> _netRules(bool install) async {
+    try {
+      return await _vpnChannel.invokeMethod<bool>('netRules', {
+            'action': install ? 'install' : 'clear',
+            'includePkgs': (_splitEnabled && _splitAllow)
+                ? _bypassPkgs.toList()
+                : <String>[],
+            'excludePkgs': (_splitEnabled && !_splitAllow)
+                ? _bypassPkgs.toList()
+                : <String>[],
+          }) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _startRootTun() async {
     if (_selectedNode == null || _profileYaml == null) {
       _toast('先到「代理」页选一个节点');
@@ -2131,7 +2171,22 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         return;
       }
       await _launchRootDaemon();
-      _logEvent('root tun started (node=$_selectedNode)');
+      if (_runMode == 'ebpf') {
+        // The daemon is listening; steer traffic into it.
+        // If the rules refuse to land, roll the daemon back
+        // instead of leaving a running core nobody reaches.
+        if (!await _netRules(true)) {
+          final pid = await _rootDaemonPid();
+          if (pid > 0) {
+            try {
+              await _vpnChannel.invokeMethod('rootStop', pid);
+            } catch (_) {}
+          }
+          _toast('重定向规则安装失败，已回滚');
+          return;
+        }
+      }
+      _logEvent('$_runMode started (node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
       unawaited(_markWasRunning(true));
@@ -2143,6 +2198,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _stopRootTun() async {
+    if (_runMode == 'ebpf') {
+      // Steering off first: traffic returns to direct even
+      // if the daemon then takes a moment to die, and no
+      // rule is ever left pointing at a dead listener.
+      await _netRules(false);
+    }
     try {
       final pid = await _rootDaemonPid();
       if (pid > 0) {
@@ -2153,7 +2214,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           if (s.startsWith('stopped') || s.isEmpty) break;
         }
       }
-      _logEvent('root tun stopped');
+      _logEvent('$_runMode stopped');
     } catch (_) {}
     _stopPolling();
     unawaited(_markWasRunning(false));
@@ -2164,7 +2225,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// the VPN path restarts the core in place; root mode
   /// regenerates the daemon config and bounces the daemon.
   Future<void> _restartForMode(String config) async {
-    if (_runMode == 'root_tun') {
+    if (_daemonMode) {
       final pid = await _rootDaemonPid();
       if (pid > 0) {
         try {
@@ -2177,7 +2238,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       } catch (e) {
         throw CoreException('$e');
       }
-      _logEvent('root tun restarted (node=$_selectedNode)');
+      _logEvent('$_runMode restarted (node=$_selectedNode)');
     } else {
       await _restartCoreInPlace(config);
     }
@@ -2195,7 +2256,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _stopCore() async {
-    if (_runMode == 'root_tun') {
+    if (_daemonMode) {
       await _stopRootTun();
       return;
     }
@@ -2244,7 +2305,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await _stopCore();
       return;
     }
-    if (_runMode == 'root_tun') {
+    if (_daemonMode) {
       await _startRootTun();
       return;
     }
@@ -2805,6 +2866,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onRulesModeChanged: _setRulesMode,
             onShowProxies: () => _select(1),
             rootMode: _runMode == 'root_tun',
+            ebpfMode: _runMode == 'ebpf',
           ),
           ProxiesPage(
             subs: _subs.where((x) => x.enabled).toList(),
@@ -3336,6 +3398,7 @@ class _DashboardPage extends StatelessWidget {
     required this.onRulesModeChanged,
     required this.onShowProxies,
     required this.rootMode,
+    this.ebpfMode = false,
   });
 
   final VoidCallback onOpenSettings;
@@ -3354,6 +3417,7 @@ class _DashboardPage extends StatelessWidget {
   final ValueChanged<bool> onRulesModeChanged;
   final VoidCallback onShowProxies;
   final bool rootMode;
+  final bool ebpfMode;
 
   Widget _card(BuildContext context, {required Widget child, VoidCallback? onTap}) {
     return Container(
@@ -3453,7 +3517,9 @@ class _DashboardPage extends StatelessWidget {
     if (running) {
       statusDetail = rootMode
           ? 'sing-box 守护进程 · Root TUN 模式'
-          : 'Xray 核心 · sing-box 数据通路 · VPN 模式';
+          : ebpfMode
+              ? 'sing-box 守护进程 · eBPF 模式'
+              : 'Xray 核心 · sing-box 数据通路 · VPN 模式';
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
     } else {
@@ -4015,10 +4081,16 @@ class _SettingsPageState extends State<_SettingsPage> {
               contentPadding: EdgeInsets.zero,
               title: const Text('Root eBPF'),
               subtitle: Text(
-                '开发中，下一阶段加入',
+                'root 守护进程＋流量重定向接管，无 TUN 设备；当前 IPv4、全局模式',
                 style: TextStyle(color: muted),
               ),
-              enabled: false,
+              trailing: _runMode == 'ebpf'
+                  ? const Icon(Icons.check, color: _accent)
+                  : null,
+              onTap: () {
+                setState(() => _runMode = 'ebpf');
+                widget.onRunModeChanged('ebpf');
+              },
             ),
           ]),
           const SizedBox(height: 20),
@@ -4256,7 +4328,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.58.0 · app.flbox · Xray 内核',
+              'FlBox 0.59.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
