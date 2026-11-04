@@ -69,8 +69,8 @@ func TestRootTunConfigShape(t *testing.T) {
 		t.Errorf("exclude_package missing: %v", tun)
 	}
 	route := root["route"].(map[string]any)
-	if route["final"] != "PROXY" {
-		t.Errorf("final = %v, want the group", route["final"])
+	if route["final"] != "node-b" {
+		t.Errorf("final = %v, want the selected node pinned (0.58)", route["final"])
 	}
 	if route["auto_detect_interface"] != true {
 		t.Errorf("auto_detect_interface must be on (0.56 self-capture fix)")
@@ -78,11 +78,17 @@ func TestRootTunConfigShape(t *testing.T) {
 	if _, ok := route["rule_set"]; ok {
 		t.Error("rule_set must be stripped in global stage")
 	}
-	// The selector must default to the chosen node.
+	// 0.58: the daemon keeps ONLY the selected node plus
+	// direct/block - no groups, no other nodes, nothing for
+	// a urltest to re-pick mid-session.
 	for _, ob := range root["outbounds"].([]any) {
 		m := ob.(map[string]any)
-		if m["tag"] == "PROXY" && m["default"] != "node-b" {
-			t.Errorf("selector default = %v, want node-b", m["default"])
+		typ, _ := m["type"].(string)
+		if typ == "selector" || typ == "urltest" || typ == "fallback" || typ == "loadbalance" {
+			t.Errorf("group outbound survived the strip: %v", m["tag"])
+		}
+		if tag := m["tag"]; tag != "node-b" && typ != "direct" && typ != "block" {
+			t.Errorf("unexpected outbound kept: %v (%v)", tag, typ)
 		}
 	}
 	// node-b's server is an IP: no bootstrap DNS rule needed,

@@ -221,8 +221,12 @@ class MainActivity : FlutterActivity() {
                             try {
                                 val daemon = daemonBinary()?.absolutePath
                                     ?: throw IllegalStateException("no daemon")
+                                // Append, never truncate: a restart
+                                // must not erase the previous run's
+                                // log - the failure window lives
+                                // there (0.58 diagnosis fix).
                                 val cmd = "nohup '$daemon' '$configPath' " +
-                                    "'$statusPath' >'$logPath' 2>&1 &"
+                                    "'$statusPath' >>'$logPath' 2>&1 &"
                                 val proc = ProcessBuilder("su", "-c", cmd)
                                     .redirectErrorStream(true)
                                     .start()

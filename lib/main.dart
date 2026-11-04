@@ -2081,6 +2081,22 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final statusFile = File('${docs.path}/root-status.txt');
     await cfgFile.writeAsString(config);
     if (await statusFile.exists()) await statusFile.delete();
+    // The daemon log now appends across restarts (Kotlin
+    // side uses >>): keep a session marker per launch and
+    // reset the file once it grows past ~1MB so a failure
+    // window stays findable instead of being truncated
+    // away or buried.
+    final daemonLog = File('${docs.path}/root-daemon.log');
+    try {
+      if (await daemonLog.exists() && await daemonLog.length() > 1048576) {
+        await daemonLog.delete();
+      }
+      await daemonLog.writeAsString(
+        '\n===== flboxd session ${DateTime.now().toIso8601String()} '
+        'node=$node ipv6=$ipv6 =====\n',
+        mode: FileMode.append,
+      );
+    } catch (_) {}
     final ok =
         await _vpnChannel.invokeMethod<bool>('rootStart', {
           'config': cfgFile.path,
@@ -4240,7 +4256,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.57.0 · app.flbox · Xray 内核',
+              'FlBox 0.58.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

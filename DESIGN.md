@@ -338,3 +338,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 0.56 真机新症状：电报能连、十余秒断、随后又恢复，且**只有电报能用、其他应用全灭**；`ip rule` 前后两张完全一致（规则没被动过），2022 号表为前缀切割形——route_exclude_address 以「补集前缀＋/32 挖洞」实现（223.5.5.5 与节点 AWS IP 的洞清晰可见）。定案：本机生成流量（含 netd 的系统 DNS）不在 auto_route 的接管范围内，DNS 逃逸 → 靠域名工作的应用全灭，只剩直连 IP 的电报独活；/32 快照对轮换 IP 亦先天脆弱。
 - **TUN 入站开启 auto_redirect**：Android 上 sing-tun 以 iptables 把本机流量（含 53 端口）重定向进本地 redirect 监听，网络管理器给守护进程自身出站打 output mark（0x2024）按**发送者**豁免——即 netproxy/AsteriskNG 的结构，对节点 IP 轮换免疫。auto_route/auto_detect_interface/route_exclude_address 保留作兜底。
 - **守护进程日志强制 info＋时间戳**：覆盖翻译器默认（低于 warn 不可见），此后真机日志可直接定案连接级问题。
+
+## 0.58：守护进程配置瘦身为单节点 + 日志跨重启保留
+- 0.57 真机：主功能通（浏览器走香港出口）但新连接随运行时间死亡——浏览器对谷歌/百度均 ERR_CONNECTION_CLOSED，已建长连的电报/Play 独活；NTT（443 与 8444）与 Muse App 亦连不上。两份 info 日志（守护进程各自只活了 50 秒/9 秒）均零错误、流量全经香港高速03——失败窗口从未被日志覆盖到（每次重启截断日志＋用户切节点测试即重启）。
+- **配置剥离分组**（rootconfig）：翻译后只保留所选节点出站＋direct/block，route.final 与 dns-remote 的 detour 一并钉死该节点。动因：原配置继承订阅的 urltest 分组——日志一半以上是它对 47 个出站（含伪节点）的 gstatic 健康检查，且它能在会话中途改选出口，与「新连接死、长连活」的症状形态完全吻合；VPN 模式全天正常正因 Xray 路径钉死所选节点。剥离后出口确定、无测速风暴、守护进程内存亦降。
+- **日志改追加**：Kotlin rootStart 的重定向由 `>` 改 `>>`，Dart 启动前写会话分隔行（时间/节点/ipv6）、超 1MB 才重置。此后失败窗口必在日志内，不再被重启抹掉。

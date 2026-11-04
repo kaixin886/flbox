@@ -100,19 +100,43 @@ func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, exclu
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return "", err
 	}
+	// 0.58: strip the profile down to the one selected node.
+	// The full translation carries every group in the
+	// subscription, and its urltest groups health-check all
+	// ~47 outbounds on a loop (half the daemon's log was
+	// gstatic probes) and can re-pick the exit mid-session -
+	// new connections then die on a flapping pick while
+	// established flows (Telegram, Play) survive, matching
+	// every on-device failure report. The daemon pins the
+	// selected node as the only proxy outbound instead.
+	nodeTag := sbtranslate.TagForName(selectedNode)
+	if outs, ok := root["outbounds"].([]any); ok {
+		kept := make([]any, 0, 4)
+		found := false
+		for _, o := range outs {
+			ob, _ := o.(map[string]any)
+			if ob == nil {
+				continue
+			}
+			tag, _ := ob["tag"].(string)
+			typ, _ := ob["type"].(string)
+			if tag == nodeTag {
+				kept = append(kept, ob)
+				found = true
+			} else if typ == "direct" || typ == "block" {
+				kept = append(kept, ob)
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("selected node outbound missing after translation")
+		}
+		root["outbounds"] = kept
+	}
 	route, _ := root["route"].(map[string]any)
 	if route == nil {
 		route = map[string]any{}
 	}
-	final, _ := route["final"].(string)
-	if len(selected) == 0 {
-		// No group routes to this node: aim the final at the
-		// node itself instead of the profile default.
-		final = sbtranslate.TagForName(selectedNode)
-	}
-	if final == "" || final == "direct" || final == "block" {
-		return "", fmt.Errorf("profile has no usable final outbound for root mode")
-	}
+	final := nodeTag
 	route["final"] = final
 	route["rules"] = []any{
 		map[string]any{"protocol": "dns", "action": "hijack-dns"},
