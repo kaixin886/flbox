@@ -326,3 +326,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **根因**：sing-box 1.14.4 common/dialer/detour.go 的 DetourDialer 有「空 direct 检查」：detour 指向 DialerOptions 全默认的 direct 出站即在 DNS 传输启动时报错。rootconfig 给 dns-bootstrap 写了 `detour: "direct"` 而翻译产物的 direct 出站恰是全默认，触发此检查。VPN 路径不用这套 DNS 配置故从未暴露；0.54 的本地测试只验到 Options 解析、没跑 box.Start，故漏网。
 - **修法**：dns-bootstrap 去掉 detour——新式 DNS 服务器无 detour 时用自身直连拨号器（官方文档口径：等价于空 direct 出站），正是 bootstrap 要的系统直连路径，且不经 DetourDialer、无此检查。注释已同步改写。
 - **回归测试**：新增 core/rootstart_test.go——生成 root 配置后真的 box.New＋Start，断言不得死在 DNS/detour 阶段（本地沙箱在 TUN 创建处因权限停下属预期环境差异）。修复前本地逐字复现真机报错、修复后过关。今后动守护进程配置须跑此测试，不只解析校验。
+- 0.55 真机：DNS 关已过、守护进程能启动，但**全部流量不通**。日志定案：HK 域名节点死于引导 DNS 查询 10 秒无回包；换 NTT（IP 服务器）仍不通，死于对 128.242.109.233:443 的裸 TCP 拨号 5 秒超时（夹杂个别 RST）——未到 REALITY 握手层，与已知的 sing-box↔Xray MLKEM 不互通无关。**定案：守护进程自身出站流量被自己的 TUN 捕获回环**。用户补充的旁证：开启前 Xray 路径测速正常，节点与网络无辜。另发现并顺手修：仪表盘运行文案写死「VPN 模式」，root 模式下亦然（纯显示 bug）。
+
+## 0.56：修 Root TUN 自捕获回环
+- **route.auto_detect_interface=true**：出站套接字绑物理接口，TUN 表路由对它们不可选（sing-box 桌面 TUN 的标准豁免机制）。
+- **去掉 strict_route**：其防泄漏拦截在 Android 上连核心自身的回程流量一并吃掉。
+- **TUN 路由排除名单**（route_exclude_address；注意 1.14 已删除 inet4_/inet6_ 前缀的旧字段名，用了会在 box.New 硬报错，本地启动测试当场抓住）：引导 DNS 223.5.5.5/32 ＋节点服务器 IP——域名服务器在配置生成时以 3 秒预算顺带解析（resolveServerIPs，软失败为空，靠第一条兜底），即 Magisk 代理模块通用的「服务器主机路由绕过」。已知局限：轮换 IP 的节点在会话中途重连到新 IP 时排除名单可能不覆盖，属二期课题。
+- **仪表盘文案按模式分流**：root 运行时显示「sing-box 守护进程 · Root TUN 模式」（_DashboardPage 新增 rootMode 入参）。

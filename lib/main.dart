@@ -2788,6 +2788,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             rulesMode: _rulesMode,
             onRulesModeChanged: _setRulesMode,
             onShowProxies: () => _select(1),
+            rootMode: _runMode == 'root_tun',
           ),
           ProxiesPage(
             subs: _subs.where((x) => x.enabled).toList(),
@@ -3318,6 +3319,7 @@ class _DashboardPage extends StatelessWidget {
     required this.rulesMode,
     required this.onRulesModeChanged,
     required this.onShowProxies,
+    required this.rootMode,
   });
 
   final VoidCallback onOpenSettings;
@@ -3335,6 +3337,7 @@ class _DashboardPage extends StatelessWidget {
   final bool rulesMode;
   final ValueChanged<bool> onRulesModeChanged;
   final VoidCallback onShowProxies;
+  final bool rootMode;
 
   Widget _card(BuildContext context, {required Widget child, VoidCallback? onTap}) {
     return Container(
@@ -3432,7 +3435,9 @@ class _DashboardPage extends StatelessWidget {
         .withValues(alpha: 0.5);
     final String statusDetail;
     if (running) {
-      statusDetail = 'Xray 核心 · sing-box 数据通路 · VPN 模式';
+      statusDetail = rootMode
+          ? 'sing-box 守护进程 · Root TUN 模式'
+          : 'Xray 核心 · sing-box 数据通路 · VPN 模式';
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
     } else {
@@ -4235,7 +4240,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.55.0 · app.flbox · Xray 内核',
+              'FlBox 0.56.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

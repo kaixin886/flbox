@@ -58,12 +58,22 @@ func TestRootTunConfigShape(t *testing.T) {
 	if tun["type"] != "tun" || tun["auto_route"] != true || tun["stack"] != "gvisor" {
 		t.Errorf("tun inbound wrong: %v", tun)
 	}
+	if _, ok := tun["strict_route"]; ok {
+		t.Error("strict_route must stay off (0.56 self-capture fix)")
+	}
+	excl, _ := tun["route_exclude_address"].([]any)
+	if len(excl) != 2 || excl[0] != "223.5.5.5/32" || excl[1] != "203.0.113.7/32" {
+		t.Errorf("route excludes = %v, want bootstrap + node-b IP", excl)
+	}
 	if got := tun["exclude_package"]; got == nil || len(got.([]any)) != 1 {
 		t.Errorf("exclude_package missing: %v", tun)
 	}
 	route := root["route"].(map[string]any)
 	if route["final"] != "PROXY" {
 		t.Errorf("final = %v, want the group", route["final"])
+	}
+	if route["auto_detect_interface"] != true {
+		t.Errorf("auto_detect_interface must be on (0.56 self-capture fix)")
 	}
 	if _, ok := route["rule_set"]; ok {
 		t.Error("rule_set must be stripped in global stage")

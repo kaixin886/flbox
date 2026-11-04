@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
+	"time"
 
 	"flbox/core/sbtranslate"
 )
@@ -36,6 +38,26 @@ import (
 // 0.54 build failed on device in exactly that spot) - and
 // gets a DNS rule for exactly that domain; ordinary queries
 // use the remote server through the tunnel.
+//
+// The daemon's own traffic is the second trap, and 0.55 fell
+// into it on device: the box started, but every outbound dial
+// died (node-domain lookups timing out after 10s, raw TCP to
+// an IP server timing out at 5s, a few answered with RST) -
+// the daemon's own sockets were being routed into its own
+// TUN and looped. Three countermeasures, each standard in
+// the rooted-Android proxy world:
+//   - route.auto_detect_interface binds outbound sockets to
+//     the physical interface, which makes TUN-table routes
+//     ineligible for them;
+//   - the TUN drops strict_route (its leak-blocking also
+//     eats the core's own return traffic on Android);
+//   - the TUN route set excludes the bootstrap resolver and
+//     the node's server IPs outright (the host-route bypass
+//     every Magisk proxy module installs), the IPs resolved
+//     here at config-build time while the app still has
+//     working DNS. Rotating server IPs can still strand a
+//     mid-session reconnect on a fresh address; that is a
+//     known stage-2 limitation.
 func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, excludePkgs []string) (string, error) {
 	cfg, err := sbtranslate.ParseClash([]byte(clashYAML))
 	if err != nil {
@@ -87,6 +109,7 @@ func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, exclu
 		map[string]any{"protocol": "dns", "action": "hijack-dns"},
 		map[string]any{"ip_is_private": true, "outbound": "direct"},
 	}
+	route["auto_detect_interface"] = true
 	delete(route, "rule_set")
 	root["route"] = route
 
@@ -94,14 +117,18 @@ func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, exclu
 	if ipv6 {
 		addrs = append(addrs, "fdfe:dcba:9876::1/126")
 	}
+	excludes := []any{"223.5.5.5/32"}
+	for _, ip := range resolveServerIPs(sel.Server) {
+		excludes = append(excludes, ip+"/32")
+	}
 	tun := map[string]any{
-		"type":         "tun",
-		"tag":          "tun-in",
-		"address":      addrs,
-		"mtu":          1500,
-		"auto_route":   true,
-		"strict_route": true,
-		"stack":        "gvisor",
+		"type":                        "tun",
+		"tag":                         "tun-in",
+		"address":                     addrs,
+		"mtu":                         1500,
+		"auto_route":                  true,
+		"stack":                       "gvisor",
+		"route_exclude_address":       excludes,
 	}
 	if len(includePkgs) > 0 {
 		tun["include_package"] = anyStrings(includePkgs)
@@ -143,6 +170,47 @@ func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, exclu
 		return "", err
 	}
 	return string(out), nil
+}
+
+// resolveServerIPs returns the IPv4 addresses the daemon
+// must be able to reach without entering its own TUN: the
+// server itself when it is already an IPv4 literal, else a
+// best-effort DNS lookup (3s budget, soft-fail to empty -
+// auto_detect_interface still covers that case).
+func resolveServerIPs(server string) []string {
+	if ip := net.ParseIP(server); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return []string{ip4.String()}
+		}
+		return nil
+	}
+	if server == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, server)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range addrs {
+		ip4 := a.IP.To4()
+		if ip4 == nil {
+			continue
+		}
+		s := ip4.String()
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
 }
 
 func anyStrings(in []string) []any {
