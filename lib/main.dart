@@ -122,7 +122,7 @@ final RegExp _infoNodePattern = RegExp(
   caseSensitive: false,
 );
 bool isInfoNode(String name) => _infoNodePattern.hasMatch(name);
-const _lightBackground = Color(0xFFF7F7F9);
+const _lightBackground = Color(0xFFF2F2F6);
 const _darkBackground = Color(0xFF101012);
 
 ThemeData _theme(Brightness brightness) {
@@ -811,8 +811,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// per-subscription auto-update period, update route, and the
   /// node name filters applied on every refresh.
   Future<void> _openSubEditor(SubProfile sub) async {
-    final result = await Navigator.of(context).push<Map<String, dynamic>>(
-      MaterialPageRoute(builder: (_) => _SubEditPage(sub: sub)),
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _SubEditPage(sub: sub),
     );
     if (result == null) return;
     setState(() {
@@ -1472,12 +1475,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         final down = (decoded['down'] as num).toInt();
         final now = DateTime.now();
         final dt = now.difference(lastTick).inMilliseconds / 1000.0;
-        if (dt > 0) {
-          // Counters restart from zero on an in-place core
-          // restart (node/subscription/mode switch): a negative
-          // delta is that reset, not negative traffic.
-          speedUp = up >= lastUp ? (up - lastUp) / dt : 0;
-          speedDown = down >= lastDown ? (down - lastDown) / dt : 0;
+        // Counters restart from zero on an in-place core
+        // restart (node/subscription/mode switch, bulk speed
+        // test): a backwards counter is a NEW core instance -
+        // zero rates this tick and drop the old instance's
+        // samples, which are not this connection's traffic.
+        final counterReset = up < lastUp || down < lastDown;
+        if (counterReset) {
+          speedUp = 0;
+          speedDown = 0;
+        } else if (dt > 0) {
+          speedUp = (up - lastUp) / dt;
+          speedDown = (down - lastDown) / dt;
         }
         lastUp = up;
         lastDown = down;
@@ -1488,9 +1497,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           speedUp: speedUp,
           speedDown: speedDown,
         );
-        final hist = [..._rateHistory.value, _RateSample(speedUp, speedDown)];
-        if (hist.length > 45) hist.removeRange(0, hist.length - 45);
-        _rateHistory.value = hist;
+        if (counterReset) {
+          _rateHistory.value = const [];
+        } else {
+          final hist = [
+            ..._rateHistory.value,
+            _RateSample(speedUp, speedDown),
+          ];
+          if (hist.length > 45) hist.removeRange(0, hist.length - 45);
+          _rateHistory.value = hist;
+        }
         _pushVpnStatus();
       } catch (_) {
         // A failed poll just skips a beat; the next one retries.
@@ -2311,10 +2327,14 @@ String _fmtDuration(Duration d) {
   return d.inHours > 0 ? '${d.inHours}:$mm:$ss' : '$mm:$ss';
 }
 
+/// Solid card surface (white in light mode, raised dark
+/// grey in dark mode) over the grey page - the reference
+/// client's look, replacing the old translucent fills that
+/// read as unfinished.
 Color _cardColor(BuildContext context) =>
-    Theme.of(context).colorScheme.onSurface.withValues(
-          alpha: Theme.of(context).brightness == Brightness.dark ? 0.07 : 0.045,
-        );
+    Theme.of(context).brightness == Brightness.dark
+        ? const Color(0xFF1E1E22)
+        : Colors.white;
 
 /// Card surface with depth: the shared fill plus a hairline
 /// border and, in light mode, a faint shadow. Flat fills alone
@@ -2824,6 +2844,12 @@ class _RateChartPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Hard clip: a bogus sample must never paint outside the
+    // chart box - the runaway lines across the dashboard at
+    // group switches came from exactly that (negative rates
+    // right after an in-place restart zeroed the counters).
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
     final baseline = Paint()
       ..color = Colors.grey.withValues(alpha: 0.25)
       ..strokeWidth = 1;
@@ -2838,10 +2864,14 @@ class _RateChartPainter extends CustomPainter {
       if (s.down > maxV) maxV = s.down;
       if (s.up > maxV) maxV = s.up;
     }
-    if (maxV <= 0) maxV = 1;
+    if (maxV <= 0 || !maxV.isFinite) maxV = 1;
     final stepX = size.width / 44;
     double x(int i) => size.width - (samples.length - 1 - i) * stepX;
-    double y(double v) => size.height - 3 - (v / maxV) * (size.height - 8);
+    double y(double v) {
+      if (!v.isFinite) v = 0;
+      final r = size.height - 3 - (v / maxV) * (size.height - 8);
+      return r.clamp(0.0, size.height).toDouble();
+    }
 
     final fill = Path()
       ..moveTo(x(0), y(samples[0].down));
@@ -2875,6 +2905,7 @@ class _RateChartPainter extends CustomPainter {
 
     stroke((s) => s.down, _accent);
     stroke((s) => s.up, const Color(0xFF34A853));
+    canvas.restore();
   }
 
   @override
@@ -2938,176 +2969,212 @@ class _SettingsPageState extends State<_SettingsPage> {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
+
+    // Grouped solid cards with a small header above each -
+    // the settings layout of the reference client: grey page,
+    // white cards, rows inside.
+    Widget section(String title, List<Widget> rows) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 8),
+            child: Text(
+              title,
+              style: TextStyle(
+                color: muted,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Container(
+            decoration: _cardDecoration(context),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Column(children: rows),
+          ),
+        ],
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         children: [
-          Text('外观', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text('导航栏样式', style: TextStyle(color: muted)),
-          const SizedBox(height: 8),
-          for (final style in NavStyle.values)
+          section('外观', [
+            for (final style in NavStyle.values)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(style.label),
+                trailing: _navStyle == style
+                    ? const Icon(Icons.check, color: _accent)
+                    : null,
+                onTap: () {
+                  setState(() => _navStyle = style);
+                  widget.onNavStyleChanged(style);
+                },
+              ),
+          ]),
+          const SizedBox(height: 20),
+          section('代理', [
             ListTile(
               contentPadding: EdgeInsets.zero,
-              title: Text(style.label),
-              trailing: _navStyle == style
-                  ? const Icon(Icons.check, color: _accent)
-                  : null,
+              leading: const Icon(Icons.apps_outlined),
+              title: const Text('分应用代理'),
+              subtitle: Text(
+                widget.bypassPkgs.isEmpty
+                    ? '所有应用都走 VPN'
+                    : '${widget.bypassPkgs.length} 个应用绕过 VPN',
+                style: TextStyle(color: muted),
+              ),
+              trailing: const Icon(Icons.chevron_right),
               onTap: () {
-                setState(() => _navStyle = style);
-                widget.onNavStyleChanged(style);
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => _BypassAppsPage(
+                      initial: widget.bypassPkgs,
+                      onChanged: widget.onBypassChanged,
+                    ),
+                  ),
+                );
               },
             ),
-          const SizedBox(height: 24),
-          Text('代理', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.apps_outlined),
-            title: const Text('分应用代理'),
-            subtitle: Text(
-              widget.bypassPkgs.isEmpty
-                  ? '所有应用都走 VPN'
-                  : '${widget.bypassPkgs.length} 个应用绕过 VPN',
-              style: TextStyle(color: muted),
+          ]),
+          const SizedBox(height: 20),
+          section('路由', [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.public_outlined),
+              title: const Text('全局模式'),
+              subtitle:
+                  Text('所有流量都走代理', style: TextStyle(color: muted)),
+              trailing: !widget.rulesMode
+                  ? const Icon(Icons.check, color: _accent)
+                  : null,
+              onTap: () => widget.onRulesModeChanged(false),
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => _BypassAppsPage(
-                    initial: widget.bypassPkgs,
-                    onChanged: widget.onBypassChanged,
-                  ),
-                ),
-              );
-            },
-          ),
-          const SizedBox(height: 24),
-          Text('代理', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.public_outlined),
-            title: const Text('全局模式'),
-            subtitle: Text('所有流量都走代理', style: TextStyle(color: muted)),
-            trailing: !widget.rulesMode
-                ? const Icon(Icons.check, color: _accent)
-                : null,
-            onTap: () => widget.onRulesModeChanged(false),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.alt_route),
-            title: const Text('规则模式（分流）'),
-            subtitle:
-                Text('v2ray 原版绕过大陆：国内域名与 IP 直连，其余走代理', style: TextStyle(color: muted)),
-            trailing: widget.rulesMode
-                ? const Icon(Icons.check, color: _accent)
-                : null,
-            onTap: () => widget.onRulesModeChanged(true),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.library_books_outlined),
-            title: const Text('分流规则库'),
-            subtitle: Text(
-              widget.geoReady ? '已内置于安装包，点按可刷新' : '内置于安装包（开启规则模式时自动释放）',
-              style: TextStyle(color: muted),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.alt_route),
+              title: const Text('规则模式（分流）'),
+              subtitle: Text('v2ray 原版绕过大陆：国内域名与 IP 直连，其余走代理',
+                  style: TextStyle(color: muted)),
+              trailing: widget.rulesMode
+                  ? const Icon(Icons.check, color: _accent)
+                  : null,
+              onTap: () => widget.onRulesModeChanged(true),
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: widget.onUpdateGeo,
-          ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            secondary: const Icon(Icons.power_settings_new),
-            title: const Text('启动后自动连接'),
-            subtitle:
-                Text('打开 FlBox 时自动启动上次的节点', style: TextStyle(color: muted)),
-            value: widget.autoConnect,
-            onChanged: widget.onAutoConnectChanged,
-          ),
-          const SizedBox(height: 24),
-          Text('通知', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            secondary: const Icon(Icons.notifications_outlined),
-            title: const Text('常驻通知信息'),
-            subtitle: Text('在 VPN 常驻通知里实时显示当前节点、延迟与上下行速度',
-                style: TextStyle(color: muted)),
-            value: widget.notifyOnStart,
-            onChanged: widget.onNotifyOnStartChanged,
-          ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            secondary: const Icon(Icons.update),
-            title: const Text('订阅自动更新通知'),
-            subtitle: Text('订阅自动更新成功后推送通知',
-                style: TextStyle(color: muted)),
-            value: widget.notifySubUpdate,
-            onChanged: widget.onNotifySubUpdateChanged,
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.schedule_outlined),
-            title: const Text('新订阅默认更新周期'),
-            subtitle: Text(
-              '每份订阅的自动更新开关、周期、更新网络和节点过滤在配置页点订阅的「编辑」设置；到期后应用在前台和后台都会自动更新',
-              style: TextStyle(color: muted),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.library_books_outlined),
+              title: const Text('分流规则库'),
+              subtitle: Text(
+                widget.geoReady
+                    ? '已内置于安装包，点按可刷新'
+                    : '内置于安装包（开启规则模式时自动释放）',
+                style: TextStyle(color: muted),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: widget.onUpdateGeo,
             ),
-          ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final h in const [6, 12, 24, 48, 72])
-                ChoiceChip(
-                  label: Text('$h 小时'),
-                  selected: _autoIntervalHours == h,
-                  onSelected: (_) {
-                    setState(() => _autoIntervalHours = h);
-                    widget.onAutoIntervalChanged(h);
-                  },
-                ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Text('系统', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.battery_saver_outlined),
-            title: const Text('电池优化'),
-            subtitle: Text(
-              widget.batteryIgnored
-                  ? '已豁免，后台运行不受限'
-                  : '未豁免，切后台久了可能被系统杀掉',
-              style: TextStyle(color: muted),
+          ]),
+          const SizedBox(height: 20),
+          section('连接', [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              secondary: const Icon(Icons.power_settings_new),
+              title: const Text('启动后自动连接'),
+              subtitle: Text('打开 FlBox 时自动启动上次的节点',
+                  style: TextStyle(color: muted)),
+              value: widget.autoConnect,
+              onChanged: widget.onAutoConnectChanged,
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: widget.onOpenBatterySettings,
-          ),
-          const SizedBox(height: 24),
-          Text('内核', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          const ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text('Xray（试用中）'),
-            trailing: Icon(Icons.check, color: _accent),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              'sing-box（待接入）',
-              style: TextStyle(color: muted),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.schedule_outlined),
+              title: const Text('新订阅默认更新周期'),
+              subtitle: Text(
+                '每份订阅的自动更新开关、周期、更新网络和节点过滤在配置页点订阅的「编辑」设置；到期后应用在前台和后台都会自动更新',
+                style: TextStyle(color: muted),
+              ),
             ),
-          ),
-          const SizedBox(height: 32),
+            Padding(
+              padding: const EdgeInsets.only(left: 40, bottom: 10),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final h in const [6, 12, 24, 48, 72])
+                    ChoiceChip(
+                      label: Text('$h 小时'),
+                      selected: _autoIntervalHours == h,
+                      onSelected: (_) {
+                        setState(() => _autoIntervalHours = h);
+                        widget.onAutoIntervalChanged(h);
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ]),
+          const SizedBox(height: 20),
+          section('通知', [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              secondary: const Icon(Icons.notifications_outlined),
+              title: const Text('常驻通知信息'),
+              subtitle: Text('在 VPN 常驻通知里实时显示当前节点、延迟与上下行速度',
+                  style: TextStyle(color: muted)),
+              value: widget.notifyOnStart,
+              onChanged: widget.onNotifyOnStartChanged,
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              secondary: const Icon(Icons.update),
+              title: const Text('订阅自动更新通知'),
+              subtitle: Text('订阅自动更新成功后推送通知',
+                  style: TextStyle(color: muted)),
+              value: widget.notifySubUpdate,
+              onChanged: widget.onNotifySubUpdateChanged,
+            ),
+          ]),
+          const SizedBox(height: 20),
+          section('系统', [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.battery_saver_outlined),
+              title: const Text('电池优化'),
+              subtitle: Text(
+                widget.batteryIgnored
+                    ? '已豁免，后台运行不受限'
+                    : '未豁免，切后台久了可能被系统杀掉',
+                style: TextStyle(color: muted),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: widget.onOpenBatterySettings,
+            ),
+          ]),
+          const SizedBox(height: 20),
+          section('内核', [
+            const ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text('Xray（试用中）'),
+              trailing: Icon(Icons.check, color: _accent),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                'sing-box（待接入）',
+                style: TextStyle(color: muted),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.32.0 · app.flbox · Xray 内核',
+              'FlBox 0.33.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -4088,15 +4155,36 @@ class _SubEditPageState extends State<_SubEditPage> {
     });
   }
 
-  Widget _textField(TextEditingController ctl, String label) {
+  Widget _textField(
+    TextEditingController ctl,
+    String label,
+    Color fill,
+  ) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.only(bottom: 12),
       child: TextField(
         controller: ctl,
         decoration: InputDecoration(
           labelText: label,
-          border: const OutlineInputBorder(),
+          filled: true,
+          fillColor: fill,
           isDense: true,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: 12,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: _accent, width: 1.2),
+          ),
         ),
       ),
     );
@@ -4107,74 +4195,120 @@ class _SubEditPageState extends State<_SubEditPage> {
     final muted =
         Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5);
     final hasUrl = widget.sub.url != null;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('编辑订阅'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.check),
-            tooltip: '保存',
-            onPressed: _save,
-          ),
-        ],
+    final fill =
+        Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.05);
+    return Container(
+      decoration: BoxDecoration(
+        color: _cardColor(context),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          _textField(_nameCtl, '订阅名称'),
-          if (hasUrl) _textField(_urlCtl, '订阅链接'),
-          if (hasUrl) ...[
-            SwitchListTile(
-              title: const Text('自动更新'),
-              contentPadding: EdgeInsets.zero,
-              value: _autoUpdate,
-              onChanged: (v) => setState(() => _autoUpdate = v),
-            ),
-            const SizedBox(height: 6),
-            Text('自动更新周期', style: TextStyle(color: muted)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                for (final h in const [6, 12, 24, 48, 72])
-                  ChoiceChip(
-                    label: Text('$h 小时'),
-                    selected: _interval == h,
-                    onSelected: (_) => setState(() => _interval = h),
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                '编辑订阅',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 18),
+              _textField(_nameCtl, '分组名称', fill),
+              if (hasUrl) _textField(_urlCtl, '订阅地址', fill),
+              if (hasUrl) ...[
+                SwitchListTile(
+                  title: const Text('自动更新'),
+                  contentPadding: EdgeInsets.zero,
+                  value: _autoUpdate,
+                  onChanged: (v) => setState(() => _autoUpdate = v),
+                ),
+                const SizedBox(height: 6),
+                Text('自动更新周期', style: TextStyle(color: muted)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final h in const [6, 12, 24, 48, 72])
+                      ChoiceChip(
+                        label: Text('$h 小时'),
+                        selected: _interval == h,
+                        onSelected: (_) => setState(() => _interval = h),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Text('更新网络', style: TextStyle(color: muted)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('直连'),
+                      selected: !_viaProxy,
+                      onSelected: (_) =>
+                          setState(() => _viaProxy = false),
+                    ),
+                    ChoiceChip(
+                      label: const Text('经当前代理'),
+                      selected: _viaProxy,
+                      onSelected: (_) => setState(() => _viaProxy = true),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                _textField(_keepCtl, '仅保留（正则，可选）', fill),
+                _textField(_dropCtl, '排除（正则，可选）', fill),
+                Text(
+                  '过滤按节点名匹配，在每次更新时应用；手动添加的节点在「手动节点」里，不受订阅更新影响。',
+                  style: TextStyle(color: muted, fontSize: 13),
+                ),
+              ] else
+                Text(
+                  '本地配置没有链接，不参与自动更新。',
+                  style: TextStyle(color: muted),
+                ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.tonal(
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: FilledButton.styleFrom(
+                        padding:
+                            const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text('取消'),
+                    ),
                   ),
-              ],
-            ),
-            const SizedBox(height: 18),
-            Text('更新网络', style: TextStyle(color: muted)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                ChoiceChip(
-                  label: const Text('直连'),
-                  selected: !_viaProxy,
-                  onSelected: (_) => setState(() => _viaProxy = false),
-                ),
-                ChoiceChip(
-                  label: const Text('经当前代理'),
-                  selected: _viaProxy,
-                  onSelected: (_) => setState(() => _viaProxy = true),
-                ),
-              ],
-            ),
-            const SizedBox(height: 18),
-            _textField(_keepCtl, '仅保留（正则，可选）'),
-            _textField(_dropCtl, '排除（正则，可选）'),
-            Text(
-              '过滤按节点名匹配，在每次更新时应用；手动添加的节点在「手动节点」里，不受订阅更新影响。',
-              style: TextStyle(color: muted, fontSize: 13),
-            ),
-          ] else
-            Text(
-              '本地配置没有链接，不参与自动更新。',
-              style: TextStyle(color: muted),
-            ),
-        ],
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: _save,
+                      style: FilledButton.styleFrom(
+                        padding:
+                            const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text('保存'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -4424,28 +4558,37 @@ class ProfilesPage extends StatelessWidget {
           ],
           const SizedBox(height: 6),
           Row(
-            mainAxisAlignment: MainAxisAlignment.end,
             children: [
               if (!active)
-                TextButton(
+                FilledButton.tonal(
                   onPressed: () => onSwitch(sub),
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14),
+                  ),
                   child: const Text('使用'),
                 ),
+              const Spacer(),
               if (sub.url != null)
-                TextButton(
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20),
+                  tooltip: '更新',
+                  visualDensity: VisualDensity.compact,
                   onPressed: () => onUpdate(sub),
-                  child: const Text('更新'),
                 ),
-              TextButton(
+              IconButton(
+                icon: const Icon(Icons.edit_outlined, size: 20),
+                tooltip: '编辑',
+                visualDensity: VisualDensity.compact,
                 onPressed: () => onEditSub(sub),
-                child: const Text('编辑'),
               ),
-              TextButton(
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 20),
+                tooltip: '删除',
+                color: Colors.redAccent,
+                visualDensity: VisualDensity.compact,
                 onPressed: () => _confirmDelete(context, sub),
-                child: const Text(
-                  '删除',
-                  style: TextStyle(color: Colors.redAccent),
-                ),
               ),
             ],
           ),
