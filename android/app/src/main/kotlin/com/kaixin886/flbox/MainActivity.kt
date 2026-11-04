@@ -2,6 +2,7 @@ package com.kaixin886.flbox
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -141,6 +142,27 @@ class MainActivity : FlutterActivity() {
                     } catch (e: Exception) {
                     }
                     result.success(null)
+                }
+                "killTestProcess" -> {
+                    // Force-stops the speed test process (same
+                    // uid, so the signal is permitted) when a run
+                    // wedged it: stopping the service alone cannot
+                    // unstick a native runtime stuck inside the
+                    // process, and the next launch must start from
+                    // a truly fresh process.
+                    var killed = false
+                    try {
+                        val am = getSystemService(ActivityManager::class.java)
+                        val target = "$packageName:tasks"
+                        for (p in am.runningAppProcesses ?: emptyList()) {
+                            if (p.processName == target) {
+                                android.os.Process.killProcess(p.pid)
+                                killed = true
+                            }
+                        }
+                    } catch (e: Exception) {
+                    }
+                    result.success(killed)
                 }
                 "writeTestJob" -> {
                     // Writes the speed test job file and clears

@@ -2185,11 +2185,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// run, not the app. Since 0.47 the default path is the
   /// same split: the job goes to the FlboxTestService process
   /// (see testMain) and results stream back through a results
-  /// file this method polls; if that process dies mid-run the
-  /// poll stalls, the run finalizes with the results that did
-  /// arrive, and the rest simply stay untested. The in-process
-  /// workers below remain as a fallback for when the service
-  /// cannot be started at all.
+  /// file this method polls. The 0.47 phone run still stopped
+  /// at 23 completions - inside the test process, which is
+  /// exactly where that failure belongs - so since 0.48 a
+  /// stalled launch is force-killed and relaunched with only
+  /// the nodes still missing (see _testAllViaService). The
+  /// in-process workers below remain as a fallback for when
+  /// the service cannot be started at all.
   ///
   /// Nodes are logged before the run and each result is logged
   /// as it lands, so the log page still shows exactly how far
@@ -2221,41 +2223,77 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   /// Ships the job to the test process and polls its results
-  /// file (through the platform channel) until the run reports
-  /// done, stalls for 25 seconds (the test process died or is
-  /// wedged: finalize with what arrived), or hits a generous
-  /// overall cap. Returns false only when the service path
-  /// could not be started, so the caller can fall back.
+  /// file (through the platform channel) until every node has
+  /// a result. The 0.47 phone run showed the test process
+  /// still dies or wedges at the same point an in-process run
+  /// used to crash (about 23 completions) - the isolation did
+  /// its job, the app survived, but the run stopped there. So
+  /// a launch is now treated as disposable: when polling
+  /// stalls for 15 seconds the test process is force-killed
+  /// and relaunched with only the nodes still missing, up to
+  /// four launches, stopping early when a launch yields
+  /// nothing at all. Each fresh process historically survives
+  /// another twenty-plus nodes, so two launches cover a big
+  /// subscription. Returns false only when the first launch
+  /// could not be started at all, so the caller can fall back
+  /// to measuring in-process.
   Future<bool> _testAllViaService(
     List<MapEntry<String, String>> entries,
   ) async {
-    try {
-      final job = jsonEncode({
-        'url': 'http://www.gstatic.com/generate_204',
-        'items': [
-          for (final e in entries) {'name': e.key, 'config': e.value},
-        ],
-      });
-      final written =
-          await _vpnChannel.invokeMethod<bool>('writeTestJob', job) ?? false;
-      if (!written) return false;
-      final started =
-          await _vpnChannel.invokeMethod<bool>('startTestService') ?? false;
-      if (!started) return false;
-    } catch (_) {
-      return false;
+    final remaining = <MapEntry<String, String>>[...entries];
+    var launches = 0;
+    while (remaining.isNotEmpty && launches < 4) {
+      launches++;
+      var started = false;
+      try {
+        // A previous launch's process may be wedged with the
+        // service stopped or the engine dead; killing it is a
+        // no-op when it already exited on its own.
+        await _vpnChannel.invokeMethod('killTestProcess');
+        final job = jsonEncode({
+          'url': 'http://www.gstatic.com/generate_204',
+          'items': [
+            for (final e in remaining) {'name': e.key, 'config': e.value},
+          ],
+        });
+        final written =
+            await _vpnChannel.invokeMethod<bool>('writeTestJob', job) ??
+                false;
+        started = written &&
+            (await _vpnChannel.invokeMethod<bool>('startTestService') ??
+                false);
+      } catch (_) {
+        started = false;
+      }
+      if (!started) return launches > 1;
+      final got = await _pollTestResults({for (final e in remaining) e.key});
+      if (!mounted) return true;
+      remaining.removeWhere((e) => got.contains(e.key));
+      if (remaining.isEmpty) break;
+      if (got.isEmpty) break;
+      _logEvent(
+        'speed test: relaunching for ${remaining.length} remaining nodes',
+      );
     }
-    final names = {for (final e in entries) e.key};
+    return true;
+  }
+
+  /// One launch's polling: applies result lines as they land
+  /// and returns the set of node names that reported. Ends
+  /// when the launch reports done, stalls for 15 seconds (the
+  /// test process died or wedged), or hits a per-launch cap.
+  Future<Set<String>> _pollTestResults(Set<String> names) async {
+    final got = <String>{};
     var consumed = 0;
     var lastProgress = DateTime.now();
-    final runStart = DateTime.now();
+    final launchStart = DateTime.now();
     while (true) {
       await Future<void>.delayed(const Duration(milliseconds: 300));
       if (!mounted) {
         try {
           await _vpnChannel.invokeMethod('stopTestService');
         } catch (_) {}
-        return true;
+        return got;
       }
       Map<dynamic, dynamic>? res;
       try {
@@ -2277,6 +2315,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           final m = jsonDecode(line) as Map<String, dynamic>;
           final name = m['name'] as String?;
           if (name == null || !names.contains(name)) continue;
+          got.add(name);
           final raw = (m['ms'] as num?)?.toInt() ?? -1;
           final ms = raw >= 0 ? raw : null;
           _logEvent('speed test done: $name ${ms ?? 'timeout'}');
@@ -2287,16 +2326,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       }
       if (done) break;
       if (DateTime.now().difference(lastProgress) >
-          const Duration(seconds: 25)) {
-        _logEvent('speed test: test process stalled, finalizing');
+          const Duration(seconds: 15)) {
+        _logEvent('speed test: launch stalled, will relaunch');
         break;
       }
-      if (DateTime.now().difference(runStart) >
-          const Duration(seconds: 240)) {
+      if (DateTime.now().difference(launchStart) >
+          const Duration(seconds: 150)) {
         break;
       }
     }
-    return true;
+    return got;
   }
 
   /// The pre-0.47 in-process measurement, kept as the fallback
@@ -3874,7 +3913,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.47.0 · app.flbox · Xray 内核',
+              'FlBox 0.48.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

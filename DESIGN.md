@@ -277,3 +277,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 测速独立进程：新增 `FlboxTestService`（清单声明 `android:process=":tasks"`、非导出），内起第二个 Flutter 引擎跑 Dart 入口 `testMain`（`@pragma('vm:entry-point')` 保入 AOT 快照，不注册任何插件）。两进程经应用沙盒内 filesDir 文件通信：界面写任务文件（writeTestJob 通道落盘并清旧结果）→ MainActivity 拉起服务 → testMain 经 `flbox/testhost` 通道取任务、逐条回传结果（服务追加写 results 文件）→ 界面每 300ms 轮询结果应用延迟；done 标记收尾，25 秒无新结果判测试进程已死、按已有结果定稿、其余节点留未测。测试进程被原生 abort 只损失本轮测速，界面与其余结果无恙。服务起不来时自动回退 0.46 的进程内测速并在日志注明。
 - 分应用页照用户截图改版：页首双开关（启用分应用／绕行模式，同一行），列表行带应用图标（listApps 通道新增图标 PNG 字节、后台线程渲染）、应用名＋灰色小字包名、右侧勾选框，行点击亦可切换；搜索框保留。模式语义补齐：绕行开＝勾选应用绕过 VPN（addDisallowedApplication）；绕行关＝仅勾选应用走 VPN（addAllowedApplication，此时本应用自动在隧道外、核心出站不回环）；未启用＝不做任何分应用处理。新增偏好 bypass_enabled／bypass_allow（备份/恢复一并带上），保存仍走页首「保存」、下次启动 VPN 生效，设置页行摘要随三态更新。
 - Kotlin 改动较多且本地无 Gradle 无法编译验证，靠 CI 首构建检验：新文件 FlboxTestService.kt、MainActivity（startVpn 透传 splitOn/splitAllow、listApps 图标、四条测速通道）、FlboxVpnService（splitOn/splitAllow 消费）、清单加服务声明；Dart analyze 与 Go 全包测试本地已过。
+- 0.47 构建成功（#49，41799820417）且真机首测：**界面未闪退**（进程隔离达成），但测速停在 23/47 不再前进。用户日志截图定性：38.7 秒全部 start 行打完（界面侧统一记录）、done 行自 40.26 起以轮询批次落盘（同毫秒多行＝轮询消费特征）、start 与 done 之间无「test service unavailable」行——服务路径确实在跑，测试进程在约 23 个完成处以与旧版相同的墙死/楔（同进程内旧版的闪退点），区别只是这次死在测试进程里。修法见 0.48。
+
+## 0.48：测速停滞自动重启续测（用户 2026-11-04：0.47 卡在 23/47）
+- 机制：单轮启动视为可消耗品。界面轮询 15 秒无新结果（原 25 秒）即判该轮已死/楔死，调新通道 `killTestProcess` 按进程名（包名＋:tasks、同 UID 可杀）强杀测试进程，再只带未测节点重新写任务、拉起服务续测；最多 4 轮，一轮零产出即停。每轮开始前都先 kill（上一轮正常结束残留的进程一并清掉，保证每轮都是全新进程——旧版证据显示那堵墙疑似按进程生命周期累计）。结果按节点名合并回同一张延迟表，已测的不重测。
+- MainActivity 新增 killTestProcess（ActivityManager 查 runningAppProcesses 按名 killProcess）；FlboxTestService 与 Go 侧不动。停滞窗取舍：探针上限 12 秒，一整波 8 个同时超时时结果间隔可达约 12 秒，15 秒留了余量；误判停滞的代价仅是重测在飞的至多 8 个，无正确性损失。
