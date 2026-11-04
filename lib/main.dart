@@ -375,11 +375,11 @@ Color _delayColor(int? ms) {
 /// in-class helpers _translate and _restartCoreInPlace get away
 /// with in-class closures because their methods hold nothing
 /// else; do not copy that pattern into a big method.)
-Future<void> _xrayStartInIsolate(String config) =>
-    Isolate.run(() => CoreBridge().xrayStart(config, 0));
+Future<void> _xrayTestStartInIsolate(String config, int port) =>
+    Isolate.run(() => CoreBridge().xrayTestStart(config, port));
 
-Future<void> _xrayStopInIsolate() =>
-    Isolate.run(() => CoreBridge().xrayStop());
+Future<void> _xrayTestStopInIsolate(int port) =>
+    Isolate.run(() => CoreBridge().xrayTestStop(port));
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -783,7 +783,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// same tunnel, which is what a manual stop/start did, but
   /// automatically. Debounced: network flaps settle first.
   Future<void> _onNetworkChanged() async {
-    if (!_running || _busy || _testing) return;
+    // A running speed test no longer owns the main instance
+    // (it uses transient side instances), so it must not block
+    // the network-change restart of the live session.
+    if (!_running || _busy) return;
     final last = _lastCoreRestart;
     if (last != null &&
         DateTime.now().difference(last) < const Duration(seconds: 15)) {
@@ -1928,12 +1931,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _toggleCore() async {
     if (_busy) return;
-    // The speed test owns the core instance while it runs;
-    // a toggle here would fight it for the same singleton.
-    if (_testing) {
-      _toast('测速中，等测速跑完再操作');
-      return;
-    }
     if (_running) {
       await _stopCore();
       return;
@@ -2079,37 +2076,31 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Sequential latency test: each node is started on its own,
-  /// probed through the standard 7890 mixed inbound, then the
-  /// next one starts. The previously running node (if any) is
-  /// restored afterwards.
+  /// Parallel latency test on transient per-node instances:
+  /// six workers each start a throwaway core instance for one
+  /// node (the node's own single-node config, its inbound moved
+  /// to a private port), probe it, and close it. The main
+  /// instance - and with it any live VPN session - is never
+  /// touched: nothing needs restoring afterwards, the session
+  /// keeps carrying traffic while the test flies, and the user
+  /// is NOT locked out of other operations meanwhile.
   ///
-  /// This replaces the combined-instance design (TranslateAll:
-  /// one instance holding every outbound at once, one listener
-  /// port per node, six parallel probes). That design
-  /// flash-crashed the app on the user's phone across 0.39-0.41:
-  /// first blamed on UI-thread blocking (0.40 moved the work to
-  /// a worker isolate), then the move itself broke on an
-  /// unsendable closure (0.41, top-level helpers) - and once the
-  /// work finally ran, it STILL crashed. The crash therefore
-  /// lives in starting the combined instance: dozens of
-  /// outbounds (including protocol types never exercised
-  /// individually) all instantiated at once. A node's own
-  /// single config is the code path daily use proves, so the
-  /// test now rides exactly on it, one node at a time.
+  /// History: the test began as ONE combined instance holding
+  /// every outbound at once (TranslateAll), which flash-crashed
+  /// the app on the user's phone (0.39-0.41). The 0.42 fallback
+  /// swapped the main instance node by node - correct, but the
+  /// better part of a minute for a big profile, and it had to
+  /// refuse toggles and node switches for the duration; the
+  /// user sent that back as too slow. Per-node transient
+  /// instances keep every start in the exact shape a daily
+  /// connection proves, just six at a time on side ports.
   ///
-  /// Slower than the parallel design, but each node's name is
-  /// logged BEFORE it starts: if one node's outbound still
-  /// manages to kill the process, the log page's last
-  /// "speed test:" line names the culprit. A node's ordinary
-  /// start or probe failure marks it timed out and the run
-  /// continues with the next node.
+  /// A node's name is logged before its instance starts, so a
+  /// start that still manages to kill the process names its
+  /// culprit on the log page; ordinary failures just mark the
+  /// node timed out and the run continues.
   Future<void> _testAll() async {
-    if (_testing || _busy || _profile == null) return;
-    final wasRunning = _running;
-    final prevNode = _selectedNode;
-    final prevConfig =
-        prevNode != null ? _profile!.configs[prevNode] : null;
+    if (_testing || _profile == null) return;
     final entries = <MapEntry<String, String>>[
       for (final n in _profile!.nodes)
         if (!isInfoNode(n.name) && _profile!.configs[n.name] != null)
@@ -2120,30 +2111,38 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _testing = true;
       _delays = {};
     });
-    try {
-      for (final entry in entries) {
-        if (!mounted) break;
+    var next = 0;
+    Future<void> worker() async {
+      while (next < entries.length) {
+        final i = next++;
+        final entry = entries[i];
+        final port = 20100 + i;
         _logEvent('speed test: ${entry.key}');
         int? ms;
+        var started = false;
         try {
-          await _xrayStartInIsolate(entry.value);
-          ms = await _probePort(7890);
+          await _xrayTestStartInIsolate(entry.value, port);
+          started = true;
+          ms = await _probePort(port);
         } catch (e) {
           _logEvent('speed test: ${entry.key} failed: $e');
           ms = null;
+        } finally {
+          if (started) {
+            try {
+              await _xrayTestStopInIsolate(port);
+            } catch (_) {}
+          }
         }
         if (mounted) {
           setState(() => _delays = {..._delays, entry.key: ms});
         }
       }
+    }
+
+    try {
+      await Future.wait([for (var i = 0; i < 6; i++) worker()]);
     } finally {
-      try {
-        if (wasRunning && prevConfig != null) {
-          await _xrayStartInIsolate(prevConfig);
-        } else if (!wasRunning) {
-          await _xrayStopInIsolate();
-        }
-      } catch (_) {}
       if (mounted) setState(() => _testing = false);
     }
   }
@@ -2171,14 +2170,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _selectNode(String name) async {
     if (name == _selectedNode) return;
-    // During a speed test the test loop owns the core instance;
-    // a selection restart would collide with the node it is
-    // currently starting. The pick-fastest flow calls this
-    // after the test has finished, so it is unaffected.
-    if (_testing) {
-      _toast('测速中，等测速跑完再切节点');
-      return;
-    }
     setState(() => _selectedNode = name);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('selected_node', name);
@@ -3684,7 +3675,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.42.0 · app.flbox · Xray 内核',
+              'FlBox 0.43.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

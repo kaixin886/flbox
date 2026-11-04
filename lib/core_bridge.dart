@@ -16,6 +16,8 @@ typedef _TranslateAllNative = Pointer<Utf8> Function(
 );
 typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
 typedef _StartDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
+typedef _TestStopNative = Pointer<Utf8> Function(Int32);
+typedef _TestStopDart = Pointer<Utf8> Function(int);
 typedef _SetupNative = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
@@ -95,6 +97,12 @@ class CoreBridge {
     _xrayStart = lib.lookupFunction<_StartNative, _StartDart>(
       'FlboxXrayStart',
     );
+    _xrayTestStart = lib.lookupFunction<_StartNative, _StartDart>(
+      'FlboxXrayTestStart',
+    );
+    _xrayTestStop = lib.lookupFunction<_TestStopNative, _TestStopDart>(
+      'FlboxXrayTestStop',
+    );
     _xrayStop = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStop');
     _xrayStatus = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayStatus');
     _xrayTraffic = lib.lookupFunction<_NoArg, _NoArg>('FlboxXrayTraffic');
@@ -152,6 +160,8 @@ class CoreBridge {
   late final _TranslateNative _xrayTranslate;
   late final _TranslateAllNative _xrayTranslateAll;
   late final _StartDart _xrayStart;
+  late final _StartDart _xrayTestStart;
+  late final _TestStopDart _xrayTestStop;
   late final _NoArg _xrayStop;
   late final _NoArg _xrayStatus;
   late final _NoArg _xrayTraffic;
@@ -240,6 +250,22 @@ class CoreBridge {
 
   void xrayStop() {
     final err = _take(_xrayStop());
+    if (err != null) throw CoreException(err);
+  }
+
+  /// Starts a throwaway instance running [configJson] (a node's
+  /// own single-node config) with its mixed inbound moved to
+  /// [port], for the bulk speed test. The main instance is not
+  /// touched. Throws CoreException on failure.
+  void xrayTestStart(String configJson, int port) {
+    final arg = configJson.toNativeUtf8();
+    final err = _take(_xrayTestStart(arg, port));
+    malloc.free(arg);
+    if (err != null) throw CoreException(err);
+  }
+
+  void xrayTestStop(int port) {
+    final err = _take(_xrayTestStop(port));
     if (err != null) throw CoreException(err);
   }
 

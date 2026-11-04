@@ -231,6 +231,26 @@ func FlboxXrayStop() (out *C.char) {
 	return recordErr(xrayStop())
 }
 
+//export FlboxXrayTestStart
+func FlboxXrayTestStart(configJSON *C.char, port C.int) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
+	return recordErr(xrayTestStart(C.GoString(configJSON), int(port)))
+}
+
+//export FlboxXrayTestStop
+func FlboxXrayTestStop(port C.int) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = C.CString(fmt.Sprintf("core panic recovered: %v", r))
+		}
+	}()
+	return recordErr(xrayTestStop(int(port)))
+}
+
 //export FlboxXrayStatus
 func FlboxXrayStatus() *C.char {
 	return C.CString(xrayStatus())

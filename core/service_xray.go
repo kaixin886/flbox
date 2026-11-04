@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -170,4 +171,73 @@ func xrayStop() error {
 	err := xInst.Close()
 	xInst = nil
 	return err
+}
+
+// Transient per-node test instances for the bulk speed test.
+// Each test runs a node's OWN single-node config - the shape
+// daily connections prove - as a throwaway instance on a
+// private port, without touching the main instance: a live VPN
+// session (whose core listens on 7890 and is fed by the
+// sing-box forwarder) keeps running while tests fly, nothing
+// needs restoring afterwards, and several tests run in
+// parallel. This replaced two failed designs: one combined
+// instance holding every outbound at once (flash-crashed the
+// app on the user's phone), and swapping the main instance
+// node by node (worked, but took the better part of a minute
+// and locked the user out meanwhile).
+var (
+	testMu    sync.Mutex
+	testInsts = map[int]*xcore.Instance{}
+)
+
+func xrayTestStart(configJSON string, port int) error {
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return fmt.Errorf("test config is not json: %w", err)
+	}
+	inbounds, ok := cfg["inbounds"].([]any)
+	if !ok || len(inbounds) == 0 {
+		return errors.New("test config has no inbound")
+	}
+	first, ok := inbounds[0].(map[string]any)
+	if !ok {
+		return errors.New("test config inbound malformed")
+	}
+	first["port"] = port
+	// Detach the log from the shared error file: many instances
+	// writing one file concurrently would interleave and fight.
+	cfg["log"] = map[string]any{"loglevel": "warning", "access": "none"}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if xAssetDir != "" {
+		// Rule-mode configs in the test set resolve geo entries
+		// from the same asset dir as the main instance (whose
+		// start normally sets this env var first).
+		os.Setenv(platform.AssetLocation, xAssetDir)
+	}
+	testMu.Lock()
+	defer testMu.Unlock()
+	if old := testInsts[port]; old != nil {
+		old.Close()
+		delete(testInsts, port)
+	}
+	inst, err := xcore.StartInstance("json", raw)
+	if err != nil {
+		return err
+	}
+	testInsts[port] = inst
+	return nil
+}
+
+func xrayTestStop(port int) error {
+	testMu.Lock()
+	defer testMu.Unlock()
+	inst := testInsts[port]
+	if inst == nil {
+		return nil
+	}
+	delete(testInsts, port)
+	return inst.Close()
 }
