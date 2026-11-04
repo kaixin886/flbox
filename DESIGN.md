@@ -179,3 +179,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.28（2026-11-04）文件选择器白名单撤回：yaml 在用户 ROM 上被灰掉
 
 - 0.25 的 FileType.custom 扩展名白名单真机翻车：用户截图实锤 config.yaml 在系统选择器里不可选（同目录 .json 可选）。根子是安卓选择器按扩展名→MIME 映射过滤、yaml 无标准映射。按预定 fallback 撤回：选择器恢复 FileType.any，防加错改为选后双闸——①扩展名拦截（非 yaml/yml/json/txt 当场 toast 拒绝）；②ConvertImport 内容校验（不是配置的文件导不进去）。代价：无关文件恢复「能点」，但点错也只是被拒、导不进来。
+
+## 0.29（2026-11-04）去普通模式/普通导航栏、运行中切订阅、通知系统、排版收拾
+
+- 用户拍板删**普通模式**：产品只剩 VPN 模式。删 _modeVpn 全部分支（启停/对账/翻译 vpn 恒 true）、设置里「模式」整节删除；FlboxCoreService 与通道方法留置不用（无害）。仪表盘状态文案恒为 VPN 口径。删**普通导航栏**：NavStyle 只剩液态玻璃/液态玻璃（滑动），_PlainNavBar 删除；旧的 nav_style 索引错位一格（原 2=滑动超出范围回落默认滑动，无感）。
+- **运行中切订阅**：_switchSub 不再拦截，激活新订阅后原地 xrayStart 重启核心（同规则/全局切换的做法，VPN 不断）；重启失败则整体停止并告知。
+- **通知**（设置「通知」节两开关，均默认开）：①启动通知——启动成功后经运行中核心实测一发 generate_204 延迟（顺带回填节点卡延迟）＋Cloudflare 200KB 下载测速，拼「节点·延迟·速度」走新通道方法 notifyStatus（MainActivity，独立 flbox_status 渠道）；②订阅自动更新通知——前台静默更新成功即发，后台 WorkManager 更新把名字存 bg_updated_names、下次打开 App 时补发（后台 isolate 无通道可用）。
+- 排版：代理页工具栏标题去掉与页签重复的订阅名、只留节点数，图标按钮改 compact（此前排序图标被挤出屏幕）；配置页三个导入大按钮合并为一张列表卡（三行带图标）。

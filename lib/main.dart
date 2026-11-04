@@ -58,6 +58,7 @@ Future<void> _bgRefreshDueSubs() async {
   final docs = await getApplicationDocumentsDirectory();
   final nowMs = DateTime.now().millisecondsSinceEpoch;
   var changed = false;
+  final updatedNames = <String>[];
   for (final sub in subs) {
     if (!sub.autoUpdate || sub.url == null || sub.updateViaProxy) {
       continue;
@@ -81,7 +82,7 @@ Future<void> _bgRefreshDueSubs() async {
       }
       final profile = CoreBridge().translateXray(
         text,
-        vpn: false,
+        vpn: true,
         logPath: '',
         rules: false,
       );
@@ -90,6 +91,7 @@ Future<void> _bgRefreshDueSubs() async {
       sub.nodeCount = profile.nodes.length;
       sub.updatedAtMs = DateTime.now().millisecondsSinceEpoch;
       changed = true;
+      updatedNames.add(sub.name);
     } catch (_) {
       continue;
     } finally {
@@ -101,6 +103,7 @@ Future<void> _bgRefreshDueSubs() async {
       'subs_v2',
       jsonEncode([for (final s in subs) s.toJson()]),
     );
+    await prefs.setString('bg_updated_names', jsonEncode(updatedNames));
     await prefs.setBool('bg_subs_changed', true);
   }
 }
@@ -208,7 +211,6 @@ const _destinations = [
 // Navigation bar appearance, switchable in Settings. The sliding glass
 // bar is the default.
 enum NavStyle {
-  plain('普通导航栏'),
   glass('液态玻璃'),
   slidingGlass('液态玻璃（滑动）');
 
@@ -327,7 +329,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   String? _selectedNode;
   bool _running = false;
   bool _busy = false;
-  bool _modeVpn = true;
   int _tunFd = 0;
   String _logPath = '';
   String? _profileYaml;
@@ -340,6 +341,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _geoReady = false;
   Set<String> _favNodes = {};
   bool _autoConnect = false;
+  bool _notifyOnStart = true;
+  bool _notifySubUpdate = true;
   int _subAutoIntervalHours = 24;
   Set<String> _bypassPkgs = {};
   bool _netBlocked = false;
@@ -439,9 +442,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _restore() async {
     final prefs = await SharedPreferences.getInstance();
-    _modeVpn = prefs.getBool('mode_vpn') ?? true;
     _rulesMode = prefs.getBool('rules_mode') ?? false;
     _autoConnect = prefs.getBool('auto_connect') ?? false;
+    _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
+    _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
     _subAutoIntervalHours = prefs.getInt('sub_auto_interval_hours') ?? 24;
     final legacySubAuto = prefs.getBool('sub_auto_update') ?? false;
     final favRaw = prefs.getString('fav_nodes');
@@ -504,7 +508,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           _profileYaml = yaml;
           final profile = CoreBridge().translateXray(
             yaml,
-            vpn: _modeVpn,
+            vpn: true,
             logPath: _logPath,
             rules: _rulesMode,
           );
@@ -600,8 +604,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Future<void> _resyncCoreState() async {
     try {
       final coreRunning = CoreBridge().xrayStatus().contains('running=true');
-      if (_modeVpn) {
-        final vpnActive =
+      final vpnActive =
             await _vpnChannel.invokeMethod<bool>('vpnActive') ?? false;
         if (vpnActive && coreRunning) {
           final fd = await _vpnChannel.invokeMethod<int>('tunFd') ?? -1;
@@ -644,24 +647,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             CoreBridge().xrayStop();
           } catch (_) {}
         }
-      } else {
-        final hostActive =
-            await _vpnChannel.invokeMethod<bool>('coreActive') ?? false;
-        if (coreRunning) {
-          _logEvent('resync: adopted live local core');
-          if (!hostActive) {
-            await _vpnChannel.invokeMethod('startCoreService');
-          }
-          setState(() {
-            _running = true;
-            _startedAt = DateTime.now();
-          });
-          _startPolling();
-        } else if (hostActive) {
-          _logEvent('resync: core host without core, stopping host');
-          await _vpnChannel.invokeMethod('stopCoreService');
-        }
-      }
     } catch (_) {}
   }
 
@@ -808,6 +793,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     setState(() => _autoConnect = value);
   }
 
+  Future<void> _setNotifyOnStart(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('notify_on_start', value);
+    setState(() => _notifyOnStart = value);
+  }
+
+  Future<void> _setNotifySubUpdate(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('notify_sub_update', value);
+    setState(() => _notifySubUpdate = value);
+  }
+
   Future<void> _setSubAutoInterval(int hours) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('sub_auto_interval_hours', hours);
@@ -863,7 +860,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _logPath = '${docs.path}/xray-error.log';
     final profile = CoreBridge().translateXray(
       text,
-      vpn: _modeVpn,
+      vpn: true,
       logPath: _logPath,
       rules: _rulesMode,
     );
@@ -899,7 +896,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final kind = converted['kind'] as String;
     final profile = CoreBridge().translateXray(
       text,
-      vpn: _modeVpn,
+      vpn: true,
       logPath: _logPath,
       rules: _rulesMode,
     );
@@ -925,16 +922,31 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _switchSub(SubProfile sub) async {
     if (sub.id == _activeSubId) return;
-    if (_running) {
-      _toast('先停止再切换订阅');
-      return;
-    }
     try {
       final docs = await getApplicationDocumentsDirectory();
       final text = await _subFile(docs, sub.id).readAsString();
       _activeSubId = sub.id;
       await _persistSubs();
       await _activateYaml(text, name: sub.name);
+      if (_running) {
+        // Switch the exit in place on the same tunnel (like the
+        // rule/global switch): only the core restarts, the VPN
+        // never goes down.
+        final config = _profile?.configs[_selectedNode];
+        if (config != null) {
+          try {
+            CoreBridge().xrayStart(config, 0);
+            _logEvent(
+              'core restarted for subscription switch (${sub.name})',
+            );
+            _startedAt = DateTime.now();
+          } catch (e) {
+            await _stopCore();
+            _toast('切换后重启失败，已停止：$e');
+            return;
+          }
+        }
+      }
       _toast('已切换到 ${sub.name}');
     } catch (e) {
       _toast('切换失败：$e');
@@ -1021,7 +1033,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         try {
           final p = CoreBridge().translateXray(
             targetYaml,
-            vpn: _modeVpn,
+            vpn: true,
             logPath: '',
             rules: _rulesMode,
           );
@@ -1052,7 +1064,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       }
       final profile = CoreBridge().translateXray(
         newYaml,
-        vpn: _modeVpn,
+        vpn: true,
         logPath: _logPath,
         rules: _rulesMode,
       );
@@ -1198,7 +1210,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       }
       final profile = CoreBridge().translateXray(
         yaml,
-        vpn: _modeVpn,
+        vpn: true,
         logPath: _logPath,
         rules: _rulesMode,
       );
@@ -1313,6 +1325,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final prefs = await SharedPreferences.getInstance();
       if (prefs.getBool('bg_subs_changed') != true) return;
       await prefs.remove('bg_subs_changed');
+      final bgNamesRaw = prefs.getString('bg_updated_names');
+      await prefs.remove('bg_updated_names');
       final raw = prefs.getString('subs_v2');
       if (raw == null) return;
       final list = jsonDecode(raw) as List<dynamic>;
@@ -1334,6 +1348,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             );
           }
         }
+      }
+      if (bgNamesRaw != null && _notifySubUpdate) {
+        try {
+          final names = (jsonDecode(bgNamesRaw) as List).cast<String>();
+          if (names.isNotEmpty) {
+            unawaited(_notify('订阅已自动更新', names.join('、')));
+          }
+        } catch (_) {}
       }
     } catch (_) {}
   }
@@ -1390,7 +1412,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _logPath = '${docs.path}/xray-error.log';
         final profile = CoreBridge().translateXray(
           text,
-          vpn: _modeVpn,
+          vpn: true,
           logPath: _logPath,
           rules: _rulesMode,
         );
@@ -1410,6 +1432,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             'auto-update: ${updateSub.name} refreshed '
             '(${profile.nodes.length} nodes)',
           );
+          _notifySubAutoUpdated(updateSub.name);
         } else {
           _toast('订阅已更新：${profile.nodes.length} 个节点');
         }
@@ -1499,19 +1522,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// in Dart leaves a black-holing tunnel behind, which reads
   /// as "the VPN won't turn off".
   Future<void> _stopCore() async {
-    if (_modeVpn) {
-      try {
-        CoreBridge().vpnForwardStop();
-      } catch (_) {}
-    }
+    try {
+      CoreBridge().vpnForwardStop();
+    } catch (_) {}
     try {
       CoreBridge().xrayStop();
     } catch (_) {}
-    if (_modeVpn) {
-      try {
-        await _vpnChannel.invokeMethod('stopVpn');
-      } catch (_) {}
-      _tunFd = 0;
+    try {
+      await _vpnChannel.invokeMethod('stopVpn');
+    } catch (_) {}
+    _tunFd = 0;
       // "Down" means the service is actually destroyed, not
       // merely flagged inactive: a VpnService the system still
       // holds a VPN binding on stays alive (and its key icon
@@ -1528,19 +1548,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           down = true;
         }
       }
-      if (down) {
-        _logEvent('core stopped (vpn service down)');
-      } else {
-        _logEvent('stop: vpn service still alive, retrying stop');
-        try {
-          await _vpnChannel.invokeMethod('stopVpn');
-        } catch (_) {}
-      }
+    if (down) {
+      _logEvent('core stopped (vpn service down)');
     } else {
+      _logEvent('stop: vpn service still alive, retrying stop');
       try {
-        await _vpnChannel.invokeMethod('stopCoreService');
+        await _vpnChannel.invokeMethod('stopVpn');
       } catch (_) {}
-      _logEvent('core stopped');
     }
     _stopPolling();
     if (mounted) setState(() => _running = false);
@@ -1559,96 +1573,127 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
     setState(() => _busy = true);
     try {
-      var fd = 0;
-      if (_modeVpn) {
-        final prep = await _vpnChannel.invokeMethod<String>('prepare');
-        if (prep != 'granted') {
-          _toast('未授予 VPN 权限');
-          return;
-        }
-        // A tunnel left over from a previous engine or process
-        // (its stop never landed) would make the service's start a
-        // no-op and hang the fd wait below forever. Clear it first.
-        final stale =
-            await _vpnChannel.invokeMethod<bool>('vpnActive') ?? false;
-        if (stale) {
-          _logEvent('start: clearing stale VPN tunnel first');
-          await _vpnChannel.invokeMethod('stopVpn');
-          await Future<void>.delayed(const Duration(milliseconds: 300));
-        }
-        _tunReady = Completer<int>();
-        await _vpnChannel.invokeMethod('startVpn', {
-          'bypass': _bypassPkgs.toList(),
-        });
-        fd = await _tunReady!.future.timeout(const Duration(seconds: 15));
-        _tunFd = fd;
-      } else {
-        // Local mode: a foreground service hosts the process while the
-        // core runs (reference clients never run a core in a bare UI
-        // process — it gets frozen and its traffic silently dropped).
-        // The service promotes itself to foreground FIRST, before the
-        // core opens any socket.
-        await _vpnChannel.invokeMethod('startCoreService');
+      final prep = await _vpnChannel.invokeMethod<String>('prepare');
+      if (prep != 'granted') {
+        _toast('未授予 VPN 权限');
+        return;
       }
+      // A tunnel left over from a previous engine or process
+      // (its stop never landed) would make the service's start a
+      // no-op and hang the fd wait below forever. Clear it first.
+      final stale =
+          await _vpnChannel.invokeMethod<bool>('vpnActive') ?? false;
+      if (stale) {
+        _logEvent('start: clearing stale VPN tunnel first');
+        await _vpnChannel.invokeMethod('stopVpn');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      }
+      _tunReady = Completer<int>();
+      await _vpnChannel.invokeMethod('startVpn', {
+        'bypass': _bypassPkgs.toList(),
+      });
+      final fd = await _tunReady!.future.timeout(const Duration(seconds: 15));
+      _tunFd = fd;
       await _rotateLogIfHuge();
       CoreBridge().xrayStart(config, 0);
-      if (_modeVpn) {
-        // The packet path: sing-box owns the tunnel fd and forwards
-        // every flow into the mixed inbound Xray just opened.
-        await _ensureSbSetup();
-        CoreBridge().vpnForwardStart(fd);
-        _logEvent('vpn forwarder started (sing-box tun -> 127.0.0.1:7890)');
-      }
-      _logEvent(
-          'core started (vpn=$_modeVpn, rules=$_rulesMode, node=$_selectedNode)');
+      // The packet path: sing-box owns the tunnel fd and forwards
+      // every flow into the mixed inbound Xray just opened.
+      await _ensureSbSetup();
+      CoreBridge().vpnForwardStart(fd);
+      _logEvent('vpn forwarder started (sing-box tun -> 127.0.0.1:7890)');
+      _logEvent('core started (rules=$_rulesMode, node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
       _startPolling();
+      unawaited(_notifyStarted());
     } catch (e) {
-      if (_modeVpn) {
-        try {
-          CoreBridge().vpnForwardStop();
-        } catch (_) {}
-        try {
-          CoreBridge().xrayStop();
-        } catch (_) {}
-        try {
-          await _vpnChannel.invokeMethod('stopVpn');
-        } catch (_) {}
-        _tunFd = 0;
-      } else {
-        try {
-          await _vpnChannel.invokeMethod('stopCoreService');
-        } catch (_) {}
-      }
+      try {
+        CoreBridge().vpnForwardStop();
+      } catch (_) {}
+      try {
+        CoreBridge().xrayStop();
+      } catch (_) {}
+      try {
+        await _vpnChannel.invokeMethod('stopVpn');
+      } catch (_) {}
+      _tunFd = 0;
       _toast('启动失败：$e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _setModeVpn(bool vpn) async {
-    if (_running) {
-      _toast('先停止再切换模式');
-      return;
-    }
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('mode_vpn', vpn);
-    setState(() => _modeVpn = vpn);
-    final yaml = _profileYaml;
-    if (yaml != null) {
-      try {
-        final profile = CoreBridge().translateXray(
-          yaml,
-          vpn: vpn,
-          logPath: _logPath,
-          rules: _rulesMode,
-        );
-        setState(() => _profile = profile);
-      } catch (e) {
-        _toast('切换模式失败：$e');
+  /// Posts a status notification through the platform side
+  /// (the flbox_status channel in MainActivity).
+  Future<void> _notify(String title, String text) async {
+    try {
+      await _vpnChannel.invokeMethod('notifyStatus', {
+        'title': title,
+        'text': text,
+      });
+    } catch (_) {}
+  }
+
+  /// The start notification (Settings opt-in, default on): the
+  /// node just started, its live latency probed through the
+  /// running core, and a quick download speed sample.
+  Future<void> _notifyStarted() async {
+    if (!_notifyOnStart) return;
+    final node = _selectedNode;
+    if (node == null) return;
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      if (!_running) return;
+      final latency = await _probePort(7890);
+      if (latency != null && mounted) {
+        setState(() => _delays[node] = latency);
       }
+      final speed = await _probeSpeedMbps();
+      final parts = <String>['节点：$node'];
+      if (latency != null) parts.add('延迟 $latency ms');
+      if (speed != null) {
+        parts.add(speed >= 1
+            ? '速度 ${speed.toStringAsFixed(1)} Mbps'
+            : '速度 ${(speed * 1000).round()} Kbps');
+      }
+      await _notify('FlBox 已启动', parts.join(' · '));
+    } catch (_) {}
+  }
+
+  /// One-shot download sample through the running core for the
+  /// start notification's speed figure: 200 KB from
+  /// Cloudflare's speed endpoint, null when the sample fails.
+  Future<double?> _probeSpeedMbps() async {
+    HttpClient? client;
+    try {
+      client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 6);
+      client.findProxy = (_) => 'PROXY 127.0.0.1:7890';
+      final sw = Stopwatch()..start();
+      final req = await client
+          .getUrl(
+            Uri.parse('https://speed.cloudflare.com/__down?bytes=200000'),
+          )
+          .timeout(const Duration(seconds: 6));
+      final resp = await req.close().timeout(const Duration(seconds: 6));
+      var bytes = 0;
+      await for (final chunk in resp) {
+        bytes += chunk.length;
+      }
+      sw.stop();
+      final secs = sw.elapsedMilliseconds / 1000;
+      if (bytes == 0 || secs <= 0) return null;
+      return bytes * 8 / secs / 1000000;
+    } catch (_) {
+      return null;
+    } finally {
+      client?.close(force: true);
     }
+  }
+
+  void _notifySubAutoUpdated(String name) {
+    if (!_notifySubUpdate) return;
+    unawaited(_notify('订阅已自动更新', name));
   }
 
   Future<int?> _probePort(int port) async {
@@ -1769,8 +1814,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         builder: (_) => _SettingsPage(
           navStyle: _navStyle,
           onNavStyleChanged: _setNavStyle,
-          modeVpn: _modeVpn,
-          onModeChanged: _setModeVpn,
+          notifyOnStart: _notifyOnStart,
+          onNotifyOnStartChanged: _setNotifyOnStart,
+          notifySubUpdate: _notifySubUpdate,
+          onNotifySubUpdateChanged: _setNotifySubUpdate,
           bypassPkgs: _bypassPkgs,
           onBypassChanged: _setBypassPkgs,
           batteryIgnored: _batteryIgnored,
@@ -1826,7 +1873,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      extendBody: _navStyle != NavStyle.plain,
+      extendBody: true,
       body: PageView(
         controller: _pageController,
         onPageChanged: (index) => setState(() => _index = index),
@@ -1836,7 +1883,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             running: _running,
             hasProfile: _profile != null,
             currentNode: _selectedNode,
-            modeVpn: _modeVpn,
             traffic: _traffic,
             rates: _rateHistory,
             startedAt: _startedAt,
@@ -1886,7 +1932,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       ),
       bottomNavigationBar: RepaintBoundary(
         child: switch (_navStyle) {
-        NavStyle.plain => _PlainNavBar(index: _index, onTap: _select),
         NavStyle.glass => _GlassNavBar(
             index: _index,
             destinations: _destinations,
@@ -1917,31 +1962,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                   : Icon(_running ? Icons.stop : Icons.play_arrow, size: 30),
             )
           : null,
-    );
-  }
-}
-
-class _PlainNavBar extends StatelessWidget {
-  const _PlainNavBar({required this.index, required this.onTap});
-
-  final int index;
-  final ValueChanged<int> onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return NavigationBar(
-      selectedIndex: index,
-      onDestinationSelected: onTap,
-      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-      indicatorColor: _accent.withValues(alpha: 0.15),
-      destinations: [
-        for (final d in _destinations)
-          NavigationDestination(
-            icon: Icon(d.icon),
-            selectedIcon: Icon(d.icon, color: _accent),
-            label: d.label,
-          ),
-      ],
     );
   }
 }
@@ -2321,7 +2341,6 @@ class _DashboardPage extends StatelessWidget {
     required this.running,
     required this.hasProfile,
     required this.currentNode,
-    required this.modeVpn,
     required this.traffic,
     required this.rates,
     required this.startedAt,
@@ -2339,7 +2358,6 @@ class _DashboardPage extends StatelessWidget {
   final bool running;
   final bool hasProfile;
   final String? currentNode;
-  final bool modeVpn;
   final ValueListenable<_Traffic> traffic;
   final ValueListenable<List<_RateSample>> rates;
   final DateTime? startedAt;
@@ -2432,9 +2450,7 @@ class _DashboardPage extends StatelessWidget {
         .withValues(alpha: 0.5);
     final String statusDetail;
     if (running) {
-      statusDetail = modeVpn
-          ? 'Xray 核心 · sing-box 数据通路 · VPN 模式'
-          : 'Xray 内核 · 普通模式 127.0.0.1:7890';
+      statusDetail = 'Xray 核心 · sing-box 数据通路 · VPN 模式';
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
     } else {
@@ -2786,8 +2802,10 @@ class _SettingsPage extends StatefulWidget {
   const _SettingsPage({
     required this.navStyle,
     required this.onNavStyleChanged,
-    required this.modeVpn,
-    required this.onModeChanged,
+    required this.notifyOnStart,
+    required this.onNotifyOnStartChanged,
+    required this.notifySubUpdate,
+    required this.onNotifySubUpdateChanged,
     required this.bypassPkgs,
     required this.onBypassChanged,
     required this.batteryIgnored,
@@ -2804,8 +2822,10 @@ class _SettingsPage extends StatefulWidget {
 
   final NavStyle navStyle;
   final ValueChanged<NavStyle> onNavStyleChanged;
-  final bool modeVpn;
-  final ValueChanged<bool> onModeChanged;
+  final bool notifyOnStart;
+  final ValueChanged<bool> onNotifyOnStartChanged;
+  final bool notifySubUpdate;
+  final ValueChanged<bool> onNotifySubUpdateChanged;
   final Set<String> bypassPkgs;
   final ValueChanged<Set<String>> onBypassChanged;
   final bool batteryIgnored;
@@ -2825,7 +2845,6 @@ class _SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<_SettingsPage> {
   late NavStyle _navStyle = widget.navStyle;
-  late bool _modeVpn = widget.modeVpn;
   late int _autoIntervalHours = widget.autoIntervalHours;
 
   @override
@@ -2855,35 +2874,6 @@ class _SettingsPageState extends State<_SettingsPage> {
                 widget.onNavStyleChanged(style);
               },
             ),
-          const SizedBox(height: 24),
-          Text('模式', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('系统代理（VPN）'),
-            subtitle: Text('接管全机流量，需要授予 VPN 权限',
-                style: TextStyle(color: muted)),
-            trailing: _modeVpn
-                ? const Icon(Icons.check, color: _accent)
-                : null,
-            onTap: () {
-              setState(() => _modeVpn = true);
-              widget.onModeChanged(true);
-            },
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('普通模式'),
-            subtitle: Text('只在本机 127.0.0.1:7890 提供代理',
-                style: TextStyle(color: muted)),
-            trailing: !_modeVpn
-                ? const Icon(Icons.check, color: _accent)
-                : null,
-            onTap: () {
-              setState(() => _modeVpn = false);
-              widget.onModeChanged(false);
-            },
-          ),
           const SizedBox(height: 24),
           Text('代理', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
@@ -2948,6 +2938,25 @@ class _SettingsPageState extends State<_SettingsPage> {
             value: widget.autoConnect,
             onChanged: widget.onAutoConnectChanged,
           ),
+          const SizedBox(height: 24),
+          Text('通知', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('启动通知'),
+            subtitle: Text('启动成功后推送通知：当前节点、实测延迟与速度',
+                style: TextStyle(color: muted)),
+            value: widget.notifyOnStart,
+            onChanged: widget.onNotifyOnStartChanged,
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('订阅自动更新通知'),
+            subtitle: Text('订阅自动更新成功后推送通知',
+                style: TextStyle(color: muted)),
+            value: widget.notifySubUpdate,
+            onChanged: widget.onNotifySubUpdateChanged,
+          ),
           ListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('新订阅默认更新周期'),
@@ -3004,7 +3013,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.28.0 · app.flbox · Xray 内核',
+              'FlBox 0.29.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -3143,25 +3152,30 @@ class _ProxiesPageState extends State<ProxiesPage> {
           ],
           Row(
             children: [
-              Text(
-                widget.profileName != null
-                    ? '${widget.profileName} · ${profile.nodes.length} 个节点'
-                    : '${profile.nodes.length} 个节点',
-                style: TextStyle(color: muted),
+              Expanded(
+                child: Text(
+                  '${profile.nodes.length} 个节点',
+                  style: TextStyle(color: muted),
+                ),
               ),
-              const Spacer(),
               IconButton(
                 icon: const Icon(Icons.link),
                 tooltip: '导入单节点链接',
+                visualDensity: VisualDensity.compact,
                 onPressed: widget.onImportLink,
               ),
               IconButton(
                 icon: const Icon(Icons.add),
                 tooltip: '手动添加节点',
+                visualDensity: VisualDensity.compact,
                 onPressed: widget.onAddNode,
               ),
               FilledButton.tonal(
                 onPressed: widget.testing ? null : widget.onTestAll,
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
                 child: Text(widget.testing
                     ? '测速中 ${widget.delays.length}/${profile.nodes.length}'
                     : '全部测速'),
@@ -3169,6 +3183,7 @@ class _ProxiesPageState extends State<ProxiesPage> {
               IconButton(
                 icon: const Icon(Icons.bolt),
                 tooltip: '测速并选最快',
+                visualDensity: VisualDensity.compact,
                 onPressed: widget.testing ? null : widget.onPickFastest,
               ),
               IconButton(
@@ -4153,27 +4168,36 @@ class ProfilesPage extends StatelessWidget {
               const SizedBox(height: 8),
             ],
             const SizedBox(height: 12),
-            SizedBox(
-              height: 48,
-              child: FilledButton(
-                onPressed: onImport,
-                child: const Text('从文件导入'),
+            Container(
+              decoration: BoxDecoration(
+                color: _cardColor(context),
+                borderRadius: BorderRadius.circular(16),
               ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 48,
-              child: FilledButton.tonal(
-                onPressed: onImportUrl,
-                child: const Text('从订阅链接导入'),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 48,
-              child: FilledButton.tonal(
-                onPressed: onImportLink,
-                child: const Text('从单节点链接导入'),
+              child: Column(
+                children: [
+                  ListTile(
+                    leading:
+                        const Icon(Icons.folder_open, color: _accent),
+                    title: const Text('从文件导入'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: onImport,
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.cloud_download_outlined,
+                        color: _accent),
+                    title: const Text('从订阅链接导入'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: onImportUrl,
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.link, color: _accent),
+                    title: const Text('从单节点链接导入'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: onImportLink,
+                  ),
+                ],
               ),
             ),
           ],

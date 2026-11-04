@@ -2,6 +2,9 @@ package com.kaixin886.flbox
 
 import android.Manifest
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
@@ -22,6 +25,7 @@ object VpnBridge {
 }
 
 class MainActivity : FlutterActivity() {
+
     private var pendingPrepare: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -121,6 +125,12 @@ class MainActivity : FlutterActivity() {
                     startActivity(intent)
                     result.success(null)
                 }
+                "notifyStatus" -> {
+                    val title = call.argument<String>("title") ?: "FlBox"
+                    val text = call.argument<String>("text") ?: ""
+                    showStatusNotification(title, text)
+                    result.success(null)
+                }
                 "requestNotifications" -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         @Suppress("DEPRECATION")
@@ -211,6 +221,41 @@ class MainActivity : FlutterActivity() {
         return apps.sortedBy { it["label"]?.lowercase() ?: "" }
     }
 
+    // Status notifications (start summary, subscription
+    // auto-update): a separate low-key channel from the VPN
+    // foreground notification, posted on demand from Dart.
+    private fun showStatusNotification(title: String, text: String) {
+        try {
+            val manager = getSystemService(NotificationManager::class.java)
+                ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(
+                    NotificationChannel(
+                        STATUS_CHANNEL_ID,
+                        "状态通知",
+                        NotificationManager.IMPORTANCE_DEFAULT
+                    )
+                )
+            }
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(this, STATUS_CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+            manager.notify(
+                STATUS_NOTIF_ID,
+                builder
+                    .setContentTitle(title)
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+                    .setAutoCancel(true)
+                    .build()
+            )
+        } catch (_: Exception) {
+        }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_VPN) {
@@ -224,5 +269,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val REQUEST_VPN = 4242
         private const val REQUEST_NOTIFICATIONS = 4243
+        private const val STATUS_CHANNEL_ID = "flbox_status"
+        private const val STATUS_NOTIF_ID = 1001
     }
 }
