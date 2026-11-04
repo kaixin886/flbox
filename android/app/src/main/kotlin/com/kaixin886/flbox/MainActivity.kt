@@ -10,6 +10,9 @@ import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.os.SELinux
+import android.system.Os
+import android.system.OsConstants
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -113,17 +116,21 @@ class MainActivity : FlutterActivity() {
                 lines += "iptables -t $table -A $chain $action"
             }
         }
+        lines += "echo == nat =="
         lines += "iptables -t nat -N FLBOX_NAT 2>/dev/null"
         lines += "iptables -t nat -F FLBOX_NAT"
         steer("FLBOX_NAT", "nat", "-p tcp -j REDIRECT --to-ports 7892")
         lines += "iptables -t nat -C OUTPUT -j FLBOX_NAT 2>/dev/null || iptables -t nat -A OUTPUT -j FLBOX_NAT"
+        lines += "echo == mangle =="
         lines += "iptables -t mangle -N FLBOX_MNG 2>/dev/null"
         lines += "iptables -t mangle -F FLBOX_MNG"
         steer("FLBOX_MNG", "mangle", "-p udp -j TPROXY --on-port 7893 --tproxy-mark 0x2B2C")
         lines += "iptables -t mangle -C OUTPUT -j FLBOX_MNG 2>/dev/null || iptables -t mangle -A OUTPUT -j FLBOX_MNG"
+        lines += "echo == route =="
         lines += "ip rule del fwmark 0x2B2C lookup 100 2>/dev/null"
         lines += "ip rule add fwmark 0x2B2C lookup 100 pref 8000"
         lines += "ip route replace local 0.0.0.0/0 dev lo table 100"
+        lines += "echo == v6 =="
         lines += "ip6tables -N FLBOX_6 2>/dev/null"
         lines += "ip6tables -F FLBOX_6"
         lines += "ip6tables -A FLBOX_6 -m mark --mark 0x2B2B -j RETURN"
@@ -131,10 +138,56 @@ class MainActivity : FlutterActivity() {
         lines += "ip6tables -A FLBOX_6 -p tcp -j DROP"
         lines += "ip6tables -A FLBOX_6 -p udp -j DROP"
         lines += "ip6tables -C OUTPUT -j FLBOX_6 2>/dev/null || ip6tables -A OUTPUT -j FLBOX_6"
-        // The exit code reports whether the hooks landed.
-        lines += "iptables -t nat -C OUTPUT -j FLBOX_NAT"
-        lines += "iptables -t mangle -C OUTPUT -j FLBOX_MNG"
+        // Verification greps the live rule lists instead of
+        // trusting -C exit codes (the 0.59 build reported
+        // failure while its chains were in fact installed),
+        // then dumps the ground truth either way so the
+        // error dialog can show exactly what the kernel has.
+        lines += "echo == verify =="
+        lines += "iptables -t nat -S OUTPUT | grep FLBOX_NAT && iptables -t mangle -S OUTPUT | grep FLBOX_MNG && echo FLBOX_ALL_OK"
+        lines += "iptables -t nat -S OUTPUT"
+        lines += "iptables -t mangle -S OUTPUT"
+        lines += "iptables -t nat -S FLBOX_NAT"
+        lines += "iptables -t mangle -S FLBOX_MNG"
         return lines.joinToString("\n")
+    }
+
+    // The device block for the start-failure dialog, in the
+    // same shape other proxy apps print: app version,
+    // model, Android, kernel, SELinux - the facts a log
+    // reader needs before anything else.
+    private fun buildDeviceInfo(): String {
+        val appLine = try {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            @Suppress("DEPRECATION")
+            val legacyCode = info.versionCode
+            val code = if (Build.VERSION.SDK_INT >= 28) {
+                info.longVersionCode
+            } else {
+                legacyCode.toLong()
+            }
+            "app: ${info.versionName} ($code)"
+        } catch (e: Exception) {
+            "app: unknown"
+        }
+        val kernel = System.getProperty("os.version") ?: "unknown"
+        val pageSize = try {
+            Os.sysconf(OsConstants._SC_PAGESIZE)
+        } catch (e: Exception) {
+            -1L
+        }
+        val pageText = if (pageSize > 0) "${pageSize / 1024} KB" else "unknown"
+        val selinux = if (SELinux.isSELinuxEnforced()) "enforcing" else "permissive"
+        return listOf(
+            appLine,
+            "model: ${Build.MODEL} (${Build.DEVICE})",
+            "android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+            "build: ${Build.ID} ${Build.TAGS}",
+            "abi: ${Build.SUPPORTED_ABIS.joinToString(", ")}",
+            "kernel: $kernel",
+            "page size: $pageText",
+            "selinux: $selinux",
+        ).joinToString("\n")
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -338,6 +391,11 @@ class MainActivity : FlutterActivity() {
                     // eBPF mode steering: installs or clears
                     // the netfilter chains that feed the
                     // daemon's redirect and tproxy listeners.
+                    // Replies with a map: ok plus the script's
+                    // own output, so a failure shows which
+                    // section died and what iptables said -
+                    // a bare boolean cost a whole evening
+                    // in 0.59.
                     val args = call.arguments as? Map<*, *>
                     val install = (args?.get("action") as? String) == "install"
                     val include = (args?.get("includePkgs") as? List<*>)
@@ -346,17 +404,27 @@ class MainActivity : FlutterActivity() {
                         ?.mapNotNull { it as? String } ?: emptyList()
                     Thread {
                         var ok = false
+                        var log = ""
                         try {
                             val script = buildNetRulesScript(install, include, exclude)
                             val proc = ProcessBuilder("su", "-c", script)
                                 .redirectErrorStream(true)
                                 .start()
-                            proc.inputStream.bufferedReader().readText()
-                            ok = proc.waitFor() == 0
+                            val out = proc.inputStream.bufferedReader().readText()
+                            val exit = proc.waitFor()
+                            log = out.trim()
+                            if (log.length > 4000) {
+                                log = log.substring(log.length - 4000)
+                            }
+                            ok = if (install) log.contains("FLBOX_ALL_OK") else exit == 0
                         } catch (e: Exception) {
+                            log = "exception: $e"
                         }
-                        runOnUiThread { result.success(ok) }
+                        runOnUiThread { result.success(mapOf("ok" to ok, "log" to log)) }
                     }.start()
+                }
+                "deviceInfo" -> {
+                    result.success(buildDeviceInfo())
                 }
                 "writeTestJob" -> {
                     // Writes the speed test job file and clears

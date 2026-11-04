@@ -350,3 +350,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 转向规则由 App 经 su 安装（Kotlin netRules）：nat OUTPUT→FLBOX_NAT（mark 豁免→本地地址豁免→分应用 uid 规则→REDIRECT）、mangle OUTPUT→FLBOX_MNG（同前置→TPROXY --tproxy-mark 0x2B2C）、ip rule fwmark 0x2B2C→table 100（local 0.0.0.0/0 dev lo）、ip6tables FLBOX_6 丢弃非本地 v6（本阶段只转向 IPv4，宁断不漏）。守护进程自身流量带 mark 天然豁免，自捕获不可能。
 - 生命周期：启动＝守护进程确认 running 后才装规则（装失败回滚停守护进程）；停止＝先拆规则再杀进程；resync 发现守护进程已死时自动拆规则，绝不留指向死监听的规则。运行中切节点重启守护进程时规则不动（端口不变）。
 - 边界：全局模式（分应用按 uid 支持包含/排除两档）；无流量曲线（同 TUN）；IPv6 开关在此模式不生效（v6 一律拦截）；开机自启未接。
+
+## 0.60：启动失败改 AS 式报错弹窗 + netRules 诊断化 + 回滚清规则
+- 0.59 真机：eBPF 启动恒报「规则安装失败，已回滚」，但日志实证守护进程零连接、规则实际半装——回滚只停守护进程没清规则，残链把 AsteriskNG 的 bpf2socks helper 也绊倒（用户手动跑清理命令后 AS 恢复，反证残局真实存在）。探针证 mangle 建链挂钩本身 OK=0；失败点因 netRules 只回布尔而不可见。
+- **报错弹窗（用户指定照 AsteriskNG 样式）**：三种模式的启动失败统一走弹窗——标题「代理启动失败」＋模式＋时间＋错误详情＋设备与系统（Kotlin deviceInfo：app 版本/机型/Android/build/abi/内核/页大小/SELinux）＋启动日志（netRules 输出和/或 daemon 日志尾 6KB），按钮「关闭／复制日志」（复制全文）。原 toast 仅保留前置提示（如先选节点）。
+- **netRules 诊断化**：回执改 {ok, log}；脚本分 nat/mangle/route/v6 四段带 echo 标记；成败不再信 -C 退出码（0.59 疑似在此误判），改 grep 实时规则列表（-S OUTPUT 含 FLBOX_NAT 与 FLBOX_MNG 才打 FLBOX_ALL_OK），且无论成败都 dump OUTPUT 与两条链的实际规则进 log——失败长什么样，弹窗里直接可见。
+- **回滚补洞**：eBPF 规则安装失败时先停守护进程、再执行一次规则清除，杜绝半成品残留；停止流程与 resync 的既有清除不变。

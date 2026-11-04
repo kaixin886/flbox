@@ -336,6 +336,16 @@ class SubProfile {
 /// One traffic poll sample. Carried in a ValueNotifier so the 2 s
 /// poll rebuilds only the dashboard's traffic region instead of the
 /// whole shell (all four pages) on every tick.
+/// A start failure with a user-readable detail and an
+/// optional diagnostic log (netfilter script output, daemon
+/// log tail) for the Asterisk-style error dialog.
+class _StartFailure implements Exception {
+  _StartFailure(this.detail, {this.log});
+
+  final String detail;
+  final String? log;
+}
+
 class _Traffic {
   const _Traffic({this.up = 0, this.down = 0, this.speedUp = 0, this.speedDown = 0});
 
@@ -800,7 +810,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       } else if (_runMode == 'ebpf') {
         // A dead daemon must not leave netfilter rules
         // steering traffic into listeners nobody owns.
-        unawaited(_netRules(false));
+        unawaited(_netRules(false).then((_) {}));
       }
       return;
     }
@@ -2135,11 +2145,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// Installs or clears the eBPF mode netfilter steering
   /// (Kotlin side, via su): the TCP REDIRECT and UDP TPROXY
   /// chains scoped by the split-routing package selection,
-  /// plus the IPv6 drop chain. Clearing is idempotent and
-  /// always safe to call.
-  Future<bool> _netRules(bool install) async {
+  /// plus the IPv6 drop chain. The result carries the
+  /// script's own output - on failure it says which section
+  /// died and what the kernel actually holds. Clearing is
+  /// idempotent and always safe to call.
+  Future<({bool ok, String log})> _netRules(bool install) async {
     try {
-      return await _vpnChannel.invokeMethod<bool>('netRules', {
+      final res = await _vpnChannel
+          .invokeMethod<Map<Object?, Object?>>('netRules', {
             'action': install ? 'install' : 'clear',
             'includePkgs': (_splitEnabled && _splitAllow)
                 ? _bypassPkgs.toList()
@@ -2147,11 +2160,157 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             'excludePkgs': (_splitEnabled && !_splitAllow)
                 ? _bypassPkgs.toList()
                 : <String>[],
-          }) ??
-          false;
-    } catch (_) {
-      return false;
+          });
+      return (
+        ok: res?['ok'] == true,
+        log: (res?['log'] as String?) ?? '',
+      );
+    } catch (e) {
+      return (ok: false, log: 'channel error: $e');
     }
+  }
+
+  String? _deviceInfoCache;
+
+  Future<String> _deviceInfo() async {
+    final cached = _deviceInfoCache;
+    if (cached != null) return cached;
+    var info = '';
+    try {
+      info = await _vpnChannel.invokeMethod<String>('deviceInfo') ?? '';
+    } catch (_) {}
+    _deviceInfoCache = info;
+    return info;
+  }
+
+  /// The last chunk of the daemon log, for the error
+  /// dialog's startup-log section.
+  Future<String> _daemonLogTail() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final f = File('${docs.path}/root-daemon.log');
+      if (!await f.exists()) return '';
+      final raf = await f.open();
+      try {
+        final len = await raf.length();
+        final start = len > 6000 ? len - 6000 : 0;
+        await raf.setPosition(start);
+        final bytes = await raf.read(len - start);
+        var text = utf8.decode(bytes, allowMalformed: true);
+        if (start > 0) {
+          final nl = text.indexOf('\n');
+          if (nl >= 0) text = text.substring(nl + 1);
+        }
+        return text.trim();
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// Asterisk-style start failure report: mode, time, the
+  /// error detail, the device block and the startup log,
+  /// with a one-tap full copy - instead of a toast that
+  /// says "failed" and leaves nothing to diagnose from.
+  Future<void> _showStartError(Object error) async {
+    if (!mounted) return;
+    final detail = error is _StartFailure ? error.detail : '$error';
+    var logText = error is _StartFailure ? (error.log ?? '') : '';
+    if (_daemonMode) {
+      final tail = await _daemonLogTail();
+      if (tail.isNotEmpty) {
+        logText = logText.isEmpty
+            ? tail
+            : '$logText\n----- daemon log -----\n$tail';
+      }
+    }
+    final device = await _deviceInfo();
+    final now = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    final timeText =
+        '${now.year}-${two(now.month)}-${two(now.day)} '
+        '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
+    final modeText = switch (_runMode) {
+      'root_tun' => 'Root TUN',
+      'ebpf' => 'Root eBPF',
+      _ => 'VPN 模式',
+    };
+    final full = StringBuffer()
+      ..writeln('代理启动失败')
+      ..writeln('模式：$modeText')
+      ..writeln('时间：$timeText')
+      ..writeln()
+      ..writeln('错误详情')
+      ..writeln(detail);
+    if (device.isNotEmpty) {
+      full
+        ..writeln()
+        ..writeln('设备与系统')
+        ..writeln(device);
+    }
+    if (logText.isNotEmpty) {
+      full
+        ..writeln()
+        ..writeln('启动日志')
+        ..writeln(logText);
+    }
+    if (!mounted) return;
+    Widget section(String title, String body, {bool mono = false}) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 4),
+            SelectableText(
+              body,
+              style: mono
+                  ? const TextStyle(fontFamily: 'monospace', fontSize: 12)
+                  : null,
+            ),
+          ],
+        ),
+      );
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('代理启动失败'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SelectableText('模式：$modeText'),
+              SelectableText('时间：$timeText'),
+              section('错误详情', detail),
+              if (device.isNotEmpty) section('设备与系统', device, mono: true),
+              if (logText.isNotEmpty) section('启动日志', logText, mono: true),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: full.toString()));
+              if (ctx.mounted) Navigator.of(ctx).pop();
+            },
+            child: const Text('复制日志'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _startRootTun() async {
@@ -2163,27 +2322,31 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     try {
       final check = await _vpnChannel.invokeMethod<String>('rootCheck');
       if (check == 'nodaemon') {
-        _toast('此安装包未包含 root 守护进程');
-        return;
+        throw _StartFailure('此安装包未包含 root 守护进程');
       }
       if (check != 'ok') {
-        _toast('未取得 root 授权（su 不可用或被拒绝）');
-        return;
+        throw _StartFailure('未取得 root 授权（su 不可用或被拒绝）');
       }
       await _launchRootDaemon();
       if (_runMode == 'ebpf') {
         // The daemon is listening; steer traffic into it.
-        // If the rules refuse to land, roll the daemon back
-        // instead of leaving a running core nobody reaches.
-        if (!await _netRules(true)) {
+        // If the rules refuse to land, roll everything
+        // back - daemon AND any half-installed rules. The
+        // 0.59 rollback stopped only the daemon and left
+        // chains behind that then broke other root tools.
+        final rules = await _netRules(true);
+        if (!rules.ok) {
           final pid = await _rootDaemonPid();
           if (pid > 0) {
             try {
               await _vpnChannel.invokeMethod('rootStop', pid);
             } catch (_) {}
           }
-          _toast('重定向规则安装失败，已回滚');
-          return;
+          await _netRules(false);
+          throw _StartFailure(
+            '重定向规则安装失败，已回滚',
+            log: rules.log,
+          );
         }
       }
       _logEvent('$_runMode started (node=$_selectedNode)');
@@ -2191,7 +2354,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       setState(() => _running = true);
       unawaited(_markWasRunning(true));
     } catch (e) {
-      _toast('启动失败：$e');
+      await _showStartError(e);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -2318,8 +2481,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     try {
       final prep = await _vpnChannel.invokeMethod<String>('prepare');
       if (prep != 'granted') {
-        _toast('未授予 VPN 权限');
-        return;
+        throw _StartFailure('未授予 VPN 权限');
       }
       // A tunnel left over from a previous engine or process
       // (its stop never landed) would make the service's start a
@@ -2364,7 +2526,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         await _vpnChannel.invokeMethod('stopVpn');
       } catch (_) {}
       _tunFd = 0;
-      _toast('启动失败：$e');
+      await _showStartError(e);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -4328,7 +4490,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.59.0 · app.flbox · Xray 内核',
+              'FlBox 0.60.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
