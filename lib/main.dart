@@ -1500,6 +1500,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         final hist = [..._rateHistory.value, _RateSample(speedUp, speedDown)];
         if (hist.length > 45) hist.removeRange(0, hist.length - 45);
         _rateHistory.value = hist;
+        _pushVpnStatus();
       } catch (_) {
         // A failed poll just skips a beat; the next one retries.
       }
@@ -1512,6 +1513,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _startedAt = null;
     _traffic.value = const _Traffic();
     _rateHistory.value = const [];
+    _lastStatusText = null;
   }
 
   /// Full session teardown, shared by the toggle and the
@@ -1605,7 +1607,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _startedAt = DateTime.now();
       setState(() => _running = true);
       _startPolling();
-      unawaited(_notifyStarted());
+      unawaited(_primeStatus());
     } catch (e) {
       try {
         CoreBridge().vpnForwardStop();
@@ -1634,11 +1636,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  /// The start notification (Settings opt-in, default on): the
-  /// node just started, its live latency probed through the
-  /// running core, and a quick download speed sample.
-  Future<void> _notifyStarted() async {
-    if (!_notifyOnStart) return;
+  /// Probes the freshly started node's latency through the
+  /// running core, backfills the node's card delay, and seeds
+  /// the resident notification's status line.
+  Future<void> _primeStatus() async {
     final node = _selectedNode;
     if (node == null) return;
     try {
@@ -1648,47 +1649,35 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (latency != null && mounted) {
         setState(() => _delays[node] = latency);
       }
-      final speed = await _probeSpeedMbps();
-      final parts = <String>['节点：$node'];
-      if (latency != null) parts.add('延迟 $latency ms');
-      if (speed != null) {
-        parts.add(speed >= 1
-            ? '速度 ${speed.toStringAsFixed(1)} Mbps'
-            : '速度 ${(speed * 1000).round()} Kbps');
-      }
-      await _notify('FlBox 已启动', parts.join(' · '));
+      _pushVpnStatus();
     } catch (_) {}
   }
 
-  /// One-shot download sample through the running core for the
-  /// start notification's speed figure: 200 KB from
-  /// Cloudflare's speed endpoint, null when the sample fails.
-  Future<double?> _probeSpeedMbps() async {
-    HttpClient? client;
-    try {
-      client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 6);
-      client.findProxy = (_) => 'PROXY 127.0.0.1:7890';
-      final sw = Stopwatch()..start();
-      final req = await client
-          .getUrl(
-            Uri.parse('https://speed.cloudflare.com/__down?bytes=200000'),
-          )
-          .timeout(const Duration(seconds: 6));
-      final resp = await req.close().timeout(const Duration(seconds: 6));
-      var bytes = 0;
-      await for (final chunk in resp) {
-        bytes += chunk.length;
-      }
-      sw.stop();
-      final secs = sw.elapsedMilliseconds / 1000;
-      if (bytes == 0 || secs <= 0) return null;
-      return bytes * 8 / secs / 1000000;
-    } catch (_) {
-      return null;
-    } finally {
-      client?.close(force: true);
-    }
+  String? _lastStatusText;
+
+  /// Pushes the live status line (node, latency, up/down
+  /// rates) into the VPN service's resident foreground
+  /// notification - the one notification that cannot be
+  /// swiped or cleared away while the session runs. Gated by
+  /// the Settings toggle (the start-notification switch, kept
+  /// under the same pref key); when off, the service keeps
+  /// its plain default text.
+  void _pushVpnStatus() {
+    if (!_notifyOnStart || !_running) return;
+    final node = _selectedNode;
+    if (node == null) return;
+    final delay = _delays[node];
+    final t = _traffic.value;
+    final text = StringBuffer(node);
+    if (delay != null) text.write(' · 延迟 $delay ms');
+    text.write(' · ↓ ${_fmtSpeed(t.speedDown)} ↑ ${_fmtSpeed(t.speedUp)}');
+    final s = text.toString();
+    if (s == _lastStatusText) return;
+    _lastStatusText = s;
+    _vpnChannel.invokeMethod('updateVpnStatus', {
+      'title': 'FlBox VPN 运行中',
+      'text': s,
+    }).catchError((_) => null);
   }
 
   void _notifySubAutoUpdated(String name) {
@@ -1792,6 +1781,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (config == null) return;
       try {
         CoreBridge().xrayStart(config, 0);
+        _pushVpnStatus();
         _toast('已切换到 $name');
       } on CoreException catch (e) {
         setState(() => _running = false);
@@ -2943,8 +2933,8 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 8),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('启动通知'),
-            subtitle: Text('启动成功后推送通知：当前节点、实测延迟与速度',
+            title: const Text('常驻通知信息'),
+            subtitle: Text('在 VPN 常驻通知里实时显示当前节点、延迟与上下行速度',
                 style: TextStyle(color: muted)),
             value: widget.notifyOnStart,
             onChanged: widget.onNotifyOnStartChanged,
@@ -3013,7 +3003,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.29.0 · app.flbox · Xray 内核',
+              'FlBox 0.30.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

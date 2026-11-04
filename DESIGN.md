@@ -186,3 +186,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **运行中切订阅**：_switchSub 不再拦截，激活新订阅后原地 xrayStart 重启核心（同规则/全局切换的做法，VPN 不断）；重启失败则整体停止并告知。
 - **通知**（设置「通知」节两开关，均默认开）：①启动通知——启动成功后经运行中核心实测一发 generate_204 延迟（顺带回填节点卡延迟）＋Cloudflare 200KB 下载测速，拼「节点·延迟·速度」走新通道方法 notifyStatus（MainActivity，独立 flbox_status 渠道）；②订阅自动更新通知——前台静默更新成功即发，后台 WorkManager 更新把名字存 bg_updated_names、下次打开 App 时补发（后台 isolate 无通道可用）。
 - 排版：代理页工具栏标题去掉与页签重复的订阅名、只留节点数，图标按钮改 compact（此前排序图标被挤出屏幕）；配置页三个导入大按钮合并为一张列表卡（三行带图标）。
+
+## 0.30（2026-11-04）延迟/速度改常驻通知
+
+- 用户 0.29 实测：启动通知能收到，但一次性的点「清除」就没了。改法：节点/延迟/速度不再发一次性通知，改为写进 VPN 服务那条**前台常驻通知**（运行期间不可划掉、不可清除，停止才消失）。Dart 每 2 秒流量轮询顺带推送状态行（节点 · 延迟 X ms · ↓速率 ↑速率，文本变了才发通道）；启动时仍探一发延迟回填；切节点时立即刷新。FlboxVpnService 新增 companion statusTitle/statusText＋updateStatus（同 NOTIF_ID 重发 buildNotification 原地更新），MainActivity 新增 updateVpnStatus 通道方法。原 _probeSpeedMbps 一次性测速删除（常驻显示的是实时速率）。
+- 设置开关沿用同一 pref（notify_on_start），文案改「常驻通知信息」；关掉则常驻通知保持默认文案。订阅自动更新通知按用户要求不変。

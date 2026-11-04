@@ -31,6 +31,7 @@ class FlboxVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         alive = true
+        instance = this
         registerNetworkWatcher()
     }
 
@@ -131,6 +132,9 @@ class FlboxVpnService : VpnService() {
     override fun onDestroy() {
         active = false
         alive = false
+        instance = null
+        statusTitle = null
+        statusText = null
         tunFd = -1
         unregisterNetworkWatcher()
         try {
@@ -207,10 +211,21 @@ class FlboxVpnService : VpnService() {
             Notification.Builder(this)
         }
         return builder
-            .setContentTitle("FlBox VPN 运行中")
-            .setContentText("系统代理已接管流量")
+            .setContentTitle(statusTitle ?: "FlBox VPN 运行中")
+            .setContentText(statusText ?: "系统代理已接管流量")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
+    }
+
+    // Re-posts the foreground notification with the current
+    // status line. Same id as the startForeground call, so the
+    // resident notification updates in place.
+    private fun refreshNotification() {
+        try {
+            getSystemService(NotificationManager::class.java)
+                ?.notify(NOTIF_ID, buildNotification())
+        } catch (_: Exception) {
+        }
     }
 
     companion object {
@@ -238,5 +253,23 @@ class FlboxVpnService : VpnService() {
         // in the same process can adopt the live session.
         @Volatile
         var tunFd: Int = -1
+
+        // Live status line pushed from Dart (node, latency,
+        // rates): shown by the resident foreground notification
+        // whenever set; cleared when the service dies.
+        @Volatile
+        var statusTitle: String? = null
+
+        @Volatile
+        var statusText: String? = null
+
+        @Volatile
+        private var instance: FlboxVpnService? = null
+
+        fun updateStatus(title: String?, text: String?) {
+            statusTitle = title
+            statusText = text
+            instance?.refreshNotification()
+        }
     }
 }

@@ -125,6 +125,13 @@ class MainActivity : FlutterActivity() {
                     startActivity(intent)
                     result.success(null)
                 }
+                "updateVpnStatus" -> {
+                    FlboxVpnService.updateStatus(
+                        call.argument<String>("title"),
+                        call.argument<String>("text")
+                    )
+                    result.success(null)
+                }
                 "notifyStatus" -> {
                     val title = call.argument<String>("title") ?: "FlBox"
                     val text = call.argument<String>("text") ?: ""
