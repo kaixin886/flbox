@@ -333,3 +333,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **去掉 strict_route**：其防泄漏拦截在 Android 上连核心自身的回程流量一并吃掉。
 - **TUN 路由排除名单**（route_exclude_address；注意 1.14 已删除 inet4_/inet6_ 前缀的旧字段名，用了会在 box.New 硬报错，本地启动测试当场抓住）：引导 DNS 223.5.5.5/32 ＋节点服务器 IP——域名服务器在配置生成时以 3 秒预算顺带解析（resolveServerIPs，软失败为空，靠第一条兜底），即 Magisk 代理模块通用的「服务器主机路由绕过」。已知局限：轮换 IP 的节点在会话中途重连到新 IP 时排除名单可能不覆盖，属二期课题。
 - **仪表盘文案按模式分流**：root 运行时显示「sing-box 守护进程 · Root TUN 模式」（_DashboardPage 新增 rootMode 入参）。
+
+## 0.57：Root TUN 改走 auto_redirect（netproxy 式结构）
+- 0.56 真机新症状：电报能连、十余秒断、随后又恢复，且**只有电报能用、其他应用全灭**；`ip rule` 前后两张完全一致（规则没被动过），2022 号表为前缀切割形——route_exclude_address 以「补集前缀＋/32 挖洞」实现（223.5.5.5 与节点 AWS IP 的洞清晰可见）。定案：本机生成流量（含 netd 的系统 DNS）不在 auto_route 的接管范围内，DNS 逃逸 → 靠域名工作的应用全灭，只剩直连 IP 的电报独活；/32 快照对轮换 IP 亦先天脆弱。
+- **TUN 入站开启 auto_redirect**：Android 上 sing-tun 以 iptables 把本机流量（含 53 端口）重定向进本地 redirect 监听，网络管理器给守护进程自身出站打 output mark（0x2024）按**发送者**豁免——即 netproxy/AsteriskNG 的结构，对节点 IP 轮换免疫。auto_route/auto_detect_interface/route_exclude_address 保留作兜底。
+- **守护进程日志强制 info＋时间戳**：覆盖翻译器默认（低于 warn 不可见），此后真机日志可直接定案连接级问题。

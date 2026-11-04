@@ -58,6 +58,15 @@ import (
 //     working DNS. Rotating server IPs can still strand a
 //     mid-session reconnect on a fresh address; that is a
 //     known stage-2 limitation.
+//   - (0.57) auto_redirect: on Android sing-tun drives
+//     iptables to redirect locally generated traffic (netd's
+//     DNS included - 0.56 left it outside the tunnel, so only
+//     IP-based apps like Telegram worked) into a local
+//     redirect listener, and the network manager stamps the
+//     box's own dials with the auto-redirect output mark so
+//     they are exempt by sender, not by destination - the
+//     netproxy/Asterisk structure, and immune to server-IP
+//     rotation.
 func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, excludePkgs []string) (string, error) {
 	cfg, err := sbtranslate.ParseClash([]byte(clashYAML))
 	if err != nil {
@@ -122,13 +131,14 @@ func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, exclu
 		excludes = append(excludes, ip+"/32")
 	}
 	tun := map[string]any{
-		"type":                        "tun",
-		"tag":                         "tun-in",
-		"address":                     addrs,
-		"mtu":                         1500,
-		"auto_route":                  true,
-		"stack":                       "gvisor",
-		"route_exclude_address":       excludes,
+		"type":                  "tun",
+		"tag":                   "tun-in",
+		"address":               addrs,
+		"mtu":                   1500,
+		"auto_route":            true,
+		"auto_redirect":         true,
+		"stack":                 "gvisor",
+		"route_exclude_address": excludes,
 	}
 	if len(includePkgs) > 0 {
 		tun["include_package"] = anyStrings(includePkgs)
@@ -164,6 +174,10 @@ func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, exclu
 		}
 	}
 	root["dns"] = dns
+	// The daemon's log is the only on-device evidence when a
+	// run misbehaves; keep it at info with timestamps (the
+	// translated profile default hides everything below warn).
+	root["log"] = map[string]any{"level": "info", "timestamp": true}
 
 	out, err := json.Marshal(root)
 	if err != nil {
