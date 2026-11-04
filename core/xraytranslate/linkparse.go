@@ -234,6 +234,9 @@ func parseShareLink(link string) (map[string]any, error) {
 		if pin := q.Get("pinSHA256"); pin != "" {
 			entry["pinned-cert-sha256"] = pin
 		}
+		if mport := q.Get("mport"); mport != "" {
+			entry["ports"] = mport
+		}
 		if alpn := q.Get("alpn"); alpn != "" {
 			entry["alpn"] = strings.Split(alpn, ",")
 		}

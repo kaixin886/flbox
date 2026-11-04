@@ -78,6 +78,13 @@ Future<void> _bgRefreshDueSubs() async {
           await request.close().timeout(const Duration(seconds: 20));
       if (response.statusCode != 200) continue;
       var text = await response.transform(utf8.decoder).join();
+      final subInfo = formatSubInfoText(
+        response.headers.value('subscription-userinfo'),
+      );
+      // Updates may arrive in any importable format (link lists,
+      // vendor JSON), not just Clash YAML: normalise first, like
+      // the foreground path does.
+      text = CoreBridge().convertImport(text)['yaml'] as String;
       if (sub.keepRegex.isNotEmpty || sub.dropRegex.isNotEmpty) {
         text = CoreBridge().filterNodes(text, sub.keepRegex, sub.dropRegex);
       }
@@ -90,6 +97,7 @@ Future<void> _bgRefreshDueSubs() async {
       if (profile.nodes.isEmpty) continue;
       await File('${docs.path}/sub_${sub.id}.yaml').writeAsString(text);
       sub.nodeCount = profile.nodes.length;
+      if (subInfo != null) sub.subInfo = subInfo;
       sub.updatedAtMs = DateTime.now().millisecondsSinceEpoch;
       changed = true;
       updatedNames.add(sub.name);
@@ -107,6 +115,37 @@ Future<void> _bgRefreshDueSubs() async {
     await prefs.setString('bg_updated_names', jsonEncode(updatedNames));
     await prefs.setBool('bg_subs_changed', true);
   }
+}
+
+/// Formats a subscription-userinfo header value for display.
+/// Top-level so the background updater can use it too.
+String? formatSubInfoText(String? raw) {
+  if (raw == null) return null;
+  final kv = <String, String>{};
+  for (final part in raw.split(';')) {
+    final eq = part.indexOf('=');
+    if (eq > 0) {
+      kv[part.substring(0, eq).trim()] = part.substring(eq + 1).trim();
+    }
+  }
+  final up = double.tryParse(kv['upload'] ?? '');
+  final down = double.tryParse(kv['download'] ?? '');
+  final total = double.tryParse(kv['total'] ?? '');
+  if (up == null || down == null || total == null || total <= 0) {
+    return null;
+  }
+  String gb(double bytes) => (bytes / 1073741824)
+      .toStringAsFixed(2)
+      .replaceFirst(RegExp(r'\.?0+$'), '');
+  var out = '已用 ${gb(up + down)} / 共 ${gb(total)} GB';
+  final expire = int.tryParse(kv['expire'] ?? '');
+  if (expire != null && expire > 0) {
+    final d = DateTime.fromMillisecondsSinceEpoch(expire * 1000);
+    final mm = d.month.toString().padLeft(2, '0');
+    final dd = d.day.toString().padLeft(2, '0');
+    out += ' · 到期 ${d.year}-$mm-$dd';
+  }
+  return out;
 }
 
 // Visual baseline (see DESIGN.md): one background color, one accent color,
@@ -352,6 +391,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _geoReady = false;
   Set<String> _favNodes = {};
   bool _autoConnect = false;
+  bool _restoreOnBoot = false;
+  bool _wasRunning = false;
   bool _notifyOnStart = true;
   bool _ipv6Enabled = false;
   bool _notifySubUpdate = true;
@@ -456,6 +497,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     _rulesMode = prefs.getBool('rules_mode') ?? false;
     _autoConnect = prefs.getBool('auto_connect') ?? false;
+    _restoreOnBoot = prefs.getBool('restore_on_boot') ?? false;
+    _wasRunning = prefs.getBool('was_running') ?? false;
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
     _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
@@ -544,7 +587,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     await _checkBgSubUpdates();
     await _runDueSubscriptionUpdates();
     await _resyncCoreState();
-    if (_autoConnect && _profile != null && !_running && mounted) {
+    if ((_autoConnect || (_restoreOnBoot && _wasRunning)) &&
+        _profile != null &&
+        !_running &&
+        mounted) {
       await _toggleCore();
     }
   }
@@ -641,6 +687,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             _running = true;
             _startedAt = DateTime.now();
           });
+          unawaited(_markWasRunning(true));
           _startPolling();
         } else if (vpnActive) {
           _logEvent('resync: tunnel without core (zombie), tearing down');
@@ -799,6 +846,200 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('auto_connect', value);
     setState(() => _autoConnect = value);
+  }
+
+  Future<void> _setRestoreOnBoot(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('restore_on_boot', value);
+    setState(() => _restoreOnBoot = value);
+  }
+
+  /// Records whether the core was up when the app/process last
+  /// had a say; the boot receiver reconnects only when this is
+  /// true and the user opted into boot restore.
+  Future<void> _markWasRunning(bool value) async {
+    _wasRunning = value;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('was_running', value);
+    } catch (_) {}
+  }
+
+  /// Exports every subscription (metadata + stored YAML) and the
+  /// user-facing settings as one JSON file the user picks a home
+  /// for; falls back to the clipboard when the platform cannot
+  /// save files.
+  Future<void> _exportBackup() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final subsJson = <Map<String, dynamic>>[];
+      for (final sub in _subs) {
+        var content = '';
+        final f = _subFile(docs, sub.id);
+        if (await f.exists()) content = await f.readAsString();
+        subsJson.add({'meta': sub.toJson(), 'content': content});
+      }
+      final backup = <String, dynamic>{
+        'app': 'flbox',
+        'kind': 'backup',
+        'version': 1,
+        'exportedAtMs': DateTime.now().millisecondsSinceEpoch,
+        'subs': subsJson,
+        'activeSub': _activeSubId,
+        'prefs': {
+          'rules_mode': _rulesMode,
+          'auto_connect': _autoConnect,
+          'restore_on_boot': _restoreOnBoot,
+          'notify_on_start': _notifyOnStart,
+          'notify_sub_update': _notifySubUpdate,
+          'ipv6_enabled': _ipv6Enabled,
+          'sub_auto_interval_hours': _subAutoIntervalHours,
+          'nav_style': _navStyle.index,
+          'fav_nodes': _favNodes.toList(),
+          'bypass_pkgs': _bypassPkgs.toList(),
+        },
+      };
+      final text = jsonEncode(backup);
+      String? saved;
+      try {
+        saved = await FilePicker.platform.saveFile(
+          dialogTitle: '保存 FlBox 备份',
+          fileName: 'flbox-backup.json',
+          bytes: Uint8List.fromList(utf8.encode(text)),
+        );
+      } catch (_) {
+        saved = null;
+      }
+      if (saved != null) {
+        _toast('备份已导出');
+      } else {
+        await Clipboard.setData(ClipboardData(text: text));
+        _toast('未能保存为文件，备份已复制到剪贴板');
+      }
+    } catch (e) {
+      _toast('导出失败：$e');
+    }
+  }
+
+  /// Restores a backup made by _exportBackup: subscriptions and
+  /// settings are replaced wholesale, then the active
+  /// subscription is reloaded like on a cold start.
+  Future<void> _importBackup() async {
+    try {
+      final picked = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        withData: true,
+      );
+      if (picked == null || picked.files.isEmpty) return;
+      final bytes = picked.files.single.bytes;
+      if (bytes == null) {
+        _toast('读不到所选文件');
+        return;
+      }
+      final decoded = jsonDecode(utf8.decode(bytes));
+      if (decoded is! Map<String, dynamic> ||
+          decoded['app'] != 'flbox' ||
+          decoded['kind'] != 'backup') {
+        _toast('这不是 FlBox 的备份文件');
+        return;
+      }
+      if (_running) await _stopCore();
+      final docs = await getApplicationDocumentsDirectory();
+      final prefs = await SharedPreferences.getInstance();
+      final newSubs = <SubProfile>[];
+      final rawSubs = decoded['subs'];
+      if (rawSubs is List) {
+        for (final e in rawSubs) {
+          if (e is! Map<String, dynamic>) continue;
+          final meta = e['meta'];
+          if (meta is! Map<String, dynamic>) continue;
+          final sub = SubProfile.fromJson(meta);
+          await _subFile(docs, sub.id)
+              .writeAsString((e['content'] as String?) ?? '');
+          newSubs.add(sub);
+        }
+      }
+      var rulesMode = _rulesMode;
+      var autoConnect = _autoConnect;
+      var restoreOnBoot = _restoreOnBoot;
+      var notifyOnStart = _notifyOnStart;
+      var notifySubUpdate = _notifySubUpdate;
+      var ipv6Enabled = _ipv6Enabled;
+      var intervalHours = _subAutoIntervalHours;
+      var navStyle = _navStyle;
+      var favNodes = _favNodes;
+      var bypassPkgs = _bypassPkgs;
+      final bp = decoded['prefs'];
+      if (bp is Map<String, dynamic>) {
+        bool bb(String k, bool cur) => bp[k] is bool ? bp[k] as bool : cur;
+        rulesMode = bb('rules_mode', rulesMode);
+        autoConnect = bb('auto_connect', autoConnect);
+        restoreOnBoot = bb('restore_on_boot', restoreOnBoot);
+        notifyOnStart = bb('notify_on_start', notifyOnStart);
+        notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
+        ipv6Enabled = bb('ipv6_enabled', ipv6Enabled);
+        if (bp['sub_auto_interval_hours'] is int) {
+          intervalHours = bp['sub_auto_interval_hours'] as int;
+        }
+        if (bp['nav_style'] is int) {
+          final i = bp['nav_style'] as int;
+          if (i >= 0 && i < NavStyle.values.length) {
+            navStyle = NavStyle.values[i];
+          }
+        }
+        if (bp['fav_nodes'] is List) {
+          favNodes = (bp['fav_nodes'] as List).cast<String>().toSet();
+        }
+        if (bp['bypass_pkgs'] is List) {
+          bypassPkgs = (bp['bypass_pkgs'] as List).cast<String>().toSet();
+        }
+      }
+      var activeId = decoded['activeSub'] as String?;
+      if (activeId != null && !newSubs.any((x) => x.id == activeId)) {
+        activeId = null;
+      }
+      setState(() {
+        _subs = newSubs;
+        _activeSubId = activeId;
+        _rulesMode = rulesMode;
+        _autoConnect = autoConnect;
+        _restoreOnBoot = restoreOnBoot;
+        _notifyOnStart = notifyOnStart;
+        _notifySubUpdate = notifySubUpdate;
+        _ipv6Enabled = ipv6Enabled;
+        _subAutoIntervalHours = intervalHours;
+        _navStyle = navStyle;
+        _favNodes = favNodes;
+        _bypassPkgs = bypassPkgs;
+      });
+      await prefs.setBool('rules_mode', rulesMode);
+      await prefs.setBool('auto_connect', autoConnect);
+      await prefs.setBool('restore_on_boot', restoreOnBoot);
+      await prefs.setBool('notify_on_start', notifyOnStart);
+      await prefs.setBool('notify_sub_update', notifySubUpdate);
+      await prefs.setBool('ipv6_enabled', ipv6Enabled);
+      await prefs.setInt('sub_auto_interval_hours', intervalHours);
+      await prefs.setInt('nav_style', navStyle.index);
+      await prefs.setString('fav_nodes', jsonEncode(favNodes.toList()));
+      await prefs.setString(
+          'bypass_pkgs', jsonEncode(bypassPkgs.toList()));
+      await _persistSubs();
+      final active = _activeSub;
+      if (active != null) {
+        final f = _subFile(docs, active.id);
+        if (await f.exists()) {
+          await _activateYaml(await f.readAsString(), name: active.name);
+        }
+      } else {
+        setState(() {
+          _profile = null;
+          _profileYaml = null;
+        });
+      }
+      _toast('备份已恢复：${newSubs.length} 份订阅');
+    } catch (e) {
+      _toast('恢复失败：$e');
+    }
   }
 
   Future<void> _setNotifyOnStart(bool value) async {
@@ -1101,6 +1342,20 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             detail: detail,
             siblingNames: siblingNames,
             fromSubscription: !isNew && targetSub?.url != null,
+            onShare: isNew
+                ? null
+                : () {
+                    try {
+                      final link = CoreBridge()
+                          .nodeShareLink(targetYaml, editName);
+                      unawaited(
+                        Clipboard.setData(ClipboardData(text: link)),
+                      );
+                      _toast('分享链接已复制到剪贴板');
+                    } on CoreException catch (e) {
+                      _toast('分享失败：${e.message}');
+                    }
+                  },
           ),
         ),
       );
@@ -1316,34 +1571,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   /// Formats a subscription-userinfo header (bytes / epoch seconds)
   /// into a short human line, or null when unusable.
-  String? _formatSubInfo(String? raw) {
-    if (raw == null) return null;
-    final kv = <String, String>{};
-    for (final part in raw.split(';')) {
-      final eq = part.indexOf('=');
-      if (eq > 0) {
-        kv[part.substring(0, eq).trim()] = part.substring(eq + 1).trim();
-      }
-    }
-    final up = double.tryParse(kv['upload'] ?? '');
-    final down = double.tryParse(kv['download'] ?? '');
-    final total = double.tryParse(kv['total'] ?? '');
-    if (up == null || down == null || total == null || total <= 0) {
-      return null;
-    }
-    String gb(double bytes) => (bytes / 1073741824)
-        .toStringAsFixed(2)
-        .replaceFirst(RegExp(r'\.?0+$'), '');
-    var out = '已用 ${gb(up + down)} / 共 ${gb(total)} GB';
-    final expire = int.tryParse(kv['expire'] ?? '');
-    if (expire != null && expire > 0) {
-      final d = DateTime.fromMillisecondsSinceEpoch(expire * 1000);
-      final mm = d.month.toString().padLeft(2, '0');
-      final dd = d.day.toString().padLeft(2, '0');
-      out += ' · 到期 ${d.year}-$mm-$dd';
-    }
-    return out;
-  }
+  String? _formatSubInfo(String? raw) => formatSubInfoText(raw);
 
   /// Silent due-check used by startup, the in-app timer and (in
   /// its own isolate) the WorkManager task: refreshes every opted-in
@@ -1613,6 +1841,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       } catch (_) {}
     }
     _stopPolling();
+    unawaited(_markWasRunning(false));
     if (mounted) setState(() => _running = false);
   }
 
@@ -1661,6 +1890,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _logEvent('core started (rules=$_rulesMode, node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
+      unawaited(_markWasRunning(true));
       _startPolling();
       unawaited(_primeStatus());
     } catch (e) {
@@ -1881,10 +2111,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           },
           autoConnect: _autoConnect,
           onAutoConnectChanged: _setAutoConnect,
+          restoreOnBoot: _restoreOnBoot,
+          onRestoreOnBootChanged: _setRestoreOnBoot,
           autoIntervalHours: _subAutoIntervalHours,
           onAutoIntervalChanged: _setSubAutoInterval,
           ipv6Enabled: _ipv6Enabled,
           onIpv6Changed: _setIpv6Enabled,
+          onExportBackup: _exportBackup,
+          onImportBackup: _importBackup,
         ),
       ),
     );
@@ -2993,6 +3227,10 @@ class _SettingsPage extends StatefulWidget {
     required this.onAutoIntervalChanged,
     required this.ipv6Enabled,
     required this.onIpv6Changed,
+    required this.restoreOnBoot,
+    required this.onRestoreOnBootChanged,
+    required this.onExportBackup,
+    required this.onImportBackup,
   });
 
   final NavStyle navStyle;
@@ -3015,6 +3253,10 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<int> onAutoIntervalChanged;
   final bool ipv6Enabled;
   final ValueChanged<bool> onIpv6Changed;
+  final bool restoreOnBoot;
+  final ValueChanged<bool> onRestoreOnBootChanged;
+  final VoidCallback onExportBackup;
+  final VoidCallback onImportBackup;
 
   @override
   State<_SettingsPage> createState() => _SettingsPageState();
@@ -3152,6 +3394,17 @@ class _SettingsPageState extends State<_SettingsPage> {
               value: widget.autoConnect,
               onChanged: widget.onAutoConnectChanged,
             ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              secondary: const Icon(Icons.restart_alt),
+              title: const Text('开机自启恢复'),
+              subtitle: Text(
+                '手机重启后自动恢复上次连接（需在系统里允许 FlBox 自启动）',
+                style: TextStyle(color: muted),
+              ),
+              value: widget.restoreOnBoot,
+              onChanged: widget.onRestoreOnBootChanged,
+            ),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.schedule_outlined),
@@ -3246,10 +3499,31 @@ class _SettingsPageState extends State<_SettingsPage> {
               ),
             ),
           ]),
+          const SizedBox(height: 20),
+          section('备份', [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.upload_file_outlined),
+              title: const Text('导出备份'),
+              subtitle: Text('全部订阅和设置存成一个文件',
+                  style: TextStyle(color: muted)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: widget.onExportBackup,
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.file_download_outlined),
+              title: const Text('恢复备份'),
+              subtitle: Text('从备份文件恢复，会覆盖现有订阅和设置',
+                  style: TextStyle(color: muted)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: widget.onImportBackup,
+            ),
+          ]),
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.35.0 · app.flbox · Xray 内核',
+              'FlBox 0.36.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -3777,12 +4051,14 @@ class _NodeEditPage extends StatefulWidget {
     required this.detail,
     required this.siblingNames,
     required this.fromSubscription,
+    this.onShare,
   });
 
   final bool isNew;
   final Map<String, dynamic> detail;
   final Set<String> siblingNames;
   final bool fromSubscription;
+  final VoidCallback? onShare;
 
   @override
   State<_NodeEditPage> createState() => _NodeEditPageState();
@@ -4062,6 +4338,12 @@ class _NodeEditPageState extends State<_NodeEditPage> {
       appBar: AppBar(
         title: Text(widget.isNew ? '添加节点' : '编辑节点'),
         actions: [
+          if (widget.onShare != null)
+            IconButton(
+              icon: const Icon(Icons.share_outlined),
+              tooltip: '分享链接',
+              onPressed: widget.onShare,
+            ),
           IconButton(
             icon: const Icon(Icons.check),
             tooltip: '保存',

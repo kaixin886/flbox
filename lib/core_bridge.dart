@@ -115,6 +115,9 @@ class CoreBridge {
     _nodeDelete = lib.lookupFunction<_NodeDetailNative, _NodeDetailNative>(
       'FlboxNodeDelete',
     );
+    _nodeShare = lib.lookupFunction<_NodeDetailNative, _NodeDetailNative>(
+      'FlboxNodeShare',
+    );
     _filterNodes = lib.lookupFunction<_NodeUpsertNative, _NodeUpsertNative>(
       'FlboxFilterNodes',
     );
@@ -141,6 +144,7 @@ class CoreBridge {
   late final _NodeDetailNative _nodeDetail;
   late final _NodeUpsertNative _nodeUpsert;
   late final _NodeDetailNative _nodeDelete;
+  late final _NodeDetailNative _nodeShare;
   late final _NodeUpsertNative _filterNodes;
   late final _ParseLinksNative _parseLinks;
   late final _ParseLinksNative _convertImport;
@@ -279,6 +283,21 @@ class CoreBridge {
       throw CoreException(_lastErrorText() ?? 'node detail failed');
     }
     return jsonDecode(out) as Map<String, dynamic>;
+  }
+
+  /// Renders the node called [name] in [yaml] as its protocol
+  /// share URI (vless://, hysteria2://, ...) for handing to
+  /// another client.
+  String nodeShareLink(String yaml, String name) {
+    final a = yaml.toNativeUtf8();
+    final c = name.toNativeUtf8();
+    final out = _take(_nodeShare(a, c));
+    malloc.free(a);
+    malloc.free(c);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'node share failed');
+    }
+    return out;
   }
 
   /// Splices [entry] (typed JSON values) into the profile YAML:

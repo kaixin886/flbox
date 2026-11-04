@@ -214,3 +214,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 
 ## 0.35 仪表盘开启前布局修复（用户 2026-11-04 真机报障）
 - 未启动时速率卡只剩标题行也要占满高（空图表 72＋图例），页面临界溢出一点点却滑不动、下方模式开关够不着。修法：无样本（<2）时速率卡只显示标题行（实时速率＋暂无数据），图表与图例有数据才展开；仪表盘滚动改 AlwaysScrollableScrollPhysics＋Column mainAxisSize.min，临界溢出也能拖动。
+
+## 0.36 功能补齐（用户 2026-11-04 点选，到期提醒明确不要）
+- 节点分享：Go 侧逆翻译 ShareLinkFor（xraytranslate/nodeshare.go）把任意节点导回协议分享链接（vless/vmess/trojan/ss/hy2/wg；pin 走 pinSHA256、hy2 跳跃走 mport），编辑节点页右上角分享按钮一键复制。附带补齐 hy2 端口跳跃全链路：clashProxy 加 ports/hop-interval、翻译器输出 finalmask.quicParams.udpHop、链接导入读 mport、nodeedit 字段序登记。
+- 备份/恢复：设置页新增「备份」组。导出＝全部订阅（元数据＋YAML 内容）＋用户设置存成一个 JSON，经系统保存对话框落盘（失败回退剪贴板）；恢复＝选文件校验 app/kind 标记后全量覆盖订阅文件与设置、重载当前订阅。
+- 开机自启恢复：was_running 在启动成功/接管会话时置真、手动停止时清零；设置→连接新增「开机自启恢复」开关；Kotlin BootReceiver 读 FlutterSharedPreferences，两者都真时拉起 MainActivity，Dart 侧以与自动连接相同的路径重连（ROM 拦后台拉起时退化为下次手动打开时恢复）。
+- 后台自动更新修复：_bgRefreshDueSubs 此前假设订阅内容恒为 Clash YAML，现与前台一致先走 convertImport 归一化，并顺手把 subscription-userinfo 写回（formatSubInfoText 抽为顶层函数共用）。

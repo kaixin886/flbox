@@ -205,6 +205,19 @@ func FlboxNodeDetail(clashYAML, name *C.char) *C.char {
 	return C.CString(out)
 }
 
+//export FlboxNodeShare
+func FlboxNodeShare(clashYAML, name *C.char) *C.char {
+	out, err := xraytranslate.ShareLinkFor(
+		C.GoString(clashYAML),
+		C.GoString(name),
+	)
+	if err != nil {
+		recordErr(err)
+		return nil
+	}
+	return C.CString(out)
+}
+
 //export FlboxNodeUpsert
 func FlboxNodeUpsert(clashYAML, entryJSON, originalName *C.char) *C.char {
 	out, err := xraytranslate.UpsertNode(

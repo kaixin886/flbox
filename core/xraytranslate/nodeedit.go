@@ -29,6 +29,7 @@ var keyOrder = []string{
 	"skip-cert-verify", "alpn",
 	"reality-opts", "ws-opts", "grpc-opts",
 	"obfs", "obfs-password", "auth", "up", "down",
+	"ports", "hop-interval",
 	"pinned-cert-sha256",
 	"private-key", "public-key", "pre-shared-key",
 	"ip", "ipv6", "allowed-ips", "mtu", "reserved",

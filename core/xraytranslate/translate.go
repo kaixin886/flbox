@@ -44,6 +44,8 @@ type clashProxy struct {
 	Obfs         string `yaml:"obfs"`
 	ObfsPassword string `yaml:"obfs-password"`
 	Auth         string `yaml:"auth"`
+	Ports        string `yaml:"ports"`
+	HopInterval  int    `yaml:"hop-interval"`
 	Up           any    `yaml:"up"`
 	Down         any    `yaml:"down"`
 	// FlBox extension for locally created nodes: a SHA-256 cert pin
@@ -267,7 +269,8 @@ func nodeOutbound(p clashProxy) (map[string]any, error) {
 		// outbound settings carry version/address/port, the auth
 		// lives in the hysteria transport settings, obfs became a
 		// finalmask (salamander) and bandwidth the finalmask's
-		// quicParams (brutal). Port hopping is not mapped yet.
+		// quicParams (brutal); port hopping is the quicParams
+		// udpHop port list.
 		auth := p.Password
 		if auth == "" {
 			auth = p.Auth
@@ -313,6 +316,16 @@ func nodeOutbound(p clashProxy) (map[string]any, error) {
 		}
 		if down := bandwidthString(p.Down); down != "" {
 			quicParams["brutalDown"] = down
+		}
+		if p.Ports != "" {
+			hop := map[string]any{"ports": p.Ports}
+			if p.HopInterval > 0 {
+				hop["interval"] = map[string]any{
+					"from": p.HopInterval,
+					"to":   p.HopInterval,
+				}
+			}
+			quicParams["udpHop"] = hop
 		}
 		if len(quicParams) > 0 {
 			finalmask["quicParams"] = quicParams
