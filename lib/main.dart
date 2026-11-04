@@ -440,6 +440,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _checkBgSubUpdates();
+      unawaited(_resyncCoreState());
     }
   }
 
@@ -649,60 +650,112 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  /// Reconciles Dart's session state with reality at startup. After
-  /// the task is swiped away or MIUI kills the process, the VPN
-  /// service and the Go core can have survived (or not)
-  /// independently of this fresh Dart state: adopt a session that is
-  /// fully alive, tear down half-dead leftovers (a tunnel with no
-  /// core black-holes all traffic and looks un-stoppable).
+  /// Reconciles Dart's session state with reality at startup
+  /// and on resume. The VPN service's companion flags describe
+  /// the tunnel as the system holds it: "active" flips off the
+  /// moment a stop begins, long before the service is actually
+  /// gone, so the pair (service alive, tun fd still set) is the
+  /// ground truth for "a tunnel exists". Three reconciliations
+  /// follow: adopt a fully live session; REVIVE a live tunnel
+  /// whose core died (restart core + forwarder on the same fd
+  /// instead of dropping the tunnel the system still shows);
+  /// and clear husks - a service or a core left without the
+  /// other half, which is what made the panel read "not
+  /// started" over a still-present system VPN after a
+  /// swipe-away on ROMs that keep the service process.
   Future<void> _resyncCoreState() async {
+    if (_busy || _running) return;
     try {
-      final coreRunning = CoreBridge().xrayStatus().contains('running=true');
+      final coreRunning =
+          CoreBridge().xrayStatus().contains('running=true');
+      final serviceAlive =
+          await _vpnChannel.invokeMethod<bool>('vpnServiceAlive') ??
+              false;
+      final fd = await _vpnChannel.invokeMethod<int>('tunFd') ?? -1;
       final vpnActive =
-            await _vpnChannel.invokeMethod<bool>('vpnActive') ?? false;
-        if (vpnActive && coreRunning) {
-          final fd = await _vpnChannel.invokeMethod<int>('tunFd') ?? -1;
-          if (fd > 0) _tunFd = fd;
-          if (!CoreBridge().vpnForwardActive()) {
-            // Core and tunnel survived but the packet forwarder did
-            // not: restart it on the same fd instead of adopting a
-            // session whose tunnel black-holes everything.
-            try {
-              await _ensureSbSetup();
-              CoreBridge().vpnForwardStart(_tunFd, ipv6: _ipv6Enabled);
-              _logEvent('resync: restarted the vpn forwarder');
-            } catch (e) {
-              _logEvent('resync: vpn forwarder restart failed: $e');
-              try {
-                CoreBridge().xrayStop();
-              } catch (_) {}
-              await _vpnChannel.invokeMethod('stopVpn');
-              _tunFd = 0;
-              _toast('已清理失效的 VPN 会话');
-              return;
-            }
+          await _vpnChannel.invokeMethod<bool>('vpnActive') ?? false;
+      final tunnelLive = serviceAlive && fd > 0;
+      if (tunnelLive && coreRunning) {
+        _tunFd = fd;
+        if (!CoreBridge().vpnForwardActive()) {
+          // Core and tunnel survived but the packet forwarder did
+          // not: restart it on the same fd instead of adopting a
+          // session whose tunnel black-holes everything.
+          try {
+            await _ensureSbSetup();
+            CoreBridge().vpnForwardStart(_tunFd, ipv6: _ipv6Enabled);
+            _logEvent('resync: restarted the vpn forwarder');
+          } catch (e) {
+            _logEvent('resync: vpn forwarder restart failed: $e');
+            await _teardownResyncLeftovers();
+            _toast('已清理失效的 VPN 会话');
+            return;
           }
-          _logEvent('resync: adopted live VPN session');
-          setState(() {
-            _running = true;
-            _startedAt = DateTime.now();
-          });
-          unawaited(_markWasRunning(true));
-          _startPolling();
-        } else if (vpnActive) {
-          _logEvent('resync: tunnel without core (zombie), tearing down');
-          try {
-            CoreBridge().vpnForwardStop();
-          } catch (_) {}
-          await _vpnChannel.invokeMethod('stopVpn');
-          _toast('已清理上次残留的 VPN 隧道');
-        } else if (coreRunning) {
-          _logEvent('resync: core without tunnel, stopping core');
-          try {
-            CoreBridge().xrayStop();
-          } catch (_) {}
         }
+        _logEvent('resync: adopted live VPN session');
+        _adoptSession();
+      } else if (tunnelLive) {
+        // The tunnel outlived the core: revive the data path on
+        // the same fd so panel and system agree again.
+        final config = _profile?.configs[_selectedNode];
+        if (config == null) {
+          await _teardownResyncLeftovers();
+          return;
+        }
+        try {
+          _tunFd = fd;
+          await _rotateLogIfHuge();
+          CoreBridge().xrayStart(config, 0);
+          await _ensureSbSetup();
+          CoreBridge().vpnForwardStart(_tunFd, ipv6: _ipv6Enabled);
+          _logEvent('resync: revived core on the surviving tunnel');
+          _adoptSession();
+          unawaited(_primeStatus());
+        } catch (e) {
+          _logEvent('resync: revive failed: $e');
+          await _teardownResyncLeftovers();
+          _toast('已清理失效的 VPN 会话');
+        }
+      } else if (coreRunning) {
+        _logEvent('resync: core without tunnel, stopping core');
+        try {
+          CoreBridge().vpnForwardStop();
+        } catch (_) {}
+        try {
+          CoreBridge().xrayStop();
+        } catch (_) {}
+      } else if (vpnActive || serviceAlive) {
+        // A husk: the service is still around (its notification
+        // and the system VPN entry linger) but holds no tunnel.
+        _logEvent('resync: clearing tunnel-less VPN service husk');
+        try {
+          CoreBridge().vpnForwardStop();
+        } catch (_) {}
+        await _vpnChannel.invokeMethod('stopVpn');
+      }
     } catch (_) {}
+  }
+
+  void _adoptSession() {
+    setState(() {
+      _running = true;
+      _startedAt = DateTime.now();
+    });
+    unawaited(_markWasRunning(true));
+    _startPolling();
+  }
+
+  Future<void> _teardownResyncLeftovers() async {
+    try {
+      CoreBridge().vpnForwardStop();
+    } catch (_) {}
+    try {
+      CoreBridge().xrayStop();
+    } catch (_) {}
+    try {
+      await _vpnChannel.invokeMethod('stopVpn');
+    } catch (_) {}
+    _tunFd = 0;
   }
 
   /// The default network changed under a running core (Wi-Fi to
@@ -3572,7 +3625,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.38.0 · app.flbox · Xray 内核',
+              'FlBox 0.39.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
