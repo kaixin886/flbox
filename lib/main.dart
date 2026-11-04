@@ -20,6 +20,15 @@ void main() {
 // generous whitespace, system font, stock Material widgets. Decoration is
 // reserved for the floating glass navigation bar.
 const _accent = Color(0xFF3478F6);
+
+/// Airport subscriptions carry pseudo "nodes" that only display
+/// account info (remaining traffic, expiry, reset countdown). They
+/// are excluded from latency tests and from auto-pick.
+final RegExp _infoNodePattern = RegExp(
+  r'剩余|流量|到期|重置|套餐|官网|公告|订阅|客服|expire|traffic|reset|remaining',
+  caseSensitive: false,
+);
+bool isInfoNode(String name) => _infoNodePattern.hasMatch(name);
 const _lightBackground = Color(0xFFF7F7F9);
 const _darkBackground = Color(0xFF101012);
 
@@ -394,6 +403,31 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  /// Keeps the error log bounded: past ~2MB only the last ~256KB
+  /// survive. Runs before a core start, when the previous instance
+  /// is stopped and nothing holds the file open.
+  Future<void> _rotateLogIfHuge() async {
+    try {
+      if (_logPath.isEmpty) return;
+      final file = File(_logPath);
+      if (!await file.exists()) return;
+      final size = await file.length();
+      const limit = 2 * 1024 * 1024;
+      if (size <= limit) return;
+      final raf = await file.open();
+      const keep = 256 * 1024;
+      await raf.setPosition(size - keep);
+      final bytes = await raf.read(keep);
+      await raf.close();
+      var text = utf8.decode(bytes, allowMalformed: true);
+      final nl = text.indexOf('\n');
+      if (nl >= 0) text = text.substring(nl + 1);
+      final tmp = File('$_logPath.tmp');
+      await tmp.writeAsString('[flbox] log rotated, kept the last 256KB\n$text');
+      await tmp.rename(_logPath);
+    } catch (_) {}
+  }
+
   /// Appends a lifecycle line to the core log file, so the log page
   /// can show why a session was adopted, cleaned up, or restarted.
   void _logEvent(String msg) {
@@ -556,10 +590,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _setRulesMode(bool rules) async {
-    if (_running) {
-      _toast('先停止再切换路由模式');
-      return;
-    }
+    if (_busy || rules == _rulesMode) return;
     if (rules && !await _ensureGeoData()) {
       _toast('规则库准备失败，检查网络后重试');
       return;
@@ -574,6 +605,25 @@ class _HomeShellState extends State<HomeShell> {
       } catch (e) {
         _toast('切换路由模式失败：$e');
         return;
+      }
+    }
+    if (_running) {
+      // Restart the core in place on the same tunnel with the new
+      // routing preset; the VPN itself never goes down.
+      final config = _profile?.configs[_selectedNode];
+      if (config != null) {
+        try {
+          CoreBridge().xrayStart(config, _modeVpn ? _tunFd : 0);
+          _logEvent('core restarted for mode switch (rules=$rules)');
+          _startedAt = DateTime.now();
+        } on CoreException catch (e) {
+          setState(() {
+            _running = false;
+            _tunFd = 0;
+          });
+          _toast('切换后重启失败：${e.message}');
+          return;
+        }
       }
     }
     _toast(rules ? '已切换到规则模式（v2ray 绕过大陆）' : '已切换到全局模式');
@@ -981,6 +1031,7 @@ class _HomeShellState extends State<HomeShell> {
         // core opens any socket.
         await _vpnChannel.invokeMethod('startCoreService');
       }
+      await _rotateLogIfHuge();
       CoreBridge().xrayStart(config, fd);
       _logEvent(
           'core started (vpn=$_modeVpn, rules=$_rulesMode, node=$_selectedNode)');
@@ -1065,7 +1116,9 @@ class _HomeShellState extends State<HomeShell> {
     try {
       final all = CoreBridge().translateAllXray(_profileYaml!, logPath: '');
       CoreBridge().xrayStart(all.config, 0);
-      final entries = all.ports.entries.toList();
+      final entries = all.ports.entries
+          .where((e) => !isInfoNode(e.key))
+          .toList();
       var next = 0;
       Future<void> worker() async {
         while (next < entries.length) {
@@ -1098,6 +1151,7 @@ class _HomeShellState extends State<HomeShell> {
     String? best;
     int? bestMs;
     for (final n in _profile!.nodes) {
+      if (isInfoNode(n.name)) continue;
       final d = _delays[n.name];
       if (d != null && (bestMs == null || d < bestMs)) {
         best = n.name;
@@ -2214,7 +2268,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.21.0 · app.flbox · Xray 内核',
+              'FlBox 0.22.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -2413,6 +2467,7 @@ class _ProxiesPageState extends State<ProxiesPage> {
                 final node = nodes[i];
                 return _NodeTile(
                   node: node,
+                  info: isInfoNode(node.name),
                   muted: muted,
                   favorite: widget.favorites.contains(node.name),
                   hasDelay: widget.delays.containsKey(node.name),
@@ -2437,6 +2492,7 @@ class _ProxiesPageState extends State<ProxiesPage> {
 class _NodeTile extends StatelessWidget {
   const _NodeTile({
     required this.node,
+    required this.info,
     required this.muted,
     required this.favorite,
     required this.hasDelay,
@@ -2448,6 +2504,7 @@ class _NodeTile extends StatelessWidget {
   });
 
   final XrayNode node;
+  final bool info;
   final Color muted;
   final bool favorite;
   final bool hasDelay;
@@ -2507,7 +2564,24 @@ class _NodeTile extends StatelessWidget {
                 ],
               ),
               const Spacer(),
-              Row(
+              if (info)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: muted.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      '订阅信息',
+                      style: TextStyle(color: muted, fontSize: 11),
+                    ),
+                  ),
+                )
+              else
+                Row(
                 children: [
                   Text(
                     node.type,
@@ -2752,11 +2826,28 @@ class _LogsPageState extends State<LogsPage> {
       if (await file.exists()) {
         final size = await file.length();
         _logMeta = '日志文件 $size 字节';
-        final lines = await file.readAsLines();
-        final tail = lines.length > 200
-            ? lines.sublist(lines.length - 200)
-            : lines;
-        _logTail = tail.join('\n');
+        // Tail read only: the file grows to megabytes, and a
+        // whole-file strict UTF-8 decode throws on any damaged byte
+        // - which left this page blank while the file kept growing.
+        final raf = await file.open();
+        try {
+          const chunk = 96 * 1024;
+          final start = size > chunk ? size - chunk : 0;
+          await raf.setPosition(start);
+          final bytes = await raf.read(chunk);
+          var text = utf8.decode(bytes, allowMalformed: true);
+          if (start > 0) {
+            final nl = text.indexOf('\n');
+            if (nl >= 0) text = text.substring(nl + 1);
+          }
+          final lines = text.split('\n');
+          final tail = lines.length > 200
+              ? lines.sublist(lines.length - 200)
+              : lines;
+          _logTail = tail.join('\n').trim();
+        } finally {
+          await raf.close();
+        }
       } else {
         _logMeta = '日志文件尚不存在（核心启动后创建）';
         _logTail = '';
@@ -2831,7 +2922,11 @@ class _LogsPageState extends State<LogsPage> {
                 : SingleChildScrollView(
                     child: SelectableText(
                       _logTail,
-                      style: const TextStyle(fontSize: 12, height: 1.5),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        height: 1.45,
+                        fontFamily: 'monospace',
+                      ),
                     ),
                   ),
           ),
