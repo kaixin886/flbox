@@ -28,9 +28,14 @@ import (
 // DNS is the bootstrap trap of every proxy core: the chosen
 // node's server is usually a domain, and resolving it through
 // the proxy it names would be circular. The bootstrap server
-// therefore detours to direct and gets a DNS rule for exactly
-// that domain; ordinary queries use the remote server through
-// the tunnel.
+// therefore dials the system path directly - a new-style
+// sing-box DNS server with no detour uses its own direct
+// dialer; an explicit detour to a bare direct outbound is
+// rejected as a no-op ("detour to an empty direct outbound
+// makes no sense", reproduced locally 2026-11-04 after the
+// 0.54 build failed on device in exactly that spot) - and
+// gets a DNS rule for exactly that domain; ordinary queries
+// use the remote server through the tunnel.
 func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, excludePkgs []string) (string, error) {
 	cfg, err := sbtranslate.ParseClash([]byte(clashYAML))
 	if err != nil {
@@ -112,7 +117,6 @@ func rootTunConfig(clashYAML, selectedNode string, ipv6 bool, includePkgs, exclu
 				"tag":    "dns-bootstrap",
 				"type":   "udp",
 				"server": "223.5.5.5",
-				"detour": "direct",
 			},
 			map[string]any{
 				"tag":    "dns-remote",

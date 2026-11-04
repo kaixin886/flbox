@@ -320,3 +320,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **App 接线**：设置页新增「运行模式」组（VPN／Root TUN／Root eBPF 禁用占位）；pref run_mode 贯通备份恢复；_toggleCore/_stopCore/_restartForMode（切节点/切订阅/切规则时重生成配置重启守护进程）/_resyncCoreState（状态文件 adopt）/_onNetworkChanged（root 下跳过）/状态轮询（root 下跳过）全部分流。root 模式下划掉 App 不影响守护进程（比 VPN 常驻更彻底）。
 - **一期边界（明示）**：Root TUN 仅全局模式（规则模式需 .srs 规则集管线，后续阶段）；手动节点订阅在 root 下会报「节点不在订阅中」；仪表盘无流量曲线（守护进程无计数通道）；开机自启恢复对 root 模式未接。**eBPF 为二期**：设置项已占位禁用。
 - **构建前置（需用户手改工作流一次）**：build-apk.yaml 的 Build Go core 步在 libflbox.so 之后加守护进程构建行（CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o ../android/app/src/main/jniLibs/arm64-v8a/libflboxd.so ./cmd/flboxd），未改时构建照常成功、App 内 rootCheck 报「未包含守护进程」。
+- 0.54 真机：构建成功（run 41845380098、产物 51MB、守护进程确认打入），Root TUN 启动即败：`start dns-transport: start dns/udp[dns-bootstrap]: detour to an empty direct outbound makes no sense`——转 0.55 修。
+
+## 0.55：修 Root TUN 的 DNS bootstrap detour
+- **根因**：sing-box 1.14.4 common/dialer/detour.go 的 DetourDialer 有「空 direct 检查」：detour 指向 DialerOptions 全默认的 direct 出站即在 DNS 传输启动时报错。rootconfig 给 dns-bootstrap 写了 `detour: "direct"` 而翻译产物的 direct 出站恰是全默认，触发此检查。VPN 路径不用这套 DNS 配置故从未暴露；0.54 的本地测试只验到 Options 解析、没跑 box.Start，故漏网。
+- **修法**：dns-bootstrap 去掉 detour——新式 DNS 服务器无 detour 时用自身直连拨号器（官方文档口径：等价于空 direct 出站），正是 bootstrap 要的系统直连路径，且不经 DetourDialer、无此检查。注释已同步改写。
+- **回归测试**：新增 core/rootstart_test.go——生成 root 配置后真的 box.New＋Start，断言不得死在 DNS/detour 阶段（本地沙箱在 TUN 创建处因权限停下属预期环境差异）。修复前本地逐字复现真机报错、修复后过关。今后动守护进程配置须跑此测试，不只解析校验。
