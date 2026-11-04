@@ -363,7 +363,7 @@ Color _delayColor(int? ms) {
   return Colors.redAccent;
 }
 
-/// Worker-isolate entry points for the bulk speed test. These are
+/// Worker-isolate entry points for the speed test. These are
 /// top-level on purpose: Isolate.run rejects a closure whose
 /// captured context holds an unsendable object, and a closure
 /// created inside a large state method can inherit that method's
@@ -375,9 +375,6 @@ Color _delayColor(int? ms) {
 /// in-class helpers _translate and _restartCoreInPlace get away
 /// with in-class closures because their methods hold nothing
 /// else; do not copy that pattern into a big method.)
-Future<XrayAllTest> _translateAllInIsolate(String yaml) =>
-    Isolate.run(() => CoreBridge().translateAllXray(yaml, logPath: ''));
-
 Future<void> _xrayStartInIsolate(String config) =>
     Isolate.run(() => CoreBridge().xrayStart(config, 0));
 
@@ -1931,6 +1928,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _toggleCore() async {
     if (_busy) return;
+    // The speed test owns the core instance while it runs;
+    // a toggle here would fight it for the same singleton.
+    if (_testing) {
+      _toast('测速中，等测速跑完再操作');
+      return;
+    }
     if (_running) {
       await _stopCore();
       return;
@@ -2076,55 +2079,63 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  /// Parallel latency test: one temporary instance carries every node
-  /// on its own local port, and six workers probe them concurrently.
-  /// The previously running node (if any) is restored afterwards.
+  /// Sequential latency test: each node is started on its own,
+  /// probed through the standard 7890 mixed inbound, then the
+  /// next one starts. The previously running node (if any) is
+  /// restored afterwards.
   ///
-  /// Every FFI call here runs on a worker isolate: translate-all
-  /// validates each outbound with the real loader and starting the
-  /// combined instance blocks for seconds on a big profile, and
-  /// doing that on the UI isolate froze the app until the system
-  /// killed it - the "speed test crashes the app" report of
-  /// 2026-11-04 (the same trap the group switch hit in 0.31).
-  /// Only the probes (plain HTTP through the test ports) stay on
-  /// this isolate. The isolate calls go through the top-level
-  /// helpers above, never an Isolate.run written inline here:
-  /// an inline closure inherits this method's context and is
-  /// rejected as unsendable (the 0.40 attempt failed exactly so).
+  /// This replaces the combined-instance design (TranslateAll:
+  /// one instance holding every outbound at once, one listener
+  /// port per node, six parallel probes). That design
+  /// flash-crashed the app on the user's phone across 0.39-0.41:
+  /// first blamed on UI-thread blocking (0.40 moved the work to
+  /// a worker isolate), then the move itself broke on an
+  /// unsendable closure (0.41, top-level helpers) - and once the
+  /// work finally ran, it STILL crashed. The crash therefore
+  /// lives in starting the combined instance: dozens of
+  /// outbounds (including protocol types never exercised
+  /// individually) all instantiated at once. A node's own
+  /// single config is the code path daily use proves, so the
+  /// test now rides exactly on it, one node at a time.
+  ///
+  /// Slower than the parallel design, but each node's name is
+  /// logged BEFORE it starts: if one node's outbound still
+  /// manages to kill the process, the log page's last
+  /// "speed test:" line names the culprit. A node's ordinary
+  /// start or probe failure marks it timed out and the run
+  /// continues with the next node.
   Future<void> _testAll() async {
-    if (_testing || _busy || _profile == null || _profileYaml == null) {
-      return;
-    }
+    if (_testing || _busy || _profile == null) return;
     final wasRunning = _running;
     final prevNode = _selectedNode;
-    final yaml = _profileYaml!;
     final prevConfig =
         prevNode != null ? _profile!.configs[prevNode] : null;
+    final entries = <MapEntry<String, String>>[
+      for (final n in _profile!.nodes)
+        if (!isInfoNode(n.name) && _profile!.configs[n.name] != null)
+          MapEntry(n.name, _profile!.configs[n.name]!),
+    ];
+    if (entries.isEmpty) return;
     setState(() {
       _testing = true;
       _delays = {};
     });
     try {
-      final all = await _translateAllInIsolate(yaml);
-      await _xrayStartInIsolate(all.config);
-      final entries = all.ports.entries
-          .where((e) => !isInfoNode(e.key))
-          .toList();
-      var next = 0;
-      Future<void> worker() async {
-        while (next < entries.length) {
-          final entry = entries[next++];
-          final ms = await _probePort(entry.value);
-          if (mounted) {
-            setState(() => _delays = {..._delays, entry.key: ms});
-          }
+      for (final entry in entries) {
+        if (!mounted) break;
+        _logEvent('speed test: ${entry.key}');
+        int? ms;
+        try {
+          await _xrayStartInIsolate(entry.value);
+          ms = await _probePort(7890);
+        } catch (e) {
+          _logEvent('speed test: ${entry.key} failed: $e');
+          ms = null;
+        }
+        if (mounted) {
+          setState(() => _delays = {..._delays, entry.key: ms});
         }
       }
-
-      await Future.wait([for (var i = 0; i < 6; i++) worker()]);
-    } catch (e) {
-      _logEvent('speed test failed: $e');
-      _toast('测速失败：$e');
     } finally {
       try {
         if (wasRunning && prevConfig != null) {
@@ -2160,6 +2171,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _selectNode(String name) async {
     if (name == _selectedNode) return;
+    // During a speed test the test loop owns the core instance;
+    // a selection restart would collide with the node it is
+    // currently starting. The pick-fastest flow calls this
+    // after the test has finished, so it is unaffected.
+    if (_testing) {
+      _toast('测速中，等测速跑完再切节点');
+      return;
+    }
     setState(() => _selectedNode = name);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('selected_node', name);
@@ -3665,7 +3684,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.41.0 · app.flbox · Xray 内核',
+              'FlBox 0.42.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
