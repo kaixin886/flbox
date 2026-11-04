@@ -77,6 +77,9 @@ class MainActivity : FlutterActivity() {
                 "vpnActive" -> {
                     result.success(FlboxVpnService.active)
                 }
+                "vpnServiceAlive" -> {
+                    result.success(FlboxVpnService.alive)
+                }
                 "tunFd" -> {
                     result.success(FlboxVpnService.tunFd)
                 }

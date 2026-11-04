@@ -30,6 +30,7 @@ class FlboxVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        alive = true
         registerNetworkWatcher()
     }
 
@@ -129,6 +130,7 @@ class FlboxVpnService : VpnService() {
 
     override fun onDestroy() {
         active = false
+        alive = false
         tunFd = -1
         unregisterNetworkWatcher()
         try {
@@ -222,6 +224,15 @@ class FlboxVpnService : VpnService() {
         // reads it at startup to reconcile its state with reality.
         @Volatile
         var active: Boolean = false
+
+        // True from onCreate to onDestroy. Dart polls this after a
+        // stop: "active" flips at the start of stopVpn(), long
+        // before the system has actually torn the service down,
+        // so it cannot prove the VPN is gone - this flag can,
+        // because a service the system still holds a VPN binding
+        // on is never destroyed.
+        @Volatile
+        var alive: Boolean = false
 
         // The established tunnel's fd, so a recreated Dart engine
         // in the same process can adopt the live session.

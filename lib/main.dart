@@ -1502,12 +1502,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         await _vpnChannel.invokeMethod('stopVpn');
       } catch (_) {}
       _tunFd = 0;
+      // "Down" means the service is actually destroyed, not
+      // merely flagged inactive: a VpnService the system still
+      // holds a VPN binding on stays alive (and its key icon
+      // stays in the status bar) even after stopVpn() ran.
       var down = false;
-      for (var i = 0; i < 6 && !down; i++) {
+      for (var i = 0; i < 8 && !down; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 250));
         try {
-          down = !(await _vpnChannel.invokeMethod<bool>('vpnActive') ??
-              false);
+          final alive =
+              await _vpnChannel.invokeMethod<bool>('vpnServiceAlive') ??
+                  false;
+          down = !alive;
         } catch (_) {
           down = true;
         }
@@ -1515,7 +1521,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (down) {
         _logEvent('core stopped (vpn service down)');
       } else {
-        _logEvent('stop: vpn service still active, retrying stop');
+        _logEvent('stop: vpn service still alive, retrying stop');
         try {
           await _vpnChannel.invokeMethod('stopVpn');
         } catch (_) {}
@@ -2988,7 +2994,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 32),
           Center(
             child: Text(
-              'FlBox 0.26.0 · app.flbox · Xray 内核',
+              'FlBox 0.27.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

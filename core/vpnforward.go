@@ -17,8 +17,9 @@ import (
 // ending in gVisor errors like "endpoint is closed for send"),
 // while the very same core and node carried those destinations
 // fine over the SOCKS inbound. The fd comes from the Android
-// VpnService via Dart; the platform's OpenTun hands sing-box a
-// duplicate of it (see platform.go).
+// VpnService via Dart; the platform's OpenTun hands it to
+// sing-box as is (see platform.go for why it must not be a
+// duplicate).
 
 var vpnTunFd atomic.Int32
 

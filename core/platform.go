@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
-	"golang.org/x/sys/unix"
 )
 
 // corePlatform is the Go-side PlatformInterface for libbox. In sing-box's
@@ -31,14 +30,18 @@ func (corePlatform) OpenTun(options libbox.TunOptions) (int32, error) {
 	if fd <= 0 {
 		return 0, errors.New("no vpn tun fd was provided")
 	}
-	// sing-box closes the descriptor it is given when the tun shuts
-	// down; hand it a duplicate so the Android VpnService keeps
-	// ownership of the original (it closes that one itself).
-	dup, err := unix.Dup(int(fd))
-	if err != nil {
-		return 0, err
-	}
-	return int32(dup), nil
+	// Hand over the VpnService's fd AS IS - never a duplicate.
+	// Verified against the sing-box 1.14.4 libbox source: the
+	// wrapper queries the interface name from this fd, then
+	// dups it and gives the DUP to the tun device, which closes
+	// that dup on shutdown. The fd OpenTun returns is never
+	// closed by libbox. Returning a dup of our own therefore
+	// leaked one open handle per session, and a tun interface
+	// with any handle still open never dies - the system kept
+	// the VpnService bound ("VPN won't turn off") until the
+	// whole process was force-stopped. The original fd stays
+	// owned by the VpnService, which closes it on stop.
+	return fd, nil
 }
 
 func (corePlatform) FindConnectionOwner(

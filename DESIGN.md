@@ -168,3 +168,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **allowInsecure 根除**：0.24 真机实锤——良心云 47 节点里混有普通 TLS 节点，翻译器给 tlsSettings 恒写 allowInsecure（false 也写），而内嵌 Xray 26.3.27 对该字段是「出现即硬错误」（已移除特性），单个节点选作出口时启动必死、TranslateAll 的整表配置一加载就被 proxy-31 拖沉、全部测速直接报「测速失败」。修法：翻译器任何路径都不再输出 allowInsecure（TLS 与 hy2 两处）；skip-cert-verify 在 Xray 侧无等价物，自签服务器走 pinnedPeerCertSha256（普通 TLS 分支也接上 pin）。另加防线：宿主包给 TranslateAll 注入 OutboundCheck（逐出站用真 LoadConfig 验活），验不过的节点不给测速端口——今后任何单个坏节点只死自己、不沉整表。测试：TLS 版三节点（vless/trojan/hy2 均带 skip-cert-verify）逐个与整表 LoadConfig 全过、配置全文断言无 allowInsecure、人造毒节点被跳过。
 - **VPN 停止加固**：用户报「开关关了 VPN 服务还在」。停止路径三层兜底：Dart 侧抽出 _stopCore 统一拆除（转发器→核心→隧道），停后轮询 vpnActive 校验、没停掉记日志并重试一次，结果行（core stopped (vpn service down)）进日志页可查；MainActivity 的 stopVpn/stopCoreService 在发停止意图后 600ms 再 stopService 兜底（服务没自停则系统强拆、onDestroy 关隧道）；两个服务都加 onTaskRemoved——划掉后台时先喊 Dart 走正规停止，800ms 没落地则本地自拆。本地模式的「核心服务」通知残留同理覆盖。
 - 文件导入在 0.24 真机已确认可用（ntt-test-profile.yaml 导入成功）。
+
+## 0.27（2026-11-04）VPN 关不掉定案：OpenTun 的 dup fd 泄漏
+
+- **真凶（dumpsys＋sing-box 源码双实锤）**：0.26 实测停止后代理停了但 VPN 图标/服务不走。用户 dumpsys 抓到 FlboxVpnService 的 ServiceRecord 还在：startRequested=false（stopSelf 已生效），但 system 进程经 android.net.VpnService 的绑定不撤——系统只在 tun 接口真正消失时才解绑。读 sing-box 1.14.4 libbox 源码定案：wrapper 的 OpenInterface 拿到 OpenTun 返回的 fd 后只做 getTunnelName 查询、再 dup 一份给 tun 设备（tun.Close 关的是这份 dup），**OpenTun 返回的那个 fd 本身 libbox 从不关闭**。而 FlBox 的 platform.OpenTun 恰恰返回的是自己 unix.Dup 的副本——于是每开一次 VPN 就泄漏一个永不关闭的 fd 句柄，tun 接口永远有活句柄、永不消失，服务被系统绑住直到强行停止整个进程（与用户「强行停止才消」吻合）。
+- **修法**：OpenTun 改为把 VpnService 的原始 fd 原样交回（所有权仍在 Kotlin 服务手里、由它 stop 时关闭），libbox 内部 dup 自管。platform.go 注释已换成源码核实过的契约，并注明旧注释「sing-box 会关掉给它的 fd」是错误假设、勿再 dup。
+- **校验口径纠正**：0.26 的 _stopCore 轮询 vpnActive 判「down」是假证据——active 在 stopVpn() 入口就被置 false、远早于系统拆完。VpnService 新增 alive 标志（onCreate→onDestroy）经通道 vpnServiceAlive 暴露，_stopCore 改为轮询服务是否真被销毁才记 core stopped (vpn service down)，没销毁则记 still alive 并重试。
+- 0.26 的 onTaskRemoved 与 stopService 兜底保留（无害），但它们治不了绑定不撤——本版 fd 修复才是根子。
