@@ -51,6 +51,13 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="proxy core hosting"/>
         </service>
+        <!-- Bulk speed test host, in its own process like
+             v2rayNG's test service: a native abort during a test
+             run then costs the run, not the app. -->
+        <service
+            android:name=".FlboxTestService"
+            android:exported="false"
+            android:process=":tasks" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

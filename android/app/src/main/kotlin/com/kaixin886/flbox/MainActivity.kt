@@ -13,9 +13,14 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 // Holds the channel so the VpnService (a separate component) can
@@ -56,6 +61,14 @@ class MainActivity : FlutterActivity() {
                             .putExtra(
                                 FlboxVpnService.EXTRA_IPV6,
                                 call.argument<Boolean>("ipv6") ?: false
+                            )
+                            .putExtra(
+                                FlboxVpnService.EXTRA_SPLIT_ON,
+                                call.argument<Boolean>("splitOn") ?: false
+                            )
+                            .putExtra(
+                                FlboxVpnService.EXTRA_SPLIT_ALLOW,
+                                call.argument<Boolean>("splitAllow") ?: false
                             )
                     )
                     result.success(null)
@@ -106,7 +119,64 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "listApps" -> {
-                    result.success(listLaunchableApps())
+                    // Rendering ~200 app icons takes a moment;
+                    // keep it off the main thread, reply on it as
+                    // MethodChannel requires.
+                    Thread {
+                        val apps = listLaunchableApps()
+                        runOnUiThread { result.success(apps) }
+                    }.start()
+                }
+                "startTestService" -> {
+                    try {
+                        startService(Intent(this, FlboxTestService::class.java))
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.success(false)
+                    }
+                }
+                "stopTestService" -> {
+                    try {
+                        stopService(Intent(this, FlboxTestService::class.java))
+                    } catch (e: Exception) {
+                    }
+                    result.success(null)
+                }
+                "writeTestJob" -> {
+                    // Writes the speed test job file and clears
+                    // the previous run's outputs; the reply lands
+                    // only after the file is on disk, so the test
+                    // service started right after sees it.
+                    val job = call.arguments as? String
+                    Thread {
+                        var ok = false
+                        try {
+                            File(filesDir, FlboxTestService.RESULTS_FILE).delete()
+                            File(filesDir, FlboxTestService.DONE_FILE).delete()
+                            if (job != null) {
+                                File(filesDir, FlboxTestService.JOB_FILE)
+                                    .writeText(job)
+                                ok = true
+                            }
+                        } catch (e: Exception) {
+                        }
+                        runOnUiThread { result.success(ok) }
+                    }.start()
+                }
+                "readTestResults" -> {
+                    Thread {
+                        var lines = ""
+                        var done = false
+                        try {
+                            val f = File(filesDir, FlboxTestService.RESULTS_FILE)
+                            if (f.exists()) lines = f.readText()
+                            done = File(filesDir, FlboxTestService.DONE_FILE).exists()
+                        } catch (e: Exception) {
+                        }
+                        runOnUiThread {
+                            result.success(mapOf("lines" to lines, "done" to done))
+                        }
+                    }.start()
                 }
                 "extractGeoData" -> {
                     // ~25 MB copy: keep it off the main thread, reply
@@ -219,25 +289,48 @@ class MainActivity : FlutterActivity() {
         return allOk
     }
 
-    /** Apps the user can pick in the per-app bypass list. */
-    private fun listLaunchableApps(): List<Map<String, String>> {
+    /** Apps the user can pick on the per-app proxy page, with
+     * their launcher icons as PNG bytes for the list rows. */
+    private fun listLaunchableApps(): List<Map<String, Any?>> {
         val pm = packageManager
         val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         @Suppress("DEPRECATION")
         val infos = pm.queryIntentActivities(query, 0)
         val seen = HashSet<String>()
-        val apps = ArrayList<Map<String, String>>()
+        val apps = ArrayList<Map<String, Any?>>()
         for (info in infos) {
             val appInfo = info.activityInfo.applicationInfo
             if (!seen.add(appInfo.packageName)) continue
             apps.add(
                 mapOf(
                     "pkg" to appInfo.packageName,
-                    "label" to pm.getApplicationLabel(appInfo).toString()
+                    "label" to pm.getApplicationLabel(appInfo).toString(),
+                    "icon" to drawableToPng(pm.getApplicationIcon(appInfo))
                 )
             )
         }
-        return apps.sortedBy { it["label"]?.lowercase() ?: "" }
+        return apps.sortedBy { (it["label"] as? String)?.lowercase() ?: "" }
+    }
+
+    /** Renders a launcher icon to a small PNG for the Dart side. */
+    private fun drawableToPng(drawable: Drawable): ByteArray? {
+        return try {
+            val size = 96
+            val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            if (drawable is BitmapDrawable && drawable.bitmap != null) {
+                val scaled = Bitmap.createScaledBitmap(drawable.bitmap, size, size, true)
+                canvas.drawBitmap(scaled, 0f, 0f, null)
+            } else {
+                drawable.setBounds(0, 0, size, size)
+                drawable.draw(canvas)
+            }
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            out.toByteArray()
+        } catch (e: Exception) {
+            null
+        }
     }
 
     // Status notifications (start summary, subscription

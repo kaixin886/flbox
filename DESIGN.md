@@ -271,3 +271,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - v2rayNG 为何同设计不闪，也查清了：其清单里 CoreTestService 跑在独立的 `:tasks` 进程（原生层权威进程是 `:daemon`），原生探针就算 abort 也只死测试进程、界面无感；FlBox 测量跑在界面进程里，同样的 abort 就是闪退。这也是它敢默认并发 16 的前提。
 - 改法：`xrayMeasureDelay` 的实例生命周期（LoadJSONConfig＋New＋Start＋Close）全部收进一把全局锁串行，只放探针本身并行——裁剪后的创建是毫秒级、慢的是探针，速度损失可忽略；这与 v2rayNG 对不可裁剪配置全局串行的处理同理。Dart 侧每节点补 `speed test done:` 完成日志，与 start 行配对：万一再死，无 done 行的在飞集合至多 8 个具名节点，可继续收窄。
 - 若本版仍闪：下一手是将测速整体迁到独立进程（仿 `:tasks`），工程量大、留作后手不在本版。
+
+## 0.47：测速迁独立进程＋分应用页改版（用户 2026-11-04：0.46 测到第 25 个仍闪退，拍板大改，并要求分应用照 AsteriskNG 图改）
+- 0.46 真机测到第 25 个完成仍闪退——生命周期串行化未根治，进程内调度变量至此排除干净。剩下与 v2rayNG 的唯一结构差异就是宿主进程，本版按用户拍板做这个大改。
+- 测速独立进程：新增 `FlboxTestService`（清单声明 `android:process=":tasks"`、非导出），内起第二个 Flutter 引擎跑 Dart 入口 `testMain`（`@pragma('vm:entry-point')` 保入 AOT 快照，不注册任何插件）。两进程经应用沙盒内 filesDir 文件通信：界面写任务文件（writeTestJob 通道落盘并清旧结果）→ MainActivity 拉起服务 → testMain 经 `flbox/testhost` 通道取任务、逐条回传结果（服务追加写 results 文件）→ 界面每 300ms 轮询结果应用延迟；done 标记收尾，25 秒无新结果判测试进程已死、按已有结果定稿、其余节点留未测。测试进程被原生 abort 只损失本轮测速，界面与其余结果无恙。服务起不来时自动回退 0.46 的进程内测速并在日志注明。
+- 分应用页照用户截图改版：页首双开关（启用分应用／绕行模式，同一行），列表行带应用图标（listApps 通道新增图标 PNG 字节、后台线程渲染）、应用名＋灰色小字包名、右侧勾选框，行点击亦可切换；搜索框保留。模式语义补齐：绕行开＝勾选应用绕过 VPN（addDisallowedApplication）；绕行关＝仅勾选应用走 VPN（addAllowedApplication，此时本应用自动在隧道外、核心出站不回环）；未启用＝不做任何分应用处理。新增偏好 bypass_enabled／bypass_allow（备份/恢复一并带上），保存仍走页首「保存」、下次启动 VPN 生效，设置页行摘要随三态更新。
+- Kotlin 改动较多且本地无 Gradle 无法编译验证，靠 CI 首构建检验：新文件 FlboxTestService.kt、MainActivity（startVpn 透传 splitOn/splitAllow、listApps 图标、四条测速通道）、FlboxVpnService（splitOn/splitAllow 消费）、清单加服务声明；Dart analyze 与 Go 全包测试本地已过。

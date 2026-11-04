@@ -378,6 +378,56 @@ Color _delayColor(int? ms) {
 Future<int> _xrayMeasureInIsolate(String config, String url) =>
     Isolate.run(() => CoreBridge().xrayMeasureDelay(config, url));
 
+/// Entrypoint for the speed test process. The Kotlin
+/// FlboxTestService runs in its own ":tasks" process (the
+/// v2rayNG split) and starts a second Flutter engine aimed at
+/// this function; the job arrives over the host channel and
+/// each result is streamed back the same way, so a native
+/// abort mid-run kills only that process while the UI keeps
+/// every result already posted. Never invoke this from the UI
+/// process.
+@pragma('vm:entry-point')
+Future<void> testMain() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  const host = MethodChannel('flbox/testhost');
+  try {
+    final jobStr = await host.invokeMethod<String>('getJob');
+    if (jobStr == null) {
+      await host.invokeMethod<void>('done');
+      return;
+    }
+    final job = jsonDecode(jobStr) as Map<String, dynamic>;
+    final url =
+        job['url'] as String? ?? 'http://www.gstatic.com/generate_204';
+    final items = <Map<String, dynamic>>[
+      for (final e in job['items'] as List) (e as Map).cast<String, dynamic>(),
+    ];
+    var next = 0;
+    Future<void> worker() async {
+      while (next < items.length) {
+        final item = items[next++];
+        int ms;
+        try {
+          ms = await _xrayMeasureInIsolate(item['config'] as String, url);
+        } catch (_) {
+          ms = -1;
+        }
+        try {
+          await host.invokeMethod<void>(
+            'postResult',
+            jsonEncode({'name': item['name'], 'ms': ms}),
+          );
+        } catch (_) {}
+      }
+    }
+
+    await Future.wait([for (var i = 0; i < 8; i++) worker()]);
+  } catch (_) {}
+  try {
+    await host.invokeMethod<void>('done');
+  } catch (_) {}
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -413,6 +463,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _notifySubUpdate = true;
   int _subAutoIntervalHours = 24;
   Set<String> _bypassPkgs = {};
+  bool _splitEnabled = false;
+  bool _splitAllow = false;
   bool _netBlocked = false;
   bool _batteryIgnored = false;
   final _traffic = ValueNotifier<_Traffic>(const _Traffic());
@@ -533,6 +585,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _bypassPkgs = (jsonDecode(bypassRaw) as List).cast<String>().toSet();
       } catch (_) {}
     }
+    _splitEnabled = prefs.getBool('bypass_enabled') ?? false;
+    _splitAllow = prefs.getBool('bypass_allow') ?? false;
     final saved = prefs.getInt('nav_style');
     if (saved != null && saved >= 0 && saved < NavStyle.values.length) {
       setState(() => _navStyle = NavStyle.values[saved]);
@@ -978,6 +1032,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           'nav_style': _navStyle.index,
           'fav_nodes': _favNodes.toList(),
           'bypass_pkgs': _bypassPkgs.toList(),
+          'bypass_enabled': _splitEnabled,
+          'bypass_allow': _splitAllow,
         },
       };
       final text = jsonEncode(backup);
@@ -1050,6 +1106,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       var navStyle = _navStyle;
       var favNodes = _favNodes;
       var bypassPkgs = _bypassPkgs;
+      var bypassEnabled = _splitEnabled;
+      var bypassAllow = _splitAllow;
       final bp = decoded['prefs'];
       if (bp is Map<String, dynamic>) {
         bool bb(String k, bool cur) => bp[k] is bool ? bp[k] as bool : cur;
@@ -1059,6 +1117,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         notifyOnStart = bb('notify_on_start', notifyOnStart);
         notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
         ipv6Enabled = bb('ipv6_enabled', ipv6Enabled);
+        bypassEnabled = bb('bypass_enabled', bypassEnabled);
+        bypassAllow = bb('bypass_allow', bypassAllow);
         if (bp['sub_auto_interval_hours'] is int) {
           intervalHours = bp['sub_auto_interval_hours'] as int;
         }
@@ -1092,6 +1152,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _navStyle = navStyle;
         _favNodes = favNodes;
         _bypassPkgs = bypassPkgs;
+        _splitEnabled = bypassEnabled;
+        _splitAllow = bypassAllow;
       });
       await prefs.setBool('rules_mode', rulesMode);
       await prefs.setBool('auto_connect', autoConnect);
@@ -1104,6 +1166,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await prefs.setString('fav_nodes', jsonEncode(favNodes.toList()));
       await prefs.setString(
           'bypass_pkgs', jsonEncode(bypassPkgs.toList()));
+      await prefs.setBool('bypass_enabled', bypassEnabled);
+      await prefs.setBool('bypass_allow', bypassAllow);
       await _persistSubs();
       final active = _activeSub;
       if (active != null) {
@@ -1806,9 +1870,19 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     if (url != null) await _fetchSubscription(url);
   }
 
-  Future<void> _setBypassPkgs(Set<String> pkgs) async {
-    setState(() => _bypassPkgs = pkgs);
+  Future<void> _setBypassSettings(
+    bool enabled,
+    bool allow,
+    Set<String> pkgs,
+  ) async {
+    setState(() {
+      _splitEnabled = enabled;
+      _splitAllow = allow;
+      _bypassPkgs = pkgs;
+    });
     final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('bypass_enabled', enabled);
+    await prefs.setBool('bypass_allow', allow);
     await prefs.setString('bypass_pkgs', jsonEncode(pkgs.toList()));
     _toast('分应用设置已保存，下次启动 VPN 时生效');
   }
@@ -1958,6 +2032,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await _vpnChannel.invokeMethod('startVpn', {
         'bypass': _bypassPkgs.toList(),
         'ipv6': _ipv6Enabled,
+        'splitOn': _splitEnabled,
+        'splitAllow': _splitAllow,
       });
       final fd = await _tunReady!.future.timeout(const Duration(seconds: 15));
       _tunFd = fd;
@@ -2100,19 +2176,24 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// the process was gone). The core-side test-instance entry
   /// points remain as a fallback but have no caller now.
   /// 0.45's first cut of this measure design still died (at 23
-  /// completions): instance lifecycles were still fully
-  /// concurrent, and unlike v2rayNG - whose test service runs
-  /// in a separate ":tasks" process - FlBox measures in the UI
-  /// process, so a native abort is an app crash. Since 0.46
-  /// the core serializes the instance lifecycle (load, create,
-  /// start, close) and only the probes run in parallel; the
-  /// builds that never crashed (0.42, 0.43) are exactly the
-  /// ones whose starts were serialized.
+  /// completions) and 0.46 - which serialized the instance
+  /// lifecycle and kept only the probes parallel - died at 25,
+  /// so in-process scheduling was never the deciding variable.
+  /// The remaining structural difference with v2rayNG was the
+  /// process itself: its CoreTestService runs in a separate
+  /// ":tasks" process, so a native abort there costs a test
+  /// run, not the app. Since 0.47 the default path is the
+  /// same split: the job goes to the FlboxTestService process
+  /// (see testMain) and results stream back through a results
+  /// file this method polls; if that process dies mid-run the
+  /// poll stalls, the run finalizes with the results that did
+  /// arrive, and the rest simply stay untested. The in-process
+  /// workers below remain as a fallback for when the service
+  /// cannot be started at all.
   ///
-  /// A node's name is logged before its measure call, so a
-  /// call that still manages to kill the process names its
-  /// culprit on the log page; ordinary failures just mark the
-  /// node timed out and the run continues.
+  /// Nodes are logged before the run and each result is logged
+  /// as it lands, so the log page still shows exactly how far
+  /// a run got.
   Future<void> _testAll() async {
     if (_testing || _profile == null) return;
     final entries = <MapEntry<String, String>>[
@@ -2125,11 +2206,109 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _testing = true;
       _delays = {};
     });
+    for (final entry in entries) {
+      _logEvent('speed test: ${entry.key}');
+    }
+    try {
+      final isolated = await _testAllViaService(entries);
+      if (!isolated) {
+        _logEvent('speed test: test service unavailable, in-process');
+        await _measureAllInProcess(entries);
+      }
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  /// Ships the job to the test process and polls its results
+  /// file (through the platform channel) until the run reports
+  /// done, stalls for 25 seconds (the test process died or is
+  /// wedged: finalize with what arrived), or hits a generous
+  /// overall cap. Returns false only when the service path
+  /// could not be started, so the caller can fall back.
+  Future<bool> _testAllViaService(
+    List<MapEntry<String, String>> entries,
+  ) async {
+    try {
+      final job = jsonEncode({
+        'url': 'http://www.gstatic.com/generate_204',
+        'items': [
+          for (final e in entries) {'name': e.key, 'config': e.value},
+        ],
+      });
+      final written =
+          await _vpnChannel.invokeMethod<bool>('writeTestJob', job) ?? false;
+      if (!written) return false;
+      final started =
+          await _vpnChannel.invokeMethod<bool>('startTestService') ?? false;
+      if (!started) return false;
+    } catch (_) {
+      return false;
+    }
+    final names = {for (final e in entries) e.key};
+    var consumed = 0;
+    var lastProgress = DateTime.now();
+    final runStart = DateTime.now();
+    while (true) {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      if (!mounted) {
+        try {
+          await _vpnChannel.invokeMethod('stopTestService');
+        } catch (_) {}
+        return true;
+      }
+      Map<dynamic, dynamic>? res;
+      try {
+        res = await _vpnChannel
+            .invokeMethod<Map<dynamic, dynamic>>('readTestResults');
+      } catch (_) {
+        res = null;
+      }
+      if (res == null) break;
+      final done = res['done'] == true;
+      final lines = <String>[
+        for (final l in (res['lines'] as String? ?? '').split('\n'))
+          if (l.trim().isNotEmpty) l,
+      ];
+      while (consumed < lines.length) {
+        final line = lines[consumed++];
+        lastProgress = DateTime.now();
+        try {
+          final m = jsonDecode(line) as Map<String, dynamic>;
+          final name = m['name'] as String?;
+          if (name == null || !names.contains(name)) continue;
+          final raw = (m['ms'] as num?)?.toInt() ?? -1;
+          final ms = raw >= 0 ? raw : null;
+          _logEvent('speed test done: $name ${ms ?? 'timeout'}');
+          if (mounted) {
+            setState(() => _delays = {..._delays, name: ms});
+          }
+        } catch (_) {}
+      }
+      if (done) break;
+      if (DateTime.now().difference(lastProgress) >
+          const Duration(seconds: 25)) {
+        _logEvent('speed test: test process stalled, finalizing');
+        break;
+      }
+      if (DateTime.now().difference(runStart) >
+          const Duration(seconds: 240)) {
+        break;
+      }
+    }
+    return true;
+  }
+
+  /// The pre-0.47 in-process measurement, kept as the fallback
+  /// for when the test service cannot start. Eight workers,
+  /// core-side lifecycle serialization (0.46) still applies.
+  Future<void> _measureAllInProcess(
+    List<MapEntry<String, String>> entries,
+  ) async {
     var next = 0;
     Future<void> worker() async {
       while (next < entries.length) {
         final entry = entries[next++];
-        _logEvent('speed test: ${entry.key}');
         int? ms;
         try {
           final r = await _xrayMeasureInIsolate(
@@ -2141,10 +2320,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           _logEvent('speed test: ${entry.key} failed: $e');
           ms = null;
         }
-        // Completion lines pair with the start lines above: if
-        // a measure ever kills the process again, the nodes
-        // with a start line but no done line are the in-flight
-        // suspects, a set of at most the worker count.
         _logEvent('speed test done: ${entry.key} ${ms ?? 'timeout'}');
         if (mounted) {
           setState(() => _delays = {..._delays, entry.key: ms});
@@ -2152,11 +2327,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       }
     }
 
-    try {
-      await Future.wait([for (var i = 0; i < 8; i++) worker()]);
-    } finally {
-      if (mounted) setState(() => _testing = false);
-    }
+    await Future.wait([for (var i = 0; i < 8; i++) worker()]);
   }
 
   Future<void> _pickFastest() async {
@@ -2219,7 +2390,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           notifySubUpdate: _notifySubUpdate,
           onNotifySubUpdateChanged: _setNotifySubUpdate,
           bypassPkgs: _bypassPkgs,
-          onBypassChanged: _setBypassPkgs,
+          bypassEnabled: _splitEnabled,
+          bypassAllow: _splitAllow,
+          onBypassSettingsChanged: _setBypassSettings,
           batteryIgnored: _batteryIgnored,
           onOpenBatterySettings: () async {
             try {
@@ -3338,7 +3511,9 @@ class _SettingsPage extends StatefulWidget {
     required this.notifySubUpdate,
     required this.onNotifySubUpdateChanged,
     required this.bypassPkgs,
-    required this.onBypassChanged,
+    required this.bypassEnabled,
+    required this.bypassAllow,
+    required this.onBypassSettingsChanged,
     required this.batteryIgnored,
     required this.onOpenBatterySettings,
     required this.rulesMode,
@@ -3364,7 +3539,9 @@ class _SettingsPage extends StatefulWidget {
   final bool notifySubUpdate;
   final ValueChanged<bool> onNotifySubUpdateChanged;
   final Set<String> bypassPkgs;
-  final ValueChanged<Set<String>> onBypassChanged;
+  final bool bypassEnabled;
+  final bool bypassAllow;
+  final void Function(bool, bool, Set<String>) onBypassSettingsChanged;
   final bool batteryIgnored;
   final VoidCallback onOpenBatterySettings;
   final bool rulesMode;
@@ -3405,6 +3582,8 @@ class _SettingsPageState extends State<_SettingsPage> {
   late bool _notifySubUpdate = widget.notifySubUpdate;
   late bool _rulesMode = widget.rulesMode;
   late Set<String> _bypassPkgs = widget.bypassPkgs;
+  late bool _splitEnabled = widget.bypassEnabled;
+  late bool _splitAllow = widget.bypassAllow;
 
   @override
   Widget build(BuildContext context) {
@@ -3467,9 +3646,11 @@ class _SettingsPageState extends State<_SettingsPage> {
               leading: const Icon(Icons.apps_outlined),
               title: const Text('分应用代理'),
               subtitle: Text(
-                _bypassPkgs.isEmpty
-                    ? '所有应用都走 VPN'
-                    : '${_bypassPkgs.length} 个应用绕过 VPN',
+                !_splitEnabled
+                    ? '未启用，所有应用都走 VPN'
+                    : _splitAllow
+                        ? '仅 ${_bypassPkgs.length} 个应用走 VPN'
+                        : '${_bypassPkgs.length} 个应用绕过 VPN',
                 style: TextStyle(color: muted),
               ),
               trailing: const Icon(Icons.chevron_right),
@@ -3477,10 +3658,16 @@ class _SettingsPageState extends State<_SettingsPage> {
                 Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => _BypassAppsPage(
-                      initial: _bypassPkgs,
-                      onChanged: (pkgs) {
-                        setState(() => _bypassPkgs = pkgs);
-                        widget.onBypassChanged(pkgs);
+                      initialPkgs: _bypassPkgs,
+                      initialEnabled: _splitEnabled,
+                      initialAllow: _splitAllow,
+                      onSave: (enabled, allow, pkgs) {
+                        setState(() {
+                          _splitEnabled = enabled;
+                          _splitAllow = allow;
+                          _bypassPkgs = pkgs;
+                        });
+                        widget.onBypassSettingsChanged(enabled, allow, pkgs);
                       },
                     ),
                   ),
@@ -3687,7 +3874,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.46.0 · app.flbox · Xray 内核',
+              'FlBox 0.47.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -5286,13 +5473,26 @@ class _LogsPageState extends State<LogsPage> {
   }
 }
 
-// Per-app bypass picker: checked apps are excluded from the VPN
-// (addDisallowedApplication) the next time it starts.
+// Per-app split page, laid out after the reference client:
+// two switches on top - the master enable and the mode - and
+// the app list below with launcher icons, names and package
+// names. Bypass mode (the mode switch on): checked apps are
+// excluded from the VPN (addDisallowedApplication). Allowlist
+// mode (switch off): only the checked apps are routed into
+// the VPN (addAllowedApplication). The choice takes effect
+// the next time the VPN starts.
 class _BypassAppsPage extends StatefulWidget {
-  const _BypassAppsPage({required this.initial, required this.onChanged});
+  const _BypassAppsPage({
+    required this.initialPkgs,
+    required this.initialEnabled,
+    required this.initialAllow,
+    required this.onSave,
+  });
 
-  final Set<String> initial;
-  final ValueChanged<Set<String>> onChanged;
+  final Set<String> initialPkgs;
+  final bool initialEnabled;
+  final bool initialAllow;
+  final void Function(bool enabled, bool allow, Set<String> pkgs) onSave;
 
   @override
   State<_BypassAppsPage> createState() => _BypassAppsPageState();
@@ -5301,8 +5501,10 @@ class _BypassAppsPage extends StatefulWidget {
 class _BypassAppsPageState extends State<_BypassAppsPage> {
   static const _channel = MethodChannel('flbox/vpn');
 
-  late final Set<String> _selected = {...widget.initial};
-  List<({String pkg, String label})> _apps = [];
+  late bool _enabled = widget.initialEnabled;
+  late bool _allow = widget.initialAllow;
+  late final Set<String> _selected = {...widget.initialPkgs};
+  List<({String pkg, String label, Uint8List? icon})> _apps = [];
   String _query = '';
   bool _loading = true;
 
@@ -5315,14 +5517,17 @@ class _BypassAppsPageState extends State<_BypassAppsPage> {
   Future<void> _load() async {
     try {
       final raw = await _channel.invokeMethod<List<dynamic>>('listApps');
-      final apps = <({String pkg, String label})>[];
+      final apps = <({String pkg, String label, Uint8List? icon})>[];
       for (final e in raw ?? const []) {
-        final map = (e as Map).map(
-          (k, v) => MapEntry(k.toString(), v.toString()),
-        );
-        final pkg = map['pkg'];
+        final map = e as Map<dynamic, dynamic>;
+        final pkg = map['pkg'] as String?;
         if (pkg == null || pkg == 'app.flbox') continue;
-        apps.add((pkg: pkg, label: map['label'] ?? pkg));
+        final icon = map['icon'];
+        apps.add((
+          pkg: pkg,
+          label: map['label'] as String? ?? pkg,
+          icon: icon is Uint8List ? icon : null,
+        ));
       }
       if (mounted) {
         setState(() {
@@ -5341,7 +5546,7 @@ class _BypassAppsPageState extends State<_BypassAppsPage> {
         .colorScheme
         .onSurface
         .withValues(alpha: 0.5);
-    final visible = <({String pkg, String label})>[
+    final visible = <({String pkg, String label, Uint8List? icon})>[
       for (final app in _apps)
         if (_query.isEmpty ||
             app.label.toLowerCase().contains(_query.toLowerCase()) ||
@@ -5350,11 +5555,11 @@ class _BypassAppsPageState extends State<_BypassAppsPage> {
     ];
     return Scaffold(
       appBar: AppBar(
-        title: const Text('分应用代理'),
+        title: const Text('分应用设置'),
         actions: [
           TextButton(
             onPressed: () {
-              widget.onChanged(_selected);
+              widget.onSave(_enabled, _allow, _selected);
               Navigator.of(context).pop();
             },
             child: const Text('保存'),
@@ -5364,7 +5569,39 @@ class _BypassAppsPageState extends State<_BypassAppsPage> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
+            child: Row(
+              children: [
+                const Expanded(child: Text('启用分应用')),
+                Switch(
+                  value: _enabled,
+                  onChanged: (v) => setState(() => _enabled = v),
+                ),
+                const SizedBox(width: 24),
+                const Expanded(child: Text('绕行模式')),
+                Switch(
+                  value: !_allow,
+                  onChanged: (v) => setState(() => _allow = !v),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                !_enabled
+                    ? '未启用：所有应用都走 VPN'
+                    : _allow
+                        ? '绕行模式关：仅勾选的应用走 VPN，其余直连'
+                        : '绕行模式开：勾选的应用绕过 VPN 直连',
+                style: TextStyle(color: muted, fontSize: 13),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
             child: TextField(
               decoration: const InputDecoration(
                 hintText: '搜索应用',
@@ -5375,33 +5612,35 @@ class _BypassAppsPageState extends State<_BypassAppsPage> {
               onChanged: (v) => setState(() => _query = v),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                '勾选的应用绕过 VPN 直连，下次启动 VPN 时生效',
-                style: TextStyle(color: muted, fontSize: 13),
-              ),
-            ),
-          ),
+          const Divider(height: 1),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
-                : ListView(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 24),
-                    children: [
-                      for (final app in visible)
-                        CheckboxListTile(
-                          title: Text(app.label),
-                          subtitle: Text(
-                            app.pkg,
-                            style: TextStyle(color: muted, fontSize: 12),
-                          ),
-                          value: _selected.contains(app.pkg),
-                          onChanged: (checked) {
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(8, 4, 8, 24),
+                    itemCount: visible.length,
+                    itemBuilder: (context, i) {
+                      final app = visible[i];
+                      final checked = _selected.contains(app.pkg);
+                      return ListTile(
+                        leading: app.icon != null
+                            ? Image.memory(
+                                app.icon!,
+                                width: 42,
+                                height: 42,
+                                gaplessPlayback: true,
+                              )
+                            : const Icon(Icons.apps, size: 42),
+                        title: Text(app.label),
+                        subtitle: Text(
+                          app.pkg,
+                          style: TextStyle(color: muted, fontSize: 12),
+                        ),
+                        trailing: Checkbox(
+                          value: checked,
+                          onChanged: (v) {
                             setState(() {
-                              if (checked ?? false) {
+                              if (v ?? false) {
                                 _selected.add(app.pkg);
                               } else {
                                 _selected.remove(app.pkg);
@@ -5409,7 +5648,17 @@ class _BypassAppsPageState extends State<_BypassAppsPage> {
                             });
                           },
                         ),
-                    ],
+                        onTap: () {
+                          setState(() {
+                            if (checked) {
+                              _selected.remove(app.pkg);
+                            } else {
+                              _selected.add(app.pkg);
+                            }
+                          });
+                        },
+                      );
+                    },
                   ),
           ),
         ],

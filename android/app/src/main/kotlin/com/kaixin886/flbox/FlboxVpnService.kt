@@ -49,7 +49,9 @@ class FlboxVpnService : VpnService() {
             ACTION_START -> {
                 startVpn(
                     intent?.getStringArrayListExtra(EXTRA_BYPASS) ?: emptyList(),
-                    intent?.getBooleanExtra(EXTRA_IPV6, false) ?: false
+                    intent?.getBooleanExtra(EXTRA_IPV6, false) ?: false,
+                    intent?.getBooleanExtra(EXTRA_SPLIT_ON, false) ?: false,
+                    intent?.getBooleanExtra(EXTRA_SPLIT_ALLOW, false) ?: false
                 )
                 START_NOT_STICKY
             }
@@ -63,7 +65,12 @@ class FlboxVpnService : VpnService() {
         }
     }
 
-    private fun startVpn(bypass: List<String>, ipv6: Boolean) {
+    private fun startVpn(
+        bypass: List<String>,
+        ipv6: Boolean,
+        splitOn: Boolean,
+        splitAllow: Boolean
+    ) {
         if (tun != null) return
         // Android 14+ refuses startForeground without a declared type
         // (MissingForegroundServiceTypeException). The manifest declares
@@ -94,18 +101,32 @@ class FlboxVpnService : VpnService() {
             builder.addAddress("fdfe:dcba:9876::1", 126)
             builder.addRoute("::", 0)
         }
-        try {
-            // The core's own outbound connections must not loop back
-            // into the tunnel it is serving.
-            builder.addDisallowedApplication(packageName)
-        } catch (_: PackageManager.NameNotFoundException) {
-        }
-        // User-chosen per-app bypass (set in FlBox settings).
-        for (pkg in bypass) {
-            if (pkg == packageName) continue
+        // In allowlist split mode the checked apps are the only
+        // ones routed into the tunnel; this app is then outside
+        // automatically, which is exactly what the core needs.
+        // In every other mode the core's own outbound connections
+        // must be kept out of the tunnel explicitly, or they loop
+        // back into it.
+        if (!(splitOn && splitAllow)) {
             try {
-                builder.addDisallowedApplication(pkg)
+                builder.addDisallowedApplication(packageName)
             } catch (_: PackageManager.NameNotFoundException) {
+            }
+        }
+        // User-chosen per-app split (set on the per-app page):
+        // bypass mode excludes the checked apps from the VPN;
+        // allowlist mode routes only the checked apps into it.
+        if (splitOn) {
+            for (pkg in bypass) {
+                if (pkg == packageName) continue
+                try {
+                    if (splitAllow) {
+                        builder.addAllowedApplication(pkg)
+                    } else {
+                        builder.addDisallowedApplication(pkg)
+                    }
+                } catch (_: PackageManager.NameNotFoundException) {
+                }
             }
         }
         val pfd = builder.establish()
@@ -257,6 +278,8 @@ class FlboxVpnService : VpnService() {
         const val ACTION_STOP = "com.kaixin886.flbox.VPN_STOP"
         const val EXTRA_BYPASS = "com.kaixin886.flbox.EXTRA_BYPASS"
         const val EXTRA_IPV6 = "com.kaixin886.flbox.EXTRA_IPV6"
+        const val EXTRA_SPLIT_ON = "com.kaixin886.flbox.EXTRA_SPLIT_ON"
+        const val EXTRA_SPLIT_ALLOW = "com.kaixin886.flbox.EXTRA_SPLIT_ALLOW"
         private const val CHANNEL_ID = "flbox_vpn"
         private const val NOTIF_ID = 1
 
