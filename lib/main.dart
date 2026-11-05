@@ -4765,7 +4765,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.71.0-beta · app.flbox · Xray 内核',
+              'FlBox 0.71.1-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -4877,11 +4877,9 @@ class _ProxiesPageState extends State<ProxiesPage> {
             e.$2.name.toLowerCase().contains(_query.toLowerCase()))
           e.$2,
     ];
-    // 0.69: subscriptions are group cards, the reference
-    // layout's shape. The active subscription's card is
-    // the expanded one - the toolbar, search and node grid
-    // live under its header - and tapping another card
-    // switches to it (the profiles switch path, unchanged).
+    // Only the active subscription is shown on this
+    // page; switching subscriptions lives on the
+    // profiles page (user's call, 0.71.1).
     final subs = widget.subs;
     var ai = subs.indexWhere((s) => s.id == widget.activeSubId);
     if (ai < 0) ai = 0;
@@ -4956,9 +4954,6 @@ class _ProxiesPageState extends State<ProxiesPage> {
                   ),
                   Text(sub.url == null ? '本地' : '订阅',
                       style: TextStyle(color: muted, fontSize: 12.5)),
-                  const SizedBox(width: 6),
-                  Icon(active ? Icons.expand_less : Icons.expand_more,
-                      color: muted),
                 ],
               ),
             ),
@@ -4976,7 +4971,6 @@ class _ProxiesPageState extends State<ProxiesPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (var k = 0; k < ai; k++) groupHeader(k),
                   groupHeader(ai),
                 ],
               ),
@@ -5109,19 +5103,6 @@ class _ProxiesPageState extends State<ProxiesPage> {
               );
             },
           ),
-          if (subs.length > ai + 1)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (var k = ai + 1; k < subs.length; k++)
-                      groupHeader(k),
-                  ],
-                ),
-              ),
-            ),
           const SliverToBoxAdapter(child: SizedBox(height: 104)),
         ],
       ),
