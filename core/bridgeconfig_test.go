@@ -46,6 +46,11 @@ func TestBridgeConfigsShape(t *testing.T) {
 		bridge["pinnedObjectDir"] != bridgePinnedDir {
 		t.Errorf("bridge config wrong: %v", bridge)
 	}
+	// Token destinations span 127.128.0.0/9; a loopback-only
+	// listener would never see a token connection (0.64).
+	if bridge["bridgeListenAddress"] != "0.0.0.0" {
+		t.Errorf("bridgeListenAddress = %v, want 0.0.0.0", bridge["bridgeListenAddress"])
+	}
 	policy := bridge["policy"].(map[string]any)
 	if policy["mode"] != float64(1) || len(policy["uids"].([]any)) != 2 {
 		t.Errorf("bridge policy wrong: %v", policy)

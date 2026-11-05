@@ -77,7 +77,14 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 		"version":             1,
 		"socksHost":           "127.0.0.1",
 		"socksPort":           bridgeSocksPort,
-		"bridgeListenAddress": "127.0.0.1",
+		// Wildcard, not loopback: the hooks rewrite app
+		// connections to token addresses across the whole
+		// 127.128.0.0/9 pool at this port, and a listener
+		// bound to 127.0.0.1 alone never matches them -
+		// the 0.64 build started cleanly and proxied
+		// nothing for exactly this reason. The reference
+		// config binds 0.0.0.0 as well.
+		"bridgeListenAddress": "0.0.0.0",
 		"bridgePort":          bridgeListenPort,
 		"pinnedObjectDir":     bridgePinnedDir,
 		"cgroupPath":          "/sys/fs/cgroup",

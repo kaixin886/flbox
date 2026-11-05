@@ -4493,7 +4493,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.64.0 · app.flbox · Xray 内核',
+              'FlBox 0.65.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
