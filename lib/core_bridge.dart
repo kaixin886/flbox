@@ -24,6 +24,20 @@ typedef _RootConfigDart = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
+typedef _BridgeConfigNative = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Int32,
+  Int32,
+  Pointer<Utf8>,
+);
+typedef _BridgeConfigDart = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  int,
+  int,
+  Pointer<Utf8>,
+);
 typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
 typedef _StartDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
 typedef _SetupNative = Pointer<Utf8> Function(
@@ -98,6 +112,10 @@ class CoreBridge {
     _ebpfConfig = lib.lookupFunction<_RootConfigNative, _RootConfigDart>(
       'FlboxEbpfConfig',
     );
+    _bridgeConfig = lib
+        .lookupFunction<_BridgeConfigNative, _BridgeConfigDart>(
+          'FlboxBridgeConfig',
+        );
     _xrayStart = lib.lookupFunction<_StartNative, _StartDart>(
       'FlboxXrayStart',
     );
@@ -165,6 +183,7 @@ class CoreBridge {
   late final _TranslateNative _xrayTranslate;
   late final _RootConfigDart _rootTunConfig;
   late final _RootConfigDart _ebpfConfig;
+  late final _BridgeConfigDart _bridgeConfig;
   late final _StartDart _xrayStart;
   late final _NodeDetailNative _xrayMeasureDelay;
   late final _NodeDetailNative _xrayMeasureAll;
@@ -236,6 +255,32 @@ class CoreBridge {
     malloc.free(d);
     if (out == null) {
       throw CoreException(_lastErrorText() ?? 'ebpf config failed');
+    }
+    return out;
+  }
+
+  /// Builds the 0.64 bridge-mode configuration pair as one
+  /// JSON envelope: {"core": sing-box config with a SOCKS
+  /// inbound, "bridge": bpf2socks config}. mode is the
+  /// bridge policy (2 global, 0 blacklist, 1 whitelist) and
+  /// uids the resolved Android uids for the package split
+  /// preferences.
+  String bridgeConfig(
+    String clashYaml,
+    String selectedNode, {
+    required bool ipv6,
+    required int mode,
+    required List<int> uids,
+  }) {
+    final a = clashYaml.toNativeUtf8();
+    final b = selectedNode.toNativeUtf8();
+    final c = jsonEncode(uids).toNativeUtf8();
+    final out = _take(_bridgeConfig(a, b, ipv6 ? 1 : 0, mode, c));
+    malloc.free(a);
+    malloc.free(b);
+    malloc.free(c);
+    if (out == null) {
+      throw CoreException(_lastErrorText() ?? 'bridge config failed');
     }
     return out;
   }

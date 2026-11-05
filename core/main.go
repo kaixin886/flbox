@@ -221,6 +221,35 @@ func FlboxEbpfConfig(clashYAML, selectedNode *C.char, ipv6 C.int, includePkgs, e
 	return C.CString(cfg)
 }
 
+//export FlboxBridgeConfig
+func FlboxBridgeConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, uidsJSON *C.char) (out *C.char) {
+	defer func() {
+		if r := recover(); r != nil {
+			noteErr(fmt.Errorf("core panic recovered: %v", r))
+			out = nil
+		}
+	}()
+	var uids []int
+	if s := C.GoString(uidsJSON); s != "" {
+		if err := json.Unmarshal([]byte(s), &uids); err != nil {
+			noteErr(err)
+			return nil
+		}
+	}
+	cfg, err := bridgeConfigs(
+		C.GoString(clashYAML),
+		C.GoString(selectedNode),
+		ipv6 != 0,
+		int(mode),
+		uids,
+	)
+	if err != nil {
+		noteErr(err)
+		return nil
+	}
+	return C.CString(cfg)
+}
+
 //export FlboxXrayStatus
 func FlboxXrayStatus() *C.char {
 	return C.CString(xrayStatus())

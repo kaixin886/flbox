@@ -58,6 +58,26 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    // The bpf2socks bridge (0.64 eBPF mode), packaged and
+    // materialized exactly like the daemon: flboxd looks
+    // for it next to its own binary in filesDir.
+    private fun bridgeBinary(): File? {
+        return try {
+            val src = File(applicationInfo.nativeLibraryDir, "libbpf2socks.so")
+            if (!src.exists()) return null
+            val dst = File(filesDir, "bpf2socks")
+            if (!dst.exists() || dst.length() != src.length()) {
+                src.inputStream().use { input ->
+                    dst.outputStream().use { input.copyTo(it) }
+                }
+            }
+            dst.setExecutable(true, false)
+            dst
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun uidFor(pkg: String): Int? {
         return try {
             @Suppress("DEPRECATION")
@@ -416,6 +436,17 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(code) }
                     }.start()
                 }
+                "bridgeCheck" -> {
+                    result.success(bridgeBinary() != null)
+                }
+                "packageUids" -> {
+                    // Resolves the split-routing package list
+                    // to Android uids for the bridge policy;
+                    // unknown packages are skipped.
+                    val pkgs = (call.arguments as? List<*>)?.mapNotNull { it as? String }
+                        ?: emptyList()
+                    result.success(pkgs.mapNotNull { uidFor(it) })
+                }
                 "rootStart" -> {
                     // Launches the daemon detached through su;
                     // the daemon itself reports readiness in
@@ -424,6 +455,7 @@ class MainActivity : FlutterActivity() {
                     val configPath = args?.get("config") as? String
                     val statusPath = args?.get("status") as? String
                     val logPath = args?.get("log") as? String
+                    val bridgePath = args?.get("bridge") as? String
                     if (configPath == null || statusPath == null || logPath == null) {
                         result.error("badargs", "missing daemon paths", null)
                     } else {
@@ -432,12 +464,23 @@ class MainActivity : FlutterActivity() {
                             try {
                                 val daemon = daemonBinary()?.absolutePath
                                     ?: throw IllegalStateException("no daemon")
+                                // Bridge mode: materialize the
+                                // bridge next to the daemon copy;
+                                // flboxd refuses with a clear
+                                // status error if it is absent.
+                                if (bridgePath != null && bridgeBinary() == null) {
+                                    throw IllegalStateException("no bridge")
+                                }
                                 // Append, never truncate: a restart
                                 // must not erase the previous run's
                                 // log - the failure window lives
                                 // there (0.58 diagnosis fix).
-                                val cmd = "nohup '$daemon' '$configPath' " +
-                                    "'$statusPath' >>'$logPath' 2>&1 &"
+                                var cmd = "nohup '$daemon' '$configPath' " +
+                                    "'$statusPath'"
+                                if (bridgePath != null) {
+                                    cmd += " '$bridgePath'"
+                                }
+                                cmd += " >>'$logPath' 2>&1 &"
                                 val proc = ProcessBuilder("su", "-c", cmd)
                                     .redirectErrorStream(true)
                                     .start()

@@ -336,14 +336,13 @@ class SubProfile {
 /// One traffic poll sample. Carried in a ValueNotifier so the 2 s
 /// poll rebuilds only the dashboard's traffic region instead of the
 /// whole shell (all four pages) on every tick.
-/// A start failure with a user-readable detail and an
-/// optional diagnostic log (netfilter script output, daemon
-/// log tail) for the Asterisk-style error dialog.
+/// A start failure with a user-readable detail for the
+/// Asterisk-style error dialog (which attaches the daemon
+/// log tail itself in the root modes).
 class _StartFailure implements Exception {
-  _StartFailure(this.detail, {this.log});
+  _StartFailure(this.detail);
 
   final String detail;
-  final String? log;
 }
 
 class _Traffic {
@@ -807,15 +806,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (status.startsWith('running')) {
         _logEvent('resync: adopted live root daemon session');
         _adoptSession();
-        if (_runMode == 'ebpf') {
-          // Adopting a live session also re-proves its
-          // steering; a vanished rule heals in place.
-          unawaited(_verifyRulesAndHeal());
-        }
-      } else if (_runMode == 'ebpf') {
-        // A dead daemon must not leave netfilter rules
-        // steering traffic into listeners nobody owns.
-        unawaited(_netRules(false).then((_) {}));
       }
       return;
     }
@@ -2092,27 +2082,52 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         ? _bypassPkgs.toList()
         : <String>[];
     final ebpf = _runMode == 'ebpf';
-    final config = await Isolate.run(
-      () => ebpf
-          ? CoreBridge().ebpfConfig(
-              yaml,
-              node,
-              ipv6: ipv6,
-              includePkgs: include,
-              excludePkgs: exclude,
-            )
-          : CoreBridge().rootTunConfig(
-              yaml,
-              node,
-              ipv6: ipv6,
-              includePkgs: include,
-              excludePkgs: exclude,
-            ),
-    );
     final docs = await getApplicationDocumentsDirectory();
     final cfgFile = File('${docs.path}/root-config.json');
     final statusFile = File('${docs.path}/root-status.txt');
-    await cfgFile.writeAsString(config);
+    String? bridgeCfgPath;
+    if (ebpf) {
+      // 0.64: eBPF mode is the bpf2socks bridge. The split
+      // preferences become the bridge policy: whitelist
+      // when only listed apps proxy, blacklist when listed
+      // apps bypass, global otherwise. Packages resolve to
+      // uids on the Kotlin side (PackageManager lives
+      // there); the bridge programs match on uid.
+      final mode = !_splitEnabled ? 2 : (_splitAllow ? 1 : 0);
+      var uids = <int>[];
+      if (_splitEnabled && _bypassPkgs.isNotEmpty) {
+        final res = await _vpnChannel.invokeMethod<List<Object?>>(
+          'packageUids',
+          _bypassPkgs.toList(),
+        );
+        uids = res?.whereType<int>().toList() ?? <int>[];
+      }
+      final envelope = await Isolate.run(
+        () => CoreBridge().bridgeConfig(
+          yaml,
+          node,
+          ipv6: ipv6,
+          mode: mode,
+          uids: uids,
+        ),
+      );
+      final decoded = jsonDecode(envelope) as Map<String, dynamic>;
+      await cfgFile.writeAsString(decoded['core'] as String);
+      final bridgeFile = File('${docs.path}/root-bridge.json');
+      await bridgeFile.writeAsString(decoded['bridge'] as String);
+      bridgeCfgPath = bridgeFile.path;
+    } else {
+      final config = await Isolate.run(
+        () => CoreBridge().rootTunConfig(
+          yaml,
+          node,
+          ipv6: ipv6,
+          includePkgs: include,
+          excludePkgs: exclude,
+        ),
+      );
+      await cfgFile.writeAsString(config);
+    }
     if (await statusFile.exists()) await statusFile.delete();
     // The daemon log now appends across restarts (Kotlin
     // side uses >>): keep a session marker per launch and
@@ -2135,14 +2150,23 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           'config': cfgFile.path,
           'status': statusFile.path,
           'log': '${docs.path}/root-daemon.log',
+          'bridge': ?bridgeCfgPath,
         }) ??
         false;
     if (!ok) throw '守护进程拉起失败';
-    for (var i = 0; i < 32; i++) {
+    // The bridge supervisor starts a core AND the bridge
+    // (with a capability probe first), so allow it longer
+    // than the plain daemon's budget.
+    final rounds = ebpf ? 80 : 32;
+    for (var i = 0; i < rounds; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 250));
       final s = await _readRootStatus();
       if (s.startsWith('running')) {
-        await _flushDnsCache();
+        // Bridge mode needs no netd flush: its DNS is
+        // intercepted at the socket layer, ahead of the
+        // cache (and the flush commands proved no-ops on
+        // the test ROM anyway).
+        if (!ebpf) await _flushDnsCache();
         return;
       }
       if (s.startsWith('error:')) throw s.substring(6).trim();
@@ -2168,71 +2192,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } catch (e) {
       _logEvent('dns cache flush failed: $e');
     }
-  }
-
-  /// Installs or clears the eBPF mode netfilter steering
-  /// (Kotlin side, via su): the TCP REDIRECT chain, the
-  /// UDP MARK-in-OUTPUT plus TPROXY-in-PREROUTING chains
-  /// scoped by the split-routing package selection,
-  /// plus the IPv6 drop chain. The result carries the
-  /// script's own output - on failure it says which section
-  /// died and what the kernel actually holds. Clearing is
-  /// idempotent and always safe to call.
-  Future<({bool ok, String log})> _netRules(bool install) async {
-    try {
-      final res = await _vpnChannel
-          .invokeMethod<Map<Object?, Object?>>('netRules', {
-            'action': install ? 'install' : 'clear',
-            'includePkgs': (_splitEnabled && _splitAllow)
-                ? _bypassPkgs.toList()
-                : <String>[],
-            'excludePkgs': (_splitEnabled && !_splitAllow)
-                ? _bypassPkgs.toList()
-                : <String>[],
-          });
-      return (
-        ok: res?['ok'] == true,
-        log: (res?['log'] as String?) ?? '',
-      );
-    } catch (e) {
-      return (ok: false, log: 'channel error: $e');
-    }
-  }
-
-  /// Read-only check that the eBPF steering is still
-  /// fully hooked (all three chain jumps plus the fwmark
-  /// rule), with the kernel's own rule lists as proof.
-  Future<({bool ok, String log})> _netRulesVerify() async {
-    try {
-      final res = await _vpnChannel
-          .invokeMethod<Map<Object?, Object?>>('netRules', {
-            'action': 'verify',
-            'includePkgs': <String>[],
-            'excludePkgs': <String>[],
-          });
-      return (
-        ok: res?['ok'] == true,
-        log: (res?['log'] as String?) ?? '',
-      );
-    } catch (e) {
-      return (ok: false, log: 'channel error: $e');
-    }
-  }
-
-  /// The 0.61 session verified clean at install time yet
-  /// delivered no UDP minutes later: steering presence is
-  /// re-proven after start and on session re-adoption,
-  /// and a failed check heals by reinstalling the rules
-  /// once instead of leaving a half-steered phone.
-  Future<void> _verifyRulesAndHeal() async {
-    if (_runMode != 'ebpf') return;
-    final v = await _netRulesVerify();
-    if (v.ok) return;
-    _logEvent('ebpf rules verify failed, reinstalling');
-    final r = await _netRules(true);
-    _logEvent(
-      r.ok ? 'ebpf rules healed by reinstall' : 'ebpf rules heal failed',
-    );
   }
 
   String? _deviceInfoCache;
@@ -2282,14 +2241,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Future<void> _showStartError(Object error) async {
     if (!mounted) return;
     final detail = error is _StartFailure ? error.detail : '$error';
-    var logText = error is _StartFailure ? (error.log ?? '') : '';
+    var logText = '';
     if (_daemonMode) {
       final tail = await _daemonLogTail();
-      if (tail.isNotEmpty) {
-        logText = logText.isEmpty
-            ? tail
-            : '$logText\n----- daemon log -----\n$tail';
-      }
+      if (tail.isNotEmpty) logText = tail;
     }
     final device = await _deviceInfo();
     final now = DateTime.now();
@@ -2392,42 +2347,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (check != 'ok') {
         throw _StartFailure('未取得 root 授权（su 不可用或被拒绝）');
       }
-      await _launchRootDaemon();
       if (_runMode == 'ebpf') {
-        // The daemon is listening; steer traffic into it.
-        // If the rules refuse to land, roll everything
-        // back - daemon AND any half-installed rules. The
-        // 0.59 rollback stopped only the daemon and left
-        // chains behind that then broke other root tools.
-        final rules = await _netRules(true);
-        if (!rules.ok) {
-          final pid = await _rootDaemonPid();
-          if (pid > 0) {
-            try {
-              await _vpnChannel.invokeMethod('rootStop', pid);
-            } catch (_) {}
-          }
-          await _netRules(false);
-          throw _StartFailure(
-            '重定向规则安装失败，已回滚',
-            log: rules.log,
-          );
+        final hasBridge =
+            await _vpnChannel.invokeMethod<bool>('bridgeCheck') ?? false;
+        if (!hasBridge) {
+          throw _StartFailure('此安装包未包含 eBPF 桥组件（bpf2socks）');
         }
       }
+      await _launchRootDaemon();
       _logEvent('$_runMode started (node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
       unawaited(_markWasRunning(true));
-      if (_runMode == 'ebpf') {
-        // Install-time verification is not enough (0.61:
-        // clean at install, no UDP minutes later) - prove
-        // the steering again once the session settles.
-        unawaited(
-          Future<void>.delayed(
-            const Duration(seconds: 6),
-          ).then((_) => _verifyRulesAndHeal()),
-        );
-      }
     } catch (e) {
       await _showStartError(e);
     } finally {
@@ -2436,12 +2367,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _stopRootTun() async {
-    if (_runMode == 'ebpf') {
-      // Steering off first: traffic returns to direct even
-      // if the daemon then takes a moment to die, and no
-      // rule is ever left pointing at a dead listener.
-      await _netRules(false);
-    }
+    // Bridge mode needs no steering teardown: signalling
+    // the supervisor ends the bridge, which restores the
+    // original cgroup programs as it exits.
     try {
       final pid = await _rootDaemonPid();
       if (pid > 0) {
@@ -4565,7 +4493,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.63.0 · app.flbox · Xray 内核',
+              'FlBox 0.64.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

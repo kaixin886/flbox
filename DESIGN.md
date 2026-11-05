@@ -374,3 +374,15 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 0.62 真机定案全貌：DNS 劫持修复生效（hijack 命中、泄漏归零、零真 ERROR），百度/必应/YouTube/GitHub/Play/电报全通；剩谷歌与 ChatGPT 死于 **netd 系统缓存里的污染记录**——守护进程两份日志里 www.google.com 查询均为 0 条、连接全指假 IP 104.244.42.197（chatgpt.com→107.181.166.244），记录疑写于 0.61 DNS 泄漏期、TTL 约 1 小时，强停浏览器与重启守护进程都刷不掉；用户开关飞行模式（换网逼 netd 倒缓存）后 **09:28 谷歌恢复、微信亦恢复**（微信「网络不可用」横幅同为该窗口的滞留状态，其 DNS/短连接在日志里一直健康）。
 - 修法：Kotlin 通道新增 flushDns（su 跑 `ndc resolver flushdefaultif` 与 `cmd netd resolver flushdefaultif` 两式、失败不抛、输出记事件日志）；Dart `_launchRootDaemon` 在守护进程 running 确认后调用 `_flushDnsCache()`——Root TUN 与 eBPF 两模式共用此启动路径，一并覆盖。原计划的 ebpf DNS ipv4_only 经微信自愈证据撤销，不做无证据改动。
 - 待验证：Root TUN 复测（同一 netd 缓存层若为 0.57/0.58 浏览器失败的主因，TUN 应随本次定案一并复活；0.58 的两条 handshake refused 证据太薄、亦可能为拨假 IP 被拒）。
+
+## 路线备忘（2026-11-05 用户定）：eBPF 改进参考 AS/bpf2socks 与 netproxy
+- 用户指示：FlBox 后续改进参考 AsteriskNG 的 bpf2socks 与 netproxy 两个项目（均开源/可查）。
+- 借鉴点：①bpf2socks 的真 eBPF 形态——cgroup connect/sendmsg/recvmsg 钩子＋令牌地址映射保原始目的地，替代现 iptables REDIRECT/TPROXY 拼装（即原「真 BPF 程序化」项，现升为明确方向）；②其 DNS 事务跟踪/fast path 的解析观感；③netproxy 的 socket_assign＋sing-box 栈在 DNS 模式（优先劫持）与规则成熟度上的行为参考；④AsteriskEnhance 的 netd 缓存隔离是结构性终局（Zygisk 钩 netd，重），0.63 刷缓存为现阶段平民版，是否走终局待评估。
+- 纪律：现 iptables 版 eBPF（0.62/0.63）是出货基线、继续修；真 BPF 化先做设计研究（读 bpf2socks 源码与本机内核能力探针），不推倒正在用的东西。
+
+## 0.64 设计：eBPF 模式换 bpf2socks 桥（2026-11-05 用户拍板「直接按照 AS 方式改」）
+- 弃 iptables REDIRECT/TPROXY 转向（规则会自发消失、自检只能治标；且 netd 污染缓存问题在包层无解）。 vendored Asterisk4Magisk/bpf2socks v1.2.2 源码（GPL-3.0，保留 LICENSE）入仓 bridge/bpf2socks/，CI 用 NDK clang `make android ABI=arm64-v8a` 产 libbpf2socks.so 进 jniLibs（与 libflboxd.so 同款 PIE 冒充 .so）。
+- 拓扑：flboxd 兼任监督者——同进程内 sing-box 核心改出 SOCKS 入站 127.0.0.1:7891；flboxd 以自定义 gid 启动桥子进程（桥的 self-bypass 按 egid 认亲，核心出站同 gid 得豁免、防回环；netd gid 不同、其 53 流量照常被钩）。桥 bridgePort=65534（同 AS），pinnedObjectDir=/sys/fs/bpf/flbox/bpf2socks，enableDnsHijack=true，enableIpv6 随 pref，policy.mode 映射分应用三档（2 全局/0 排除/1 仅列表），私网段走 bridge 的 bypassPrivateCidrs（真直连）＋核心 route 兜底。
+- 生命周期：flboxd CLI 第三参为桥配置路径（有则监督桥：先 --probe 验内核、再拉起、随核心同生共死、退出清理）；Dart/Kotlin 控制面不变（同一状态文件回执）；eBPF 模式启动失败（probe 不过/桥起不来）走 AS 式报错弹窗（含 probe 输出与启动日志），不自动回退 iptables 版（其规则消失问题正是本次要逃离的），旧 netRules 代码保留在 Kotlin 侧未删、Dart 不再调用。TUN/VPN 不动。
+- 实现落点（0.64 已落地待真机）：core/bridgeconfig.go（FlboxBridgeConfig 信封 core+bridge、SOCKS 7891、bridgePort 65534、policy 映射分应用三档、包名→uid 由 Kotlin packageUids 解析）；flboxd 监督者模式（--core 子进程＋Credential gid 55991＋Pdeathsig）；Kotlin bridgeBinary/bridgeCheck＋rootStart 第三参；Dart _launchRootDaemon 的 ebpf 分支改走桥、netRules 三方法已删、ebpf 不再调 flushDns。工作流需用户手贴一步：在守护进程构建行后加 bridge/bpf2socks 的 make android 并把 libbpf2socks.so 拷进 jniLibs。
+- DNS 依据：bpf2socks 的 cgroup 程序对未标记 DNS 有强制代理路径（绕过 CIDR 策略、跟随 UID 选择），桥内含 DNS 事务跟踪与 fast path——即 AS 不踩 netd 缓存坑的本体机制（无须 Enhance 模块）。
