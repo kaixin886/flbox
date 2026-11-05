@@ -66,7 +66,7 @@ var rootXrayPrivateCIDRs = []string{
 	"fe80::/10",
 }
 
-func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, logOff bool) (string, error) {
+func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, logOff bool, directDNS string) (string, error) {
 	profile, err := sbtranslate.ParseClash([]byte(clashYAML))
 	if err != nil {
 		return "", err
@@ -138,9 +138,23 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, lo
 	if serverIsDomain {
 		directDomains = append(directDomains, "domain:"+serverHost)
 	}
+	// The direct server is the carrier resolver the app
+	// read from the system when one was supplied: public
+	// resolvers answer domestic airport entry domains
+	// with a different, unreachable set of front IPs
+	// (device-proven 2026-11-05), while the carrier's
+	// answers are the ones that connect. The daemon
+	// cannot use AS's "localhost" here (netd refuses the
+	// daemon's stub queries), so a plain-UDP query to
+	// the carrier's own address is the closest
+	// equivalent. 223.5.5.5 remains the fallback.
+	directServer := "223.5.5.5"
+	if ip := net.ParseIP(directDNS); ip != nil && ip.To4() != nil {
+		directServer = directDNS
+	}
 	dnsServers := []any{
 		map[string]any{
-			"address":      "223.5.5.5",
+			"address":      directServer,
 			"domains":      directDomains,
 			"skipFallback": true,
 			"tag":          "direct-dns",
@@ -149,7 +163,7 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, lo
 	}
 	if routeMode == routeDirect {
 		dnsServers = []any{
-			map[string]any{"address": "223.5.5.5", "tag": "direct-dns"},
+			map[string]any{"address": directServer, "tag": "direct-dns"},
 		}
 	}
 	queryStrategy := "UseIPv4"

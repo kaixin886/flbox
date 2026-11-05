@@ -100,8 +100,8 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 // bridgeXrayConfigs returns the JSON envelope the app
 // writes to disk: {"core": "<xray config>", "bridge":
 // "<bpf2socks config>"}.
-func bridgeXrayConfigs(clashYAML, selectedNode string, ipv6 bool, mode int, uids []int, routeMode int, logOff bool) (string, error) {
-	core, err := rootXrayConfig(clashYAML, selectedNode, routeMode, ipv6, logOff)
+func bridgeXrayConfigs(clashYAML, selectedNode string, ipv6 bool, mode int, uids []int, routeMode int, logOff bool, directDNS string) (string, error) {
+	core, err := rootXrayConfig(clashYAML, selectedNode, routeMode, ipv6, logOff, directDNS)
 	if err != nil {
 		return "", err
 	}

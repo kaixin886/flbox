@@ -54,7 +54,7 @@ rules:
 
 func parseRootXray(t *testing.T, node string) map[string]any {
 	t.Helper()
-	out, err := rootXrayConfig(rootTestYAML, node, routeGlobal, false, false)
+	out, err := rootXrayConfig(rootTestYAML, node, routeGlobal, false, false, "")
 	if err != nil {
 		t.Fatalf("rootXrayConfig(%s): %v", node, err)
 	}
@@ -168,7 +168,7 @@ func TestRootXrayStarts(t *testing.T) {
 	if assets := os.Getenv("FLBOX_TEST_ASSETS"); assets != "" {
 		os.Setenv("xray.location.asset", assets)
 	}
-	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal, false, false)
+	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal, false, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestRootXrayStarts(t *testing.T) {
 
 func parseRootXrayMode(t *testing.T, node string, mode int) map[string]any {
 	t.Helper()
-	out, err := rootXrayConfig(rootTestYAML, node, mode, false, false)
+	out, err := rootXrayConfig(rootTestYAML, node, mode, false, false, "")
 	if err != nil {
 		t.Fatalf("rootXrayConfig(%s, %d): %v", node, mode, err)
 	}
@@ -248,5 +248,20 @@ func TestRootXrayShapeDirect(t *testing.T) {
 				t.Errorf("direct mode dns queries must exit direct: %v", rule)
 			}
 		}
+	}
+}
+
+func TestRootXrayDirectDNSOverride(t *testing.T) {
+	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal, false, false, "43.239.172.1")
+	if err != nil {
+		t.Fatalf("rootXrayConfig: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(out), &cfg); err != nil {
+		t.Fatalf("unmarshal root config: %v", err)
+	}
+	servers := cfg["dns"].(map[string]any)["servers"].([]any)
+	if got := servers[0].(map[string]any)["address"]; got != "43.239.172.1" {
+		t.Errorf("direct server = %v, want the injected carrier resolver", got)
 	}
 }

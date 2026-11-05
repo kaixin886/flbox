@@ -2311,6 +2311,23 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       uids = res?.whereType<int>().toList() ?? <int>[];
     }
     final logOff = !_logEnabled;
+    // The daemon core cannot use the system resolver
+    // stub (netd refuses it), so hand it the carrier's
+    // own resolver address as its direct DNS server:
+    // public resolvers return a different, unreachable
+    // set of front IPs for domestic airport entry
+    // domains, the carrier's answers connect.
+    var directDns = '';
+    try {
+      final list =
+          await _vpnChannel.invokeMethod<List<Object?>>('systemDnsServers');
+      for (final s in list ?? const <Object?>[]) {
+        if (s is String && s.contains('.')) {
+          directDns = s;
+          break;
+        }
+      }
+    } catch (_) {}
     final ipv6 = _ipv6Enabled;
     final envelope = await Isolate.run(
       () => CoreBridge().bridgeXrayConfig(
@@ -2321,6 +2338,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         uids: uids,
         routeMode: routeMode,
         logOff: logOff,
+        directDns: directDns,
       ),
     );
     final decoded = jsonDecode(envelope) as Map<String, dynamic>;
@@ -4862,7 +4880,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.72.0-beta5 · app.flbox · Xray 内核',
+              'FlBox 0.72.0-beta6 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

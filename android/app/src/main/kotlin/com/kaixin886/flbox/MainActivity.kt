@@ -6,7 +6,10 @@ import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -478,6 +481,46 @@ class MainActivity : FlutterActivity() {
                             result.success(mapOf("lines" to lines, "done" to done))
                         }
                     }.start()
+                }
+                "systemDnsServers" -> {
+                    // DNS servers of the underlying network,
+                    // never the VPN's own: the root-mode core
+                    // cannot use the system stub, so the app
+                    // hands it the carrier's resolver IPs to
+                    // use as its direct DNS server.
+                    val cm = getSystemService(Context.CONNECTIVITY_SERVICE)
+                        as ConnectivityManager
+                    val candidates = cm.allNetworks.sortedBy { n ->
+                        val caps = cm.getNetworkCapabilities(n)
+                        when {
+                            caps == null -> 3
+                            caps.hasTransport(
+                                NetworkCapabilities.TRANSPORT_CELLULAR
+                            ) -> 0
+                            caps.hasTransport(
+                                NetworkCapabilities.TRANSPORT_WIFI
+                            ) -> 1
+                            else -> 2
+                        }
+                    }
+                    val servers = mutableListOf<String>()
+                    for (n in candidates) {
+                        val caps = cm.getNetworkCapabilities(n)
+                            ?: continue
+                        if (caps.hasTransport(
+                                NetworkCapabilities.TRANSPORT_VPN
+                            )
+                        ) {
+                            continue
+                        }
+                        val lp = cm.getLinkProperties(n) ?: continue
+                        for (addr in lp.dnsServers) {
+                            val host = addr.hostAddress ?: continue
+                            servers.add(host)
+                        }
+                        if (servers.isNotEmpty()) break
+                    }
+                    result.success(servers)
                 }
                 "extractGeoData" -> {
                     // ~25 MB copy: keep it off the main thread, reply
