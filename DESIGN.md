@@ -533,3 +533,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 认知修正：AS 方案里直连服务器用 "localhost"（即运营商解析器）是承重的——国内机场入口域名只有运营商 DNS 答得出，阿里公共 DNS 返回空记录。beta6 把普通模式也换成 223.5.5.5 是误改（当时只考虑了根守护内 localhost 被拒的约束）。
 - 修法：xraytranslate（普通模式）直连服务器改回 localhost，其余（门控/skipFallback/标签/DoH）不动，即 AS 方案原样。rootxray 维持 223.5.5.5：守护内 localhost 被 netd 拒答是实证约束，NTT 为 IP 节点不受影响；根模式＋域名型机场节点列为已知限制（后续若要解，须由 App 把系统 DNS 服务器地址注入根配置）。
 - 待真机验收：普通模式机场节点可连、全局/规则均通；IPCheck 的 DNS 出口（预期：国外域名走 DoH 显示 Google，国内直连走运营商属正常分流）。
+- 真机回执（2026-11-05 18:38 会话日志）：普通模式隧道与节点本身已通（gstatic/Telegram 实流量），localhost 解析生效；但浏览器全报 ERR_INTERNET_DISCONNECTED，续见 beta5。同期 eBPF＋机场节点（IPv6 开）核心向节点 IP 的 TCP 拨号全挂（同节点在普通模式同时段可连），原因未定，待以 IPv6 关姿态复测二分。
+
+## 0.72.0-beta5：VPN 的 DNS 声明改用对端地址（构建号 91）
+- beta4 真机：声明 addDnsServer("172.19.0.1") 后，核心日志 108 条 SOCKS TCP 连接、:53 流量仍为零，浏览器全灭而 Telegram（硬编码 IP）正常。定案：172.19.0.1 是 TUN 接口自身地址，发往它的包被内核本地交付、永不进隧道，netd 的转发查询当场死亡、所有应用失去解析。
+- 修法：声明地址改隧道网段内对端——v4 用 172.19.0.2、v6（开关开时）用 fdfe:dcba:9876::2；包被路由进 TUN → 转发器 → 核心 53 劫持应答。
+- 待真机验收：普通模式浏览器可开网页、IPCheck 的 DNS 出口转 Google；eBPF＋机场节点请以 IPv6 关姿态顺带复测（与 17:15 已知良好姿态对齐）。

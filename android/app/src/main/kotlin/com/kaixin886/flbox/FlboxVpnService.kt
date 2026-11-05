@@ -99,10 +99,18 @@ class FlboxVpnService : VpnService() {
             // they never enter the tunnel (device-proven:
             // a full VPN session's core log held zero
             // port-53 flows while leak tests exited via
-            // the carrier resolver pool). With the tunnel
-            // address declared, queries arrive through the
-            // TUN and the core's port-53 hijack answers.
-            .addDnsServer("172.19.0.1")
+            // the carrier resolver pool). The declared
+            // address must be the PEER address inside the
+            // tunnel subnet, never the interface's own:
+            // packets to the own address are delivered
+            // locally by the kernel and never enter the
+            // TUN either - the first attempt used .1 and
+            // every app lost resolution outright
+            // (ERR_INTERNET_DISCONNECTED, zero port-53
+            // flows again). To the peer address, queries
+            // route into the TUN and the core's port-53
+            // hijack answers them.
+            .addDnsServer("172.19.0.2")
         // The v6 address and ::/0 route are installed in
         // both switch states (0.70): with the switch on,
         // the dual-stack forwarder carries the traffic;
@@ -118,7 +126,7 @@ class FlboxVpnService : VpnService() {
         // declared while off, it would be a dead server
         // netd keeps retrying before the v4 one.
         if (ipv6) {
-            builder.addDnsServer("fdfe:dcba:9876::1")
+            builder.addDnsServer("fdfe:dcba:9876::2")
         }
         // In allowlist split mode the checked apps are the only
         // ones routed into the tunnel; this app is then outside
