@@ -93,6 +93,16 @@ class FlboxVpnService : VpnService() {
             .setMtu(1500)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
+            // Declaring a DNS server is load-bearing, not
+            // cosmetic: without one, netd resolves app
+            // queries on the underlying network itself and
+            // they never enter the tunnel (device-proven:
+            // a full VPN session's core log held zero
+            // port-53 flows while leak tests exited via
+            // the carrier resolver pool). With the tunnel
+            // address declared, queries arrive through the
+            // TUN and the core's port-53 hijack answers.
+            .addDnsServer("172.19.0.1")
         // The v6 address and ::/0 route are installed in
         // both switch states (0.70): with the switch on,
         // the dual-stack forwarder carries the traffic;
@@ -103,6 +113,13 @@ class FlboxVpnService : VpnService() {
         // matches the forwarder's tun config either way.
         builder.addAddress("fdfe:dcba:9876::1", 126)
         builder.addRoute("::", 0)
+        // The v6 DNS server is declared only when the
+        // dual-stack forwarder can carry its queries;
+        // declared while off, it would be a dead server
+        // netd keeps retrying before the v4 one.
+        if (ipv6) {
+            builder.addDnsServer("fdfe:dcba:9876::1")
+        }
         // In allowlist split mode the checked apps are the only
         // ones routed into the tunnel; this app is then outside
         // automatically, which is exactly what the core needs.
