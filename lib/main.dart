@@ -484,6 +484,33 @@ Future<void> testMain() async {
   } catch (_) {}
 }
 
+/// App-wide toast: a floating pill that clears the
+/// glass nav bar. The stock SnackBar is a full-width
+/// black slab that sat glued to the bar and lingered
+/// for four seconds - it kept spoiling the layout.
+void _showToast(BuildContext context, String message) {
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        message,
+        textAlign: TextAlign.center,
+        style: const TextStyle(color: Colors.white, fontSize: 13.5),
+      ),
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: const Color(0xFF232428).withValues(alpha: 0.92),
+      elevation: 6,
+      margin: const EdgeInsets.fromLTRB(56, 0, 56, 96),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(999),
+      ),
+      duration: const Duration(seconds: 2),
+    ),
+  );
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -1491,10 +1518,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     await prefs.setString('fav_nodes', jsonEncode(_favNodes.toList()));
   }
 
-  void _toast(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
-  }
+  void _toast(String message) => _showToast(context, message);
 
   /// Translation on a worker isolate: building every node's
   /// config and LoadConfig-validating each outbound takes the
@@ -4765,7 +4789,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.71.1-beta · app.flbox · Xray 内核',
+              'FlBox 0.71.2-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -5541,8 +5565,7 @@ class _NodeEditPageState extends State<_NodeEditPage> {
       error = 'WireGuard 需要私钥、对端公钥和内网 IP';
     }
     if (error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
+      _showToast(context, error);
       return;
     }
     final entry = _deepCopy(widget.detail) as Map<String, dynamic>;
@@ -5827,8 +5850,7 @@ class _SubEditPageState extends State<_SubEditPage> {
       }
     }
     if (error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
+      _showToast(context, error);
       return;
     }
     Navigator.of(context).pop({
