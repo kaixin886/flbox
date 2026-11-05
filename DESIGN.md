@@ -550,3 +550,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 定因：桥配置的 policy.bypassUids 自 0.64 起一直为空——AS 的 forcedBypassUids=[应用自身 UID] 是当初列明未照搬的一项。FlBox 自身（含独立测速进程，与主 App 同 UID）的套接字被桥当普通应用抓走，测速实例向节点入口的拨号绕进正在运行的守护核心（隧道套隧道/DNS 回环），探测必死而实流量无恙。桥源码实证 bypass_uids 在 emit_uid_policy 中先于模式逻辑放行，全模式有效。
 - 修法：新增平台方法 ownUid（Process.myUid），App 生成根配置时注入，经桥配置 FFI 落到 policy.bypassUids；取不到时为空表回退（仍能用，只是测速依旧超时）。
 - 待真机验收：eBPF 模式下测速出数；顺带确认 App 自身联网（订阅更新等）在 eBPF 下走直连、不受影响。
+
+## 0.72.0-beta8：移植 FlClash 启停按钮形变动画（构建号 94）
+- FlClash 仪表盘的 _StartToggle（current_outbound.dart）：静止时圆形＋播放字形，运行时 450ms easeOutBack 形变为 M3 cookie-9 边形并转动 1/9 圈，字形同步形变。本仓无法直搬其 MaterialShapes 路径形变与字形字体，等价实现：自研 _MorphPainter 以极坐标九波调制半径画同一形变（深度随动画值），播放/停止图标交叉淡入＋缩放，按压 0.94 缩放（对应其 ElasticPress 的简化），系统减动效时直接跳变。
+- 仪表盘状态卡的大圆钮替换为 _MorphToggle（76px 不变，忙碌转圈保留）。其余动画（编辑模式摇晃、国家徽章自旋等）与 FlClash 自有设计系统耦合深，本版未搬。
+- 待真机验收：启停时按钮形变顺滑、无卡顿；忙碌/停止全程可点。

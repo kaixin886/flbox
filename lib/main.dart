@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:isolate';
 import 'dart:convert';
 import 'dart:io';
@@ -3865,6 +3866,174 @@ Widget _delayPill(int? delay, Color color) {
   );
 }
 
+/// The dashboard start/stop toggle, ported from
+/// FlClash's _StartToggle (current_outbound.dart): a
+/// circle with a play glyph while stopped that eases -
+/// 450 ms, easeOutBack forward, easeInCubic back - into
+/// a nine-lobed cookie turned by a ninth of a circle
+/// while running, the glyph crossfading to stop. The
+/// original morphs between two MaterialShapes paths;
+/// here the cookie is the same polar idea drawn
+/// directly, radius modulated by a nine-wave whose
+/// depth follows the animation value, which needs no
+/// shape library. Pressing scales it to 0.94 - their
+/// ElasticPress, simplified.
+class _MorphToggle extends StatefulWidget {
+  const _MorphToggle({
+    required this.running,
+    required this.busy,
+    required this.onTap,
+  });
+
+  final bool running;
+  final bool busy;
+  final VoidCallback? onTap;
+
+  @override
+  State<_MorphToggle> createState() => _MorphToggleState();
+}
+
+class _MorphToggleState extends State<_MorphToggle>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 450),
+    value: widget.running ? 1 : 0,
+  );
+  late final CurvedAnimation _progress = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutBack,
+    reverseCurve: Curves.easeInCubic,
+  );
+  var _pressed = false;
+
+  @override
+  void didUpdateWidget(_MorphToggle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.running != widget.running) {
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _controller.value = widget.running ? 1 : 0;
+      } else if (widget.running) {
+        _controller.forward();
+      } else {
+        _controller.reverse();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _progress.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.94 : 1,
+        duration: const Duration(milliseconds: 150),
+        child: AnimatedBuilder(
+          animation: _progress,
+          builder: (context, _) {
+            final p = _progress.value;
+            final t = p.clamp(0.0, 1.0);
+            return CustomPaint(
+              painter: _MorphPainter(progress: p, color: _accent),
+              child: SizedBox(
+                width: 76,
+                height: 76,
+                child: widget.busy
+                    ? const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 3,
+                          color: Colors.white,
+                        ),
+                      )
+                    : Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Opacity(
+                            opacity: 1 - t,
+                            child: Transform.scale(
+                              scale: 1 - 0.25 * t,
+                              child: const Icon(
+                                Icons.play_arrow,
+                                color: Colors.white,
+                                size: 36,
+                              ),
+                            ),
+                          ),
+                          Opacity(
+                            opacity: t,
+                            child: Transform.scale(
+                              scale: 0.75 + 0.25 * t,
+                              child: const Icon(
+                                Icons.stop,
+                                color: Colors.white,
+                                size: 32,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Draws the toggle outline: a circle whose radius
+/// gains a nine-wave scallop as progress goes 0 -> 1
+/// (the M3 cookie 9-sided shape in polar form), the
+/// scallops turning with the value like the original's
+/// progress * 2pi / 9 rotation.
+class _MorphPainter extends CustomPainter {
+  _MorphPainter({required this.progress, required this.color});
+
+  final double progress;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 4;
+    final depth = 0.055 * progress;
+    final turn = progress * 2 * math.pi / 9;
+    final path = Path();
+    const steps = 180;
+    for (var i = 0; i <= steps; i++) {
+      final a = i / steps * 2 * math.pi;
+      final r = radius * (1 + depth * math.cos(9 * (a - turn)));
+      final point = Offset(
+        center.dx + r * math.cos(a),
+        center.dy + r * math.sin(a),
+      );
+      if (i == 0) {
+        path.moveTo(point.dx, point.dy);
+      } else {
+        path.lineTo(point.dx, point.dy);
+      }
+    }
+    path.close();
+    canvas.drawShadow(path, Colors.black.withValues(alpha: 0.35), 5, false);
+    canvas.drawPath(path, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_MorphPainter oldDelegate) =>
+      oldDelegate.progress != progress || oldDelegate.color != color;
+}
+
 class _DashboardPage extends StatelessWidget {
   const _DashboardPage({
     required this.onOpenSettings,
@@ -4140,34 +4309,14 @@ class _DashboardPage extends StatelessWidget {
                         ),
                         const SizedBox(width: 16),
                         // The session switch lives in the
-                        // status card (the reference layout's
-                        // big round button); the floating
-                        // action button is gone.
-                        Material(
-                          color: _accent,
-                          shape: const CircleBorder(),
-                          elevation: 5,
-                          child: InkWell(
-                            customBorder: const CircleBorder(),
-                            onTap: onToggle,
-                            child: SizedBox(
-                              width: 76,
-                              height: 76,
-                              child: busy
-                                  ? const Padding(
-                                      padding: EdgeInsets.all(24),
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 3,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : Icon(
-                                      running ? Icons.stop : Icons.play_arrow,
-                                      color: Colors.white,
-                                      size: 36,
-                                    ),
-                            ),
-                          ),
+                        // status card (the floating action
+                        // button is gone): the morphing
+                        // toggle ported from FlClash, see
+                        // _MorphToggle above.
+                        _MorphToggle(
+                          running: running,
+                          busy: busy,
+                          onTap: onToggle,
                         ),
                       ],
                     ),
@@ -4891,7 +5040,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.72.0-beta7 · app.flbox · Xray 内核',
+              'FlBox 0.72.0-beta8 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
