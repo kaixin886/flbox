@@ -10,9 +10,50 @@ import (
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
+// rootTestYAML is the shared two-node fixture for the root
+// mode config builders: node-a is addressed by domain (its
+// bootstrap DNS entry is asserted), node-b by IP literal.
+// It lived in rootconfig_test.go until 0.68 removed the
+// TUN builder and its tests.
+const rootTestYAML = `
+proxies:
+  - name: node-a
+    type: vless
+    server: a.example.com
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    network: tcp
+    tls: true
+    flow: xtls-rprx-vision
+    servername: www.apple.com
+    reality-opts:
+      public-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      short-id: 0123456789abcdef
+  - name: node-b
+    type: vless
+    server: 203.0.113.7
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    network: tcp
+    tls: true
+    flow: xtls-rprx-vision
+    servername: www.apple.com
+    reality-opts:
+      public-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      short-id: 0123456789abcdef
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - node-a
+      - node-b
+rules:
+  - MATCH,PROXY
+`
+
 func parseRootXray(t *testing.T, node string) map[string]any {
 	t.Helper()
-	out, err := rootXrayConfig(rootTestYAML, node)
+	out, err := rootXrayConfig(rootTestYAML, node, routeGlobal)
 	if err != nil {
 		t.Fatalf("rootXrayConfig(%s): %v", node, err)
 	}
@@ -99,7 +140,7 @@ func TestRootXrayStarts(t *testing.T) {
 	}
 	self.Close()
 	probe.Close()
-	out, err := rootXrayConfig(rootTestYAML, "node-a")
+	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,5 +160,65 @@ func TestRootXrayStarts(t *testing.T) {
 			t.Fatalf("socks inbound never listened: %v", err)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func parseRootXrayMode(t *testing.T, node string, mode int) map[string]any {
+	t.Helper()
+	out, err := rootXrayConfig(rootTestYAML, node, mode)
+	if err != nil {
+		t.Fatalf("rootXrayConfig(%s, %d): %v", node, mode, err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(out), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestRootXrayShapeRules(t *testing.T) {
+	cfg := parseRootXrayMode(t, "node-a", routeRules)
+	routing := cfg["routing"].(map[string]any)
+	if routing["domainStrategy"] != "IPIfNonMatch" {
+		t.Errorf("rule mode needs IPIfNonMatch: %v", routing["domainStrategy"])
+	}
+	rules := routing["rules"].([]any)
+	var sawGeosite, sawGeoip bool
+	for _, r := range rules {
+		rule := r.(map[string]any)
+		if domains, ok := rule["domain"].([]any); ok && len(domains) > 0 && domains[0] == "geosite:cn" {
+			sawGeosite = rule["outboundTag"] == "direct"
+		}
+		if ips, ok := rule["ip"].([]any); ok && len(ips) > 0 && ips[0] == "geoip:cn" {
+			sawGeoip = rule["outboundTag"] == "direct"
+		}
+	}
+	if !sawGeosite || !sawGeoip {
+		t.Errorf("rule preset incomplete: geosite=%v geoip=%v in %v", sawGeosite, sawGeoip, rules)
+	}
+	servers := cfg["dns"].(map[string]any)["servers"].([]any)
+	if len(servers) != 3 {
+		t.Fatalf("rule mode dns servers = %v, want CN split + remote + bootstrap", servers)
+	}
+	cn := servers[0].(map[string]any)
+	if cn["address"] != "223.5.5.5" || cn["domains"].([]any)[0] != "geosite:cn" {
+		t.Errorf("first server must be the CN split: %v", cn)
+	}
+}
+
+func TestRootXrayShapeDirect(t *testing.T) {
+	cfg := parseRootXrayMode(t, "node-a", routeDirect)
+	rules := cfg["routing"].(map[string]any)["rules"].([]any)
+	last := rules[len(rules)-1].(map[string]any)
+	if last["outboundTag"] != "direct" {
+		t.Errorf("direct mode final rule = %v, want direct", last)
+	}
+	for _, r := range rules {
+		rule := r.(map[string]any)
+		if tags, ok := rule["inboundTag"].([]any); ok && len(tags) == 1 && tags[0] == "dns" {
+			if rule["outboundTag"] != "direct" {
+				t.Errorf("direct mode dns queries must exit direct: %v", rule)
+			}
+		}
 	}
 }

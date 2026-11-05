@@ -10,26 +10,13 @@ typedef _TranslateNative = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
-typedef _RootConfigNative = Pointer<Utf8> Function(
-  Pointer<Utf8>,
-  Pointer<Utf8>,
-  Int32,
-  Pointer<Utf8>,
-  Pointer<Utf8>,
-);
-typedef _RootConfigDart = Pointer<Utf8> Function(
-  Pointer<Utf8>,
-  Pointer<Utf8>,
-  int,
-  Pointer<Utf8>,
-  Pointer<Utf8>,
-);
 typedef _BridgeConfigNative = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
   Int32,
   Int32,
   Pointer<Utf8>,
+  Int32,
 );
 typedef _BridgeConfigDart = Pointer<Utf8> Function(
   Pointer<Utf8>,
@@ -37,6 +24,7 @@ typedef _BridgeConfigDart = Pointer<Utf8> Function(
   int,
   int,
   Pointer<Utf8>,
+  int,
 );
 typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
 typedef _StartDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
@@ -105,10 +93,6 @@ class CoreBridge {
     _xrayTranslate = lib.lookupFunction<_TranslateNative, _TranslateNative>(
       'FlboxXrayTranslate',
     );
-    _rootTunConfig = lib
-        .lookupFunction<_RootConfigNative, _RootConfigDart>(
-          'FlboxRootTunConfig',
-        );
     _bridgeConfig = lib
         .lookupFunction<_BridgeConfigNative, _BridgeConfigDart>(
           'FlboxBridgeXrayConfig',
@@ -178,7 +162,6 @@ class CoreBridge {
   late final _ParseLinksNative _parseLinks;
   late final _ParseLinksNative _convertImport;
   late final _TranslateNative _xrayTranslate;
-  late final _RootConfigDart _rootTunConfig;
   late final _BridgeConfigDart _bridgeConfig;
   late final _StartDart _xrayStart;
   late final _NodeDetailNative _xrayMeasureDelay;
@@ -198,34 +181,6 @@ class CoreBridge {
 
   String? _lastErrorText() => _take(_lastError());
 
-  /// Builds the sing-box configuration for root TUN mode:
-  /// the profile translated with [selectedNode] preset, a TUN
-  /// inbound the root daemon owns, global routing (rule-set
-  /// based rule mode is a later stage). Throws CoreException
-  /// when the node is not in the profile or the profile has no
-  /// usable final outbound.
-  String rootTunConfig(
-    String clashYaml,
-    String selectedNode, {
-    required bool ipv6,
-    required List<String> includePkgs,
-    required List<String> excludePkgs,
-  }) {
-    final a = clashYaml.toNativeUtf8();
-    final b = selectedNode.toNativeUtf8();
-    final c = jsonEncode(includePkgs).toNativeUtf8();
-    final d = jsonEncode(excludePkgs).toNativeUtf8();
-    final out = _take(_rootTunConfig(a, b, ipv6 ? 1 : 0, c, d));
-    malloc.free(a);
-    malloc.free(b);
-    malloc.free(c);
-    malloc.free(d);
-    if (out == null) {
-      throw CoreException(_lastErrorText() ?? 'root config failed');
-    }
-    return out;
-  }
-
   /// Builds the sing-box configuration for eBPF mode: the
   /// same pinned single node as the daemon modes, but the
   /// Builds the bridge-mode configuration pair as one
@@ -241,11 +196,12 @@ class CoreBridge {
     required bool ipv6,
     required int mode,
     required List<int> uids,
+    required int routeMode,
   }) {
     final a = clashYaml.toNativeUtf8();
     final b = selectedNode.toNativeUtf8();
     final c = jsonEncode(uids).toNativeUtf8();
-    final out = _take(_bridgeConfig(a, b, ipv6 ? 1 : 0, mode, c));
+    final out = _take(_bridgeConfig(a, b, ipv6 ? 1 : 0, mode, c, routeMode));
     malloc.free(a);
     malloc.free(b);
     malloc.free(c);
@@ -259,11 +215,16 @@ class CoreBridge {
     String clashYaml, {
     required bool vpn,
     required String logPath,
-    bool rules = false,
+    int outMode = 1,
   }) {
     final arg = clashYaml.toNativeUtf8();
-    final mode =
-        ((vpn ? 'vpn' : 'local') + (rules ? ':rules' : '')).toNativeUtf8();
+    final mode = ((vpn ? 'vpn' : 'local') +
+            (outMode == 0
+                ? ':rules'
+                : outMode == 2
+                    ? ':direct'
+                    : ''))
+        .toNativeUtf8();
     final log = logPath.toNativeUtf8();
     final out = _take(_xrayTranslate(arg, mode, log));
     malloc.free(arg);

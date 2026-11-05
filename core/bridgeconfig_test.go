@@ -6,7 +6,7 @@ import (
 )
 
 func TestBridgeXrayConfigsShape(t *testing.T) {
-	out, err := bridgeXrayConfigs(rootTestYAML, "node-a", true, 1, []int{10123, 10456})
+	out, err := bridgeXrayConfigs(rootTestYAML, "node-a", true, 1, []int{10123, 10456}, routeGlobal)
 	if err != nil {
 		t.Fatalf("bridgeXrayConfigs: %v", err)
 	}

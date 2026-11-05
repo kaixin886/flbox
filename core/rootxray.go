@@ -32,7 +32,12 @@ import (
 // its destination is still the carrier resolver - is
 // routed by port to the dns outbound and answered by
 // that client: the Xray form of hijack-dns. Global
-// mode only, like the other root modes.
+// mode only, like the other root modes. (0.68: the
+// outbound mode now applies here too - the v2ray preset
+// for rule mode, an all-direct exit for direct mode. Rule
+// mode needs the geo databases in the asset directory;
+// flboxd points Xray's asset location at the config's
+// directory, which is where the app releases them.)
 //
 // Two Xray mechanics this shape depends on, both
 // learned the hard way (0.66 shipped without the first
@@ -49,6 +54,14 @@ import (
 // carry skipFallback, or it answers every query itself.
 const rootXraySocksTag = "socks-in"
 
+// Outbound modes, numbered to match the app's stored
+// outbound_mode preference (Dart _outMode).
+const (
+	routeRules = iota
+	routeGlobal
+	routeDirect
+)
+
 var rootXrayPrivateCIDRs = []string{
 	"127.0.0.0/8",
 	"10.0.0.0/8",
@@ -60,7 +73,7 @@ var rootXrayPrivateCIDRs = []string{
 	"fe80::/10",
 }
 
-func rootXrayConfig(clashYAML, selectedNode string) (string, error) {
+func rootXrayConfig(clashYAML, selectedNode string, routeMode int) (string, error) {
 	profile, err := sbtranslate.ParseClash([]byte(clashYAML))
 	if err != nil {
 		return "", err
@@ -112,13 +125,38 @@ func rootXrayConfig(clashYAML, selectedNode string) (string, error) {
 		},
 	}
 	serverIsDomain := serverHost != "" && net.ParseIP(serverHost) == nil
+	bootstrap := map[string]any{
+		"address":      "223.5.5.5",
+		"domains":      []string{"full:" + serverHost},
+		"skipFallback": true,
+	}
+	// The DNS shape follows the outbound mode. Global keeps
+	// the 0.67 arrangement (remote first, bootstrap behind
+	// it with skipFallback). Rule mode prepends the v2ray
+	// preset's CN split server - domain-matched, so it only
+	// ever sees CN queries, and its own queries are pinned
+	// direct by IP below, like the bootstrap's. Direct mode
+	// resolves everything locally.
 	dnsServers := []any{"8.8.8.8"}
+	usesAliDNS := false
+	switch routeMode {
+	case routeRules:
+		dnsServers = []any{
+			map[string]any{
+				"address":     "223.5.5.5",
+				"domains":     []string{"geosite:cn"},
+				"expectedIPs": []string{"geoip:cn"},
+			},
+			"8.8.8.8",
+		}
+		usesAliDNS = true
+	case routeDirect:
+		dnsServers = []any{"223.5.5.5", "8.8.8.8"}
+		usesAliDNS = true
+	}
 	if serverIsDomain {
-		dnsServers = append(dnsServers, map[string]any{
-			"address":      "223.5.5.5",
-			"domains":      []string{"full:" + serverHost},
-			"skipFallback": true,
-		})
+		dnsServers = append(dnsServers, bootstrap)
+		usesAliDNS = true
 	}
 	cfg["dns"] = map[string]any{
 		"tag":           "dns",
@@ -133,7 +171,7 @@ func rootXrayConfig(clashYAML, selectedNode string) (string, error) {
 			"outboundTag": "dns",
 		},
 	}
-	if serverIsDomain {
+	if usesAliDNS {
 		rules = append(rules, map[string]any{
 			"type":        "field",
 			"inboundTag":  []string{"dns"},
@@ -141,12 +179,38 @@ func rootXrayConfig(clashYAML, selectedNode string) (string, error) {
 			"outboundTag": "direct",
 		})
 	}
+	dnsFinal := "proxy"
+	final := "proxy"
+	if routeMode == routeDirect {
+		dnsFinal = "direct"
+		final = "direct"
+	}
+	rules = append(rules, map[string]any{
+		"type":        "field",
+		"inboundTag":  []string{"dns"},
+		"outboundTag": dnsFinal,
+	})
+	// Rule mode inserts the v2ray bypass-mainland preset
+	// between the DNS pins and the private-range rule, and
+	// needs IPIfNonMatch for the IP half to ever fire on
+	// domain traffic (same lesson as the VPN preset).
+	domainStrategy := "AsIs"
+	if routeMode == routeRules {
+		domainStrategy = "IPIfNonMatch"
+		rules = append(rules,
+			map[string]any{
+				"type":        "field",
+				"domain":      []string{"geosite:cn"},
+				"outboundTag": "direct",
+			},
+			map[string]any{
+				"type":        "field",
+				"ip":          []string{"geoip:cn"},
+				"outboundTag": "direct",
+			},
+		)
+	}
 	rules = append(rules,
-		map[string]any{
-			"type":        "field",
-			"inboundTag":  []string{"dns"},
-			"outboundTag": "proxy",
-		},
 		map[string]any{
 			"type":        "field",
 			"ip":          rootXrayPrivateCIDRs,
@@ -155,11 +219,11 @@ func rootXrayConfig(clashYAML, selectedNode string) (string, error) {
 		map[string]any{
 			"type":        "field",
 			"inboundTag":  []string{rootXraySocksTag},
-			"outboundTag": "proxy",
+			"outboundTag": final,
 		},
 	)
 	cfg["routing"] = map[string]any{
-		"domainStrategy": "AsIs",
+		"domainStrategy": domainStrategy,
 		"rules":          rules,
 	}
 	outbounds, _ := cfg["outbounds"].([]any)

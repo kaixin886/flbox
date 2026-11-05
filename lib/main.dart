@@ -92,7 +92,7 @@ Future<void> _bgRefreshDueSubs() async {
         text,
         vpn: true,
         logPath: '',
-        rules: false,
+        outMode: 1,
       );
       if (profile.nodes.isEmpty) continue;
       await File('${docs.path}/sub_${sub.id}.yaml').writeAsString(text);
@@ -508,20 +508,29 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Completer<int>? _tunReady;
   List<SubProfile> _subs = [];
   String? _activeSubId;
-  bool _rulesMode = false;
+  int _outMode = 1;
+
+  /// Outbound mode names for logs: 0 rules, 1 global, 2 direct.
+  String get _outModeName => const ['rules', 'global', 'direct'][_outMode];
   bool _geoReady = false;
   Set<String> _favNodes = {};
   bool _autoConnect = false;
   bool _restoreOnBoot = false;
   bool _wasRunning = false;
   bool _notifyOnStart = true;
-  bool _ipv6Enabled = false;
+  /// The VPN session's effective IPv6 state, decided per
+  /// node at start (0.68): true only when a probe through
+  /// the node proved an IPv6 egress. Persisted so a resync
+  /// that restarts the forwarder on a surviving tunnel
+  /// reuses the value the tunnel was built with.
+  bool _vpnIpv6 = false;
+  bool _rootBootStart = false;
   String _runMode = 'vpn';
 
-  /// Both root modes run the external sing-box daemon; they
-  /// differ only in how traffic reaches it (TUN device vs
-  /// netfilter steering).
-  bool get _daemonMode => _runMode == 'root_tun' || _runMode == 'ebpf';
+  /// The root mode runs the external daemon (0.68: eBPF
+  /// only; Root TUN was removed - the bridge data plane
+  /// replaced it on every axis that mattered).
+  bool get _daemonMode => _runMode == 'ebpf';
   bool _notifySubUpdate = true;
   int _subAutoIntervalHours = 24;
   Set<String> _bypassPkgs = {};
@@ -626,14 +635,24 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _restore() async {
     final prefs = await SharedPreferences.getInstance();
-    _rulesMode = prefs.getBool('rules_mode') ?? false;
+    // Outbound mode (0.68): 0 rules, 1 global, 2 direct.
+    // Migrates the old rules_mode bool on first read.
+    final savedOutMode = prefs.getInt('outbound_mode');
+    if (savedOutMode != null && savedOutMode >= 0 && savedOutMode <= 2) {
+      _outMode = savedOutMode;
+    } else {
+      _outMode = (prefs.getBool('rules_mode') ?? false) ? 0 : 1;
+    }
     _autoConnect = prefs.getBool('auto_connect') ?? false;
     _restoreOnBoot = prefs.getBool('restore_on_boot') ?? false;
     _wasRunning = prefs.getBool('was_running') ?? false;
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
-    _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
+    _vpnIpv6 = prefs.getBool('vpn_ipv6_effective') ?? false;
+    _rootBootStart = prefs.getBool('root_boot_start') ?? false;
     _runMode = prefs.getString('run_mode') ?? 'vpn';
+    // 0.68 removed Root TUN; a stored selection lands on VPN.
+    if (_runMode == 'root_tun') _runMode = 'vpn';
     _subAutoIntervalHours = prefs.getInt('sub_auto_interval_hours') ?? 24;
     final legacySubAuto = prefs.getBool('sub_auto_update') ?? false;
     final favRaw = prefs.getString('fav_nodes');
@@ -711,7 +730,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } catch (_) {
       // A stale or corrupt saved profile must not block startup.
     }
-    if (_rulesMode && !_geoReady) {
+    if (_outMode == 0 && !_geoReady) {
       await _ensureGeoData();
     }
     // Per-subscription auto-update: each subscription carries its
@@ -721,7 +740,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     await _checkBgSubUpdates();
     await _runDueSubscriptionUpdates();
     await _resyncCoreState();
-    if ((_autoConnect || (_restoreOnBoot && _wasRunning)) &&
+    // With the root boot script installed, the daemon
+    // starts itself at boot and the resync above adopts it;
+    // an app-side start here would race the script's copy.
+    final bootScriptOwnsStart = _daemonMode && _rootBootStart;
+    if (!bootScriptOwnsStart &&
+        (_autoConnect || (_restoreOnBoot && _wasRunning)) &&
         _profile != null &&
         !_running &&
         mounted) {
@@ -833,7 +857,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           // session whose tunnel black-holes everything.
           try {
             await _ensureSbSetup();
-            CoreBridge().vpnForwardStart(_tunFd, ipv6: _ipv6Enabled);
+            CoreBridge().vpnForwardStart(_tunFd, ipv6: _vpnIpv6);
             _logEvent('resync: restarted the vpn forwarder');
           } catch (e) {
             _logEvent('resync: vpn forwarder restart failed: $e');
@@ -857,7 +881,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           await _rotateLogIfHuge();
           CoreBridge().xrayStart(config, 0);
           await _ensureSbSetup();
-          CoreBridge().vpnForwardStart(_tunFd, ipv6: _ipv6Enabled);
+          CoreBridge().vpnForwardStart(_tunFd, ipv6: _vpnIpv6);
           _logEvent('resync: revived core on the surviving tunnel');
           _adoptSession();
           unawaited(_primeStatus());
@@ -1020,15 +1044,15 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _setRulesMode(bool rules) async {
-    if (_busy || rules == _rulesMode) return;
-    if (rules && !await _ensureGeoData()) {
+  Future<void> _setOutMode(int mode) async {
+    if (_busy || mode == _outMode) return;
+    if (mode == 0 && !await _ensureGeoData()) {
       _toast('规则库准备失败，检查网络后重试');
       return;
     }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('rules_mode', rules);
-    setState(() => _rulesMode = rules);
+    await prefs.setInt('outbound_mode', mode);
+    setState(() => _outMode = mode);
     final yaml = _profileYaml;
     if (yaml != null && _activeSub != null) {
       try {
@@ -1040,12 +1064,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
     if (_running) {
       // Restart the core in place on the same tunnel with the new
-      // routing preset; the VPN itself never goes down.
+      // routing preset; the VPN itself never goes down. In root
+      // mode _restartForMode relaunches the daemon with freshly
+      // generated configs instead - same effect, bigger hammer.
       final config = _profile?.configs[_selectedNode];
       if (config != null) {
         try {
           await _restartForMode(config);
-          _logEvent('core restarted for mode switch (rules=$rules)');
+          _logEvent('core restarted for mode switch (mode=$_outModeName)');
           _startedAt = DateTime.now();
         } on CoreException catch (e) {
           setState(() {
@@ -1057,7 +1083,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
       }
     }
-    _toast(rules ? '已切换到规则模式（v2ray 绕过大陆）' : '已切换到全局模式');
+    _toast(switch (mode) {
+      0 => '已切换到规则模式（v2ray 绕过大陆）',
+      2 => '已切换到直连模式（全部流量不走代理）',
+      _ => '已切换到全局模式',
+    });
   }
 
   Future<void> _setAutoConnect(bool value) async {
@@ -1105,12 +1135,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         'subs': subsJson,
         'activeSub': _activeSubId,
         'prefs': {
-          'rules_mode': _rulesMode,
+          'outbound_mode': _outMode,
           'auto_connect': _autoConnect,
           'restore_on_boot': _restoreOnBoot,
           'notify_on_start': _notifyOnStart,
           'notify_sub_update': _notifySubUpdate,
-          'ipv6_enabled': _ipv6Enabled,
+          'root_boot_start': _rootBootStart,
           'run_mode': _runMode,
           'sub_auto_interval_hours': _subAutoIntervalHours,
           'nav_style': _navStyle.index,
@@ -1180,12 +1210,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           newSubs.add(sub);
         }
       }
-      var rulesMode = _rulesMode;
+      var outMode = _outMode;
       var autoConnect = _autoConnect;
       var restoreOnBoot = _restoreOnBoot;
       var notifyOnStart = _notifyOnStart;
       var notifySubUpdate = _notifySubUpdate;
-      var ipv6Enabled = _ipv6Enabled;
+      var rootBootStart = _rootBootStart;
       var intervalHours = _subAutoIntervalHours;
       var navStyle = _navStyle;
       var favNodes = _favNodes;
@@ -1196,13 +1226,19 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final bp = decoded['prefs'];
       if (bp is Map<String, dynamic>) {
         bool bb(String k, bool cur) => bp[k] is bool ? bp[k] as bool : cur;
-        rulesMode = bb('rules_mode', rulesMode);
+        if (bp['outbound_mode'] is int) {
+          outMode = bp['outbound_mode'] as int;
+          if (outMode < 0 || outMode > 2) outMode = 1;
+        } else if (bp['rules_mode'] is bool) {
+          outMode = (bp['rules_mode'] as bool) ? 0 : 1;
+        }
         autoConnect = bb('auto_connect', autoConnect);
         restoreOnBoot = bb('restore_on_boot', restoreOnBoot);
         notifyOnStart = bb('notify_on_start', notifyOnStart);
         notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
-        ipv6Enabled = bb('ipv6_enabled', ipv6Enabled);
+        rootBootStart = bb('root_boot_start', rootBootStart);
         if (bp['run_mode'] is String) runMode = bp['run_mode'] as String;
+        if (runMode == 'root_tun') runMode = 'vpn';
         bypassEnabled = bb('bypass_enabled', bypassEnabled);
         bypassAllow = bb('bypass_allow', bypassAllow);
         if (bp['sub_auto_interval_hours'] is int) {
@@ -1228,12 +1264,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       setState(() {
         _subs = newSubs;
         _activeSubId = activeId;
-        _rulesMode = rulesMode;
+        _outMode = outMode;
         _autoConnect = autoConnect;
         _restoreOnBoot = restoreOnBoot;
         _notifyOnStart = notifyOnStart;
         _notifySubUpdate = notifySubUpdate;
-        _ipv6Enabled = ipv6Enabled;
+        _rootBootStart = rootBootStart;
         _runMode = runMode;
         _subAutoIntervalHours = intervalHours;
         _navStyle = navStyle;
@@ -1242,12 +1278,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _splitEnabled = bypassEnabled;
         _splitAllow = bypassAllow;
       });
-      await prefs.setBool('rules_mode', rulesMode);
+      await prefs.setInt('outbound_mode', outMode);
       await prefs.setBool('auto_connect', autoConnect);
       await prefs.setBool('restore_on_boot', restoreOnBoot);
       await prefs.setBool('notify_on_start', notifyOnStart);
       await prefs.setBool('notify_sub_update', notifySubUpdate);
-      await prefs.setBool('ipv6_enabled', ipv6Enabled);
+      await prefs.setBool('root_boot_start', rootBootStart);
       await prefs.setString('run_mode', runMode);
       await prefs.setInt('sub_auto_interval_hours', intervalHours);
       await prefs.setInt('nav_style', navStyle.index);
@@ -1296,10 +1332,88 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// Subscription editor (the netproxy-style form): name, link,
   /// per-subscription auto-update period, update route, and the
   /// node name filters applied on every refresh.
-  Future<void> _setIpv6Enabled(bool value) async {
+  /// Settings-page wording for the automatic IPv6 behaviour.
+  String get _ipv6StatusText {
+    if (_runMode == 'ebpf') return 'Root 模式自动禁用';
+    if (_running && _vpnIpv6) return '已启用（当前节点支持 IPv6）';
+    if (_running) return '已自动禁用（当前节点无 IPv6 服务）';
+    return '启动时按节点自动检测';
+  }
+
+  /// Root-mode boot autostart (0.68, AsteriskNG's design):
+  /// enabling publishes the daemon configs for the current
+  /// node and installs a Magisk service.d script that starts
+  /// flboxd at boot with them - no app process involved, so
+  /// the proxy is up before the user ever opens FlBox. The
+  /// app adopts the boot-started daemon through the usual
+  /// status-file resync. Disabling removes the script.
+  Future<void> _setRootBootStart(bool value) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('ipv6_enabled', value);
-    setState(() => _ipv6Enabled = value);
+    if (!value) {
+      await _applyRootBootScript(false);
+      await prefs.setBool('root_boot_start', false);
+      if (mounted) setState(() => _rootBootStart = false);
+      _logEvent('root boot start disabled (service.d script removed)');
+      return;
+    }
+    if (_runMode != 'ebpf') return;
+    if (_selectedNode == null || _profileYaml == null) {
+      _toast('先到「代理」页选一个节点');
+      if (mounted) setState(() => _rootBootStart = false);
+      return;
+    }
+    final check = await _vpnChannel.invokeMethod<String>('rootCheck');
+    if (check != 'ok') {
+      _toast(check == 'nodaemon'
+          ? '此安装包未包含 root 守护进程'
+          : '未取得 root 授权，无法安装开机脚本');
+      if (mounted) setState(() => _rootBootStart = false);
+      return;
+    }
+    try {
+      await _writeRootDaemonConfigs();
+    } catch (e) {
+      _toast('生成开机启动配置失败：$e');
+      if (mounted) setState(() => _rootBootStart = false);
+      return;
+    }
+    if (!await _applyRootBootScript(true)) {
+      _toast('开机脚本安装失败');
+      if (mounted) setState(() => _rootBootStart = false);
+      return;
+    }
+    await prefs.setBool('root_boot_start', true);
+    if (mounted) setState(() => _rootBootStart = true);
+    _logEvent('root boot start enabled (Magisk service.d script installed)');
+    _toast('已开启：重启后 Root 模式自动启动');
+  }
+
+  Future<bool> _applyRootBootScript(bool enabled) async {
+    final docs = await getApplicationDocumentsDirectory();
+    try {
+      final ok = await _vpnChannel.invokeMethod<bool>('bootStartSet', {
+        'enabled': enabled,
+        'config': '${docs.path}/root-config.json',
+        'status': '${docs.path}/root-status.txt',
+        'log': '${docs.path}/root-daemon.log',
+        'prevLog': '${docs.path}/root-daemon.prev.log',
+        'bridge': '${docs.path}/root-bridge.json',
+      });
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Republishes the daemon configs when the boot script is
+  /// installed but the daemon is stopped, so a node switch is
+  /// what the next boot starts with. While running, the
+  /// restart path already regenerates them.
+  Future<void> _republishRootConfigsIfNeeded() async {
+    if (!_rootBootStart || _runMode != 'ebpf' || _running) return;
+    try {
+      await _writeRootDaemonConfigs();
+    } catch (_) {}
   }
 
   /// AsteriskNG-style group enable switch: a disabled group
@@ -1375,13 +1489,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// closure may only capture sendable values, never `this`.
   Future<XrayProfile> _translate(String text) {
     final logPath = _logPath;
-    final rules = _rulesMode;
+    final outMode = _outMode;
     return Isolate.run(
       () => CoreBridge().translateXray(
         text,
         vpn: true,
         logPath: logPath,
-        rules: rules,
+        outMode: outMode,
       ),
     );
   }
@@ -1412,6 +1526,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _selectedNode = selected;
       _delays = {};
     });
+    unawaited(_republishRootConfigsIfNeeded());
   }
 
   /// Adds a new subscription entry from imported text and
@@ -1976,9 +2091,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   void _startPolling() {
-    // Root mode has no in-process core to poll traffic from;
-    // the dashboard simply shows the session as running.
-    if (_daemonMode) return;
     _pollTimer?.cancel();
     var lastUp = 0;
     var lastDown = 0;
@@ -1987,11 +2099,22 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     var lastTick = DateTime.now();
     _traffic.value = const _Traffic();
     _rateHistory.value = const [];
-    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (!mounted || !_running) return;
       try {
-        final decoded =
-            jsonDecode(CoreBridge().xrayTraffic()) as Map<String, dynamic>;
+        // VPN mode reads the in-process core's counters;
+        // root mode reads the traffic file the daemon's
+        // core publishes beside its config (0.68) - the
+        // counters cannot cross processes any other way.
+        final Map<String, dynamic> decoded;
+        if (_daemonMode) {
+          final file = await _readRootTraffic();
+          if (file == null) return;
+          decoded = file;
+        } else {
+          decoded =
+              jsonDecode(CoreBridge().xrayTraffic()) as Map<String, dynamic>;
+        }
         final up = (decoded['up'] as num).toInt();
         final down = (decoded['down'] as num).toInt();
         final now = DateTime.now();
@@ -2065,75 +2188,83 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
+  /// The daemon core's cumulative proxy counters,
+  /// published by flboxd every two seconds (root mode's
+  /// substitute for the in-process traffic call).
+  Future<Map<String, dynamic>?> _readRootTraffic() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final f = File('${docs.path}/root-traffic.json');
+      if (!await f.exists()) return null;
+      final decoded = jsonDecode(await f.readAsString());
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<int> _rootDaemonPid() async {
     final lines = (await _readRootStatus()).split('\n');
     return lines.length > 1 ? int.tryParse(lines[1].trim()) ?? 0 : 0;
   }
 
-  /// Generates the daemon config for the current selection,
-  /// (re)writes the control files and launches the daemon
-  /// through su, then waits for its status file to report.
-  /// Throws a plain message string on failure.
-  Future<void> _launchRootDaemon() async {
+  /// Generates the daemon configs (core + bridge) for the
+  /// current selection and writes them to the control files.
+  /// Shared by the manual start path and the boot-autostart
+  /// publisher: the service.d boot script starts flboxd with
+  /// exactly these files, so they must always describe the
+  /// node the user last picked. IPv6 is hard-off in root
+  /// mode (0.68): the bridge's IPv6 UDP path is best-effort
+  /// by design (its recovery layer salvages packets by port
+  /// alone) and every root data plane surveyed mishandles
+  /// v6, so the bridge never gets to hook a v6 socket.
+  Future<({String config, String bridge})> _writeRootDaemonConfigs() async {
     final node = _selectedNode;
     final yaml = _profileYaml;
     if (node == null || yaml == null) {
       throw '先到「代理」页选一个节点';
     }
-    final ipv6 = _ipv6Enabled;
-    final include = (_splitEnabled && _splitAllow)
-        ? _bypassPkgs.toList()
-        : <String>[];
-    final exclude = (_splitEnabled && !_splitAllow)
-        ? _bypassPkgs.toList()
-        : <String>[];
-    final ebpf = _runMode == 'ebpf';
+    // The split preferences become the bridge policy:
+    // whitelist when only listed apps proxy, blacklist when
+    // listed apps bypass, global otherwise. Packages resolve
+    // to uids on the Kotlin side (PackageManager lives
+    // there); the bridge programs match on uid.
+    final mode = !_splitEnabled ? 2 : (_splitAllow ? 1 : 0);
+    final routeMode = _outMode;
+    var uids = <int>[];
+    if (_splitEnabled && _bypassPkgs.isNotEmpty) {
+      final res = await _vpnChannel.invokeMethod<List<Object?>>(
+        'packageUids',
+        _bypassPkgs.toList(),
+      );
+      uids = res?.whereType<int>().toList() ?? <int>[];
+    }
+    final envelope = await Isolate.run(
+      () => CoreBridge().bridgeXrayConfig(
+        yaml,
+        node,
+        ipv6: false,
+        mode: mode,
+        uids: uids,
+        routeMode: routeMode,
+      ),
+    );
+    final decoded = jsonDecode(envelope) as Map<String, dynamic>;
     final docs = await getApplicationDocumentsDirectory();
     final cfgFile = File('${docs.path}/root-config.json');
+    await cfgFile.writeAsString(decoded['core'] as String);
+    final bridgeFile = File('${docs.path}/root-bridge.json');
+    await bridgeFile.writeAsString(decoded['bridge'] as String);
+    return (config: cfgFile.path, bridge: bridgeFile.path);
+  }
+
+  /// (Re)writes the daemon configs and launches the daemon
+  /// through su, then waits for its status file to report.
+  /// Throws a plain message string on failure.
+  Future<void> _launchRootDaemon() async {
+    final paths = await _writeRootDaemonConfigs();
+    final docs = await getApplicationDocumentsDirectory();
     final statusFile = File('${docs.path}/root-status.txt');
-    String? bridgeCfgPath;
-    if (ebpf) {
-      // 0.64: eBPF mode is the bpf2socks bridge. The split
-      // preferences become the bridge policy: whitelist
-      // when only listed apps proxy, blacklist when listed
-      // apps bypass, global otherwise. Packages resolve to
-      // uids on the Kotlin side (PackageManager lives
-      // there); the bridge programs match on uid.
-      final mode = !_splitEnabled ? 2 : (_splitAllow ? 1 : 0);
-      var uids = <int>[];
-      if (_splitEnabled && _bypassPkgs.isNotEmpty) {
-        final res = await _vpnChannel.invokeMethod<List<Object?>>(
-          'packageUids',
-          _bypassPkgs.toList(),
-        );
-        uids = res?.whereType<int>().toList() ?? <int>[];
-      }
-      final envelope = await Isolate.run(
-        () => CoreBridge().bridgeXrayConfig(
-          yaml,
-          node,
-          ipv6: ipv6,
-          mode: mode,
-          uids: uids,
-        ),
-      );
-      final decoded = jsonDecode(envelope) as Map<String, dynamic>;
-      await cfgFile.writeAsString(decoded['core'] as String);
-      final bridgeFile = File('${docs.path}/root-bridge.json');
-      await bridgeFile.writeAsString(decoded['bridge'] as String);
-      bridgeCfgPath = bridgeFile.path;
-    } else {
-      final config = await Isolate.run(
-        () => CoreBridge().rootTunConfig(
-          yaml,
-          node,
-          ipv6: ipv6,
-          includePkgs: include,
-          excludePkgs: exclude,
-        ),
-      );
-      await cfgFile.writeAsString(config);
-    }
     if (await statusFile.exists()) await statusFile.delete();
     // One log file per daemon session (0.66): the previous
     // session rotates to root-daemon.prev.log instead of
@@ -2148,56 +2279,28 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (await daemonLog.exists()) await daemonLog.rename(prevLog.path);
       await daemonLog.writeAsString(
         '===== flboxd session ${DateTime.now().toIso8601String()} '
-        'mode=$_runMode node=$node ipv6=$ipv6 =====\n',
+        'mode=ebpf node=$_selectedNode ipv6=false =====\n',
       );
     } catch (_) {}
     final ok =
         await _vpnChannel.invokeMethod<bool>('rootStart', {
-          'config': cfgFile.path,
+          'config': paths.config,
           'status': statusFile.path,
           'log': '${docs.path}/root-daemon.log',
-          'bridge': ?bridgeCfgPath,
+          'bridge': paths.bridge,
         }) ??
         false;
     if (!ok) throw '守护进程拉起失败';
     // The bridge supervisor starts a core AND the bridge
-    // (with a capability probe first), so allow it longer
-    // than the plain daemon's budget.
-    final rounds = ebpf ? 80 : 32;
-    for (var i = 0; i < rounds; i++) {
+    // (with a capability probe first), so it gets a longer
+    // budget than a plain daemon would need.
+    for (var i = 0; i < 80; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 250));
       final s = await _readRootStatus();
-      if (s.startsWith('running')) {
-        // Bridge mode needs no netd flush: its DNS is
-        // intercepted at the socket layer, ahead of the
-        // cache (and the flush commands proved no-ops on
-        // the test ROM anyway).
-        if (!ebpf) await _flushDnsCache();
-        return;
-      }
+      if (s.startsWith('running')) return;
       if (s.startsWith('error:')) throw s.substring(6).trim();
     }
     throw '守护进程启动超时';
-  }
-
-  /// Poisoned answers cached by netd survive app and
-  /// daemon restarts - in the 0.62 sessions www.google.com
-  /// stayed pinned to a polluted IP for about an hour and
-  /// only an airplane-mode toggle cleared it. Flushing
-  /// the resolver cache at every root-mode start makes
-  /// the session's first queries go through the daemon's
-  /// own DNS. Best effort: failures are logged, never
-  /// thrown.
-  Future<void> _flushDnsCache() async {
-    try {
-      final res = await _vpnChannel.invokeMethod<Map<Object?, Object?>>(
-        'flushDns',
-        {},
-      );
-      _logEvent('dns cache flush: ${(res?['log'] as String?) ?? 'no reply'}');
-    } catch (e) {
-      _logEvent('dns cache flush failed: $e');
-    }
   }
 
   String? _deviceInfoCache;
@@ -2259,7 +2362,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         '${now.year}-${two(now.month)}-${two(now.day)} '
         '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
     final modeText = switch (_runMode) {
-      'root_tun' => 'Root TUN',
       'ebpf' => 'Root eBPF',
       _ => 'VPN 模式',
     };
@@ -2339,7 +2441,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     );
   }
 
-  Future<void> _startRootTun() async {
+  Future<void> _startRootDaemon() async {
     if (_selectedNode == null || _profileYaml == null) {
       _toast('先到「代理」页选一个节点');
       return;
@@ -2353,17 +2455,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (check != 'ok') {
         throw _StartFailure('未取得 root 授权（su 不可用或被拒绝）');
       }
-      if (_runMode == 'ebpf') {
-        final hasBridge =
-            await _vpnChannel.invokeMethod<bool>('bridgeCheck') ?? false;
-        if (!hasBridge) {
-          throw _StartFailure('此安装包未包含 eBPF 桥组件（bpf2socks）');
-        }
+      final hasBridge =
+          await _vpnChannel.invokeMethod<bool>('bridgeCheck') ?? false;
+      if (!hasBridge) {
+        throw _StartFailure('此安装包未包含 eBPF 桥组件（bpf2socks）');
       }
       await _launchRootDaemon();
       _logEvent('$_runMode started (node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
+      _startPolling();
       unawaited(_markWasRunning(true));
     } catch (e) {
       await _showStartError(e);
@@ -2372,7 +2473,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _stopRootTun() async {
+  Future<void> _stopRootDaemon() async {
     // Bridge mode needs no steering teardown: signalling
     // the supervisor ends the bridge, which restores the
     // original cgroup programs as it exits.
@@ -2423,13 +2524,21 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
+    if (mode != 'ebpf' && _rootBootStart) {
+      // The boot script only makes sense for the root mode;
+      // leaving it behind would resurrect a daemon in a
+      // mode the user no longer runs.
+      await _applyRootBootScript(false);
+      await prefs.setBool('root_boot_start', false);
+      _rootBootStart = false;
+    }
     await prefs.setString('run_mode', mode);
     setState(() => _runMode = mode);
   }
 
   Future<void> _stopCore() async {
     if (_daemonMode) {
-      await _stopRootTun();
+      await _stopRootDaemon();
       return;
     }
     try {
@@ -2478,7 +2587,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       return;
     }
     if (_daemonMode) {
-      await _startRootTun();
+      await _startRootDaemon();
       return;
     }
     final config = _profile?.configs[_selectedNode];
@@ -2502,23 +2611,36 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         await _vpnChannel.invokeMethod('stopVpn');
         await Future<void>.delayed(const Duration(milliseconds: 300));
       }
+      await _rotateLogIfHuge();
+      CoreBridge().xrayStart(config, 0);
+      // IPv6 is automatic since 0.68: probe the node's
+      // egress through the freshly started core BEFORE the
+      // tunnel exists, because the VpnService builder and
+      // the forwarder both need the verdict up front. A
+      // node without an IPv6 egress gets a v4-only tunnel,
+      // so apps never chase AAAA answers into a black hole.
+      final v6 = await _decideVpnIpv6();
       _tunReady = Completer<int>();
       await _vpnChannel.invokeMethod('startVpn', {
         'bypass': _bypassPkgs.toList(),
-        'ipv6': _ipv6Enabled,
+        'ipv6': v6,
         'splitOn': _splitEnabled,
         'splitAllow': _splitAllow,
       });
       final fd = await _tunReady!.future.timeout(const Duration(seconds: 15));
       _tunFd = fd;
-      await _rotateLogIfHuge();
-      CoreBridge().xrayStart(config, 0);
       // The packet path: sing-box owns the tunnel fd and forwards
       // every flow into the mixed inbound Xray just opened.
       await _ensureSbSetup();
-      CoreBridge().vpnForwardStart(fd, ipv6: _ipv6Enabled);
+      CoreBridge().vpnForwardStart(fd, ipv6: v6);
+      _vpnIpv6 = v6;
+      unawaited(SharedPreferences.getInstance()
+          .then((p) => p.setBool('vpn_ipv6_effective', v6)));
       _logEvent('vpn forwarder started (sing-box tun -> 127.0.0.1:7890)');
-      _logEvent('core started (rules=$_rulesMode, node=$_selectedNode)');
+      _logEvent(v6
+          ? 'ipv6 auto: enabled (node has an IPv6 egress)'
+          : 'ipv6 auto: disabled (node has no IPv6 egress)');
+      _logEvent('core started (mode=$_outModeName, node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
       unawaited(_markWasRunning(true));
@@ -2538,6 +2660,112 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await _showStartError(e);
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Decides the VPN tunnel's IPv6 shape for the selected
+  /// node: a cached verdict when this node was probed
+  /// before, otherwise a live probe through the running
+  /// core. The cache is keyed by node name; a same-named
+  /// node in another subscription reuses the verdict, which
+  /// is acceptable for a personal client.
+  Future<bool> _decideVpnIpv6() async {
+    final node = _selectedNode;
+    if (node == null) return false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      var cache = <String, dynamic>{};
+      final raw = prefs.getString('ipv6_probe_cache');
+      if (raw != null) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) cache = decoded;
+      }
+      final hit = cache[node];
+      if (hit is bool) {
+        _logEvent('ipv6 auto: cached verdict for $node: $hit');
+        return hit;
+      }
+      final ok = await _probeNodeIpv6();
+      cache[node] = ok;
+      await prefs.setString('ipv6_probe_cache', jsonEncode(cache));
+      _logEvent('ipv6 auto: probed $node: '
+          '${ok ? 'IPv6 egress found' : 'no IPv6 egress'}');
+      return ok;
+    } catch (e) {
+      _logEvent('ipv6 auto: decision failed: $e');
+      return false;
+    }
+  }
+
+  /// An IPv6 egress exists iff a TCP connect to a well-known
+  /// IPv6 anycast address succeeds through the node's
+  /// outbound. The probe is a SOCKS5 CONNECT to a literal
+  /// IPv6 address through the local mixed inbound, so DNS
+  /// plays no part and the answer describes the node, not
+  /// the local network.
+  Future<bool> _probeNodeIpv6() async {
+    for (final target in const [
+      '2606:4700:4700::1111',
+      '2606:4700:4700::1001',
+    ]) {
+      if (await _socksConnectV6(target, 443)) return true;
+    }
+    return false;
+  }
+
+  Future<bool> _socksConnectV6(String address, int port) async {
+    Socket? socket;
+    StreamSubscription<List<int>>? sub;
+    try {
+      // The freshly started core may need a moment to bind.
+      for (var i = 0; i < 10 && socket == null; i++) {
+        try {
+          socket = await Socket.connect('127.0.0.1', 7890);
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+        }
+      }
+      final s = socket;
+      if (s == null) return false;
+      final buf = <int>[];
+      final signal = StreamController<void>.broadcast();
+      sub = s.listen(
+        (d) {
+          buf.addAll(d);
+          if (!signal.isClosed) signal.add(null);
+        },
+        onError: (_) {
+          if (!signal.isClosed) signal.close();
+        },
+        onDone: () {
+          if (!signal.isClosed) signal.close();
+        },
+      );
+      Future<bool> need(int n) async {
+        if (buf.length >= n) return true;
+        try {
+          await for (final _ in signal.stream.timeout(
+            const Duration(seconds: 6),
+          )) {
+            if (buf.length >= n) return true;
+          }
+        } catch (_) {}
+        return buf.length >= n;
+      }
+
+      s.add(const [5, 1, 0]);
+      if (!await need(2)) return false;
+      if (buf[0] != 5 || buf[1] != 0) return false;
+      buf.clear();
+      final raw = InternetAddress(address).rawAddress;
+      s.add([5, 1, 0, 4, ...raw, (port >> 8) & 0xff, port & 0xff]);
+      if (!await need(4)) return false;
+      return buf[1] == 0;
+    } catch (_) {
+      return false;
+    } finally {
+      await sub?.cancel();
+      socket?.destroy();
     }
   }
 
@@ -2579,7 +2807,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// under the same pref key); when off, the service keeps
   /// its plain default text.
   void _pushVpnStatus() {
-    if (!_notifyOnStart || !_running) return;
+    if (_daemonMode || !_notifyOnStart || !_running) return;
     final node = _selectedNode;
     if (node == null) return;
     final delay = _delays[node];
@@ -2953,6 +3181,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _toast('切换失败：${e.message}');
       }
     }
+    unawaited(_republishRootConfigsIfNeeded());
   }
 
   Future<void> _openSettings() async {
@@ -2983,8 +3212,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               await _vpnChannel.invokeMethod('openBatterySettings');
             } catch (_) {}
           },
-          rulesMode: _rulesMode,
-          onRulesModeChanged: _setRulesMode,
+          outMode: _outMode,
+          onOutModeChanged: _setOutMode,
           geoReady: _geoReady,
           onUpdateGeo: () async {
             final ok = await _ensureGeoData(force: true);
@@ -2996,8 +3225,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           onRestoreOnBootChanged: _setRestoreOnBoot,
           autoIntervalHours: _subAutoIntervalHours,
           onAutoIntervalChanged: _setSubAutoInterval,
-          ipv6Enabled: _ipv6Enabled,
-          onIpv6Changed: _setIpv6Enabled,
+          ipv6Status: _ipv6StatusText,
+          rootBootStart: _rootBootStart,
+          onRootBootStartChanged: _setRootBootStart,
           runMode: _runMode,
           onRunModeChanged: _setRunMode,
           onExportBackup: _exportBackup,
@@ -3057,11 +3287,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             profileName: _profileName,
             currentDelay:
                 _selectedNode != null ? _delays[_selectedNode] : null,
-            rulesMode: _rulesMode,
-            onRulesModeChanged: _setRulesMode,
+            outMode: _outMode,
+            onOutModeChanged: _setOutMode,
             onShowProxies: () => _select(1),
-            rootMode: _runMode == 'root_tun',
             ebpfMode: _runMode == 'ebpf',
+            vpnIpv6: _vpnIpv6,
           ),
           ProxiesPage(
             subs: _subs.where((x) => x.enabled).toList(),
@@ -3589,11 +3819,11 @@ class _DashboardPage extends StatelessWidget {
     required this.onRecheckNetwork,
     required this.profileName,
     required this.currentDelay,
-    required this.rulesMode,
-    required this.onRulesModeChanged,
+    required this.outMode,
+    required this.onOutModeChanged,
     required this.onShowProxies,
-    required this.rootMode,
     this.ebpfMode = false,
+    this.vpnIpv6 = false,
   });
 
   final VoidCallback onOpenSettings;
@@ -3608,11 +3838,11 @@ class _DashboardPage extends StatelessWidget {
   final VoidCallback onRecheckNetwork;
   final String? profileName;
   final int? currentDelay;
-  final bool rulesMode;
-  final ValueChanged<bool> onRulesModeChanged;
+  final int outMode;
+  final ValueChanged<int> onOutModeChanged;
   final VoidCallback onShowProxies;
-  final bool rootMode;
   final bool ebpfMode;
+  final bool vpnIpv6;
 
   Widget _card(BuildContext context, {required Widget child, VoidCallback? onTap}) {
     return Container(
@@ -3710,11 +3940,10 @@ class _DashboardPage extends StatelessWidget {
         .withValues(alpha: 0.5);
     final String statusDetail;
     if (running) {
-      statusDetail = rootMode
-          ? 'sing-box 核心 · Root TUN 模式'
-          : ebpfMode
-              ? 'Xray 核心 · bpf2socks 桥 · eBPF 模式'
-              : 'Xray 核心 · sing-box 数据通路 · VPN 模式';
+      statusDetail = ebpfMode
+          ? 'Xray 核心 · bpf2socks 桥 · eBPF 模式'
+          : 'Xray 核心 · sing-box 数据通路 · VPN 模式'
+              '${vpnIpv6 ? ' · IPv6 开' : ' · IPv6 关（自动）'}';
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
     } else {
@@ -3957,15 +4186,22 @@ class _DashboardPage extends StatelessWidget {
                       _modeChip(
                         context,
                         label: '全局模式',
-                        selected: !rulesMode,
-                        onTap: () => onRulesModeChanged(false),
+                        selected: outMode == 1,
+                        onTap: () => onOutModeChanged(1),
                       ),
                       const SizedBox(width: 10),
                       _modeChip(
                         context,
                         label: '规则模式',
-                        selected: rulesMode,
-                        onTap: () => onRulesModeChanged(true),
+                        selected: outMode == 0,
+                        onTap: () => onOutModeChanged(0),
+                      ),
+                      const SizedBox(width: 10),
+                      _modeChip(
+                        context,
+                        label: '直连模式',
+                        selected: outMode == 2,
+                        onTap: () => onOutModeChanged(2),
                       ),
                     ],
                   ),
@@ -4112,16 +4348,17 @@ class _SettingsPage extends StatefulWidget {
     required this.onBypassSettingsChanged,
     required this.batteryIgnored,
     required this.onOpenBatterySettings,
-    required this.rulesMode,
-    required this.onRulesModeChanged,
+    required this.outMode,
+    required this.onOutModeChanged,
     required this.geoReady,
     required this.onUpdateGeo,
     required this.autoConnect,
     required this.onAutoConnectChanged,
     required this.autoIntervalHours,
     required this.onAutoIntervalChanged,
-    required this.ipv6Enabled,
-    required this.onIpv6Changed,
+    required this.ipv6Status,
+    required this.rootBootStart,
+    required this.onRootBootStartChanged,
     required this.runMode,
     required this.onRunModeChanged,
     required this.restoreOnBoot,
@@ -4142,16 +4379,17 @@ class _SettingsPage extends StatefulWidget {
   final void Function(bool, bool, Set<String>) onBypassSettingsChanged;
   final bool batteryIgnored;
   final VoidCallback onOpenBatterySettings;
-  final bool rulesMode;
-  final ValueChanged<bool> onRulesModeChanged;
+  final int outMode;
+  final ValueChanged<int> onOutModeChanged;
   final bool geoReady;
   final VoidCallback onUpdateGeo;
   final bool autoConnect;
   final ValueChanged<bool> onAutoConnectChanged;
   final int autoIntervalHours;
   final ValueChanged<int> onAutoIntervalChanged;
-  final bool ipv6Enabled;
-  final ValueChanged<bool> onIpv6Changed;
+  final String ipv6Status;
+  final bool rootBootStart;
+  final ValueChanged<bool> onRootBootStartChanged;
   final String runMode;
   final ValueChanged<String> onRunModeChanged;
   final bool restoreOnBoot;
@@ -4177,11 +4415,11 @@ class _SettingsPageState extends State<_SettingsPage> {
   // switch it toasts, and the check corrects on next open.)
   late bool _autoConnect = widget.autoConnect;
   late bool _restoreOnBoot = widget.restoreOnBoot;
-  late bool _ipv6Enabled = widget.ipv6Enabled;
+  late bool _rootBootStart = widget.rootBootStart;
   late String _runMode = widget.runMode;
   late bool _notifyOnStart = widget.notifyOnStart;
   late bool _notifySubUpdate = widget.notifySubUpdate;
-  late bool _rulesMode = widget.rulesMode;
+  late int _outMode = widget.outMode;
   late Set<String> _bypassPkgs = widget.bypassPkgs;
   late bool _splitEnabled = widget.bypassEnabled;
   late bool _splitAllow = widget.bypassAllow;
@@ -4259,21 +4497,6 @@ class _SettingsPageState extends State<_SettingsPage> {
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Root TUN'),
-              subtitle: Text(
-                'root 守护进程自建 TUN 并接管路由，划掉应用不影响；当前为全局模式',
-                style: TextStyle(color: muted),
-              ),
-              trailing: _runMode == 'root_tun'
-                  ? const Icon(Icons.check, color: _accent)
-                  : null,
-              onTap: () {
-                setState(() => _runMode = 'root_tun');
-                widget.onRunModeChanged('root_tun');
-              },
-            ),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
               title: const Text('Root eBPF'),
               subtitle: Text(
                 'root 守护进程＋流量重定向接管，无 TUN 设备；当前 IPv4、全局模式',
@@ -4287,6 +4510,20 @@ class _SettingsPageState extends State<_SettingsPage> {
                 widget.onRunModeChanged('ebpf');
               },
             ),
+            if (_runMode == 'ebpf')
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('开机自启动'),
+                subtitle: Text(
+                  'Magisk service.d 脚本在开机时直接拉起守护进程，不用打开应用（与 AsteriskNG 相同）；使用最近一次发布的节点配置',
+                  style: TextStyle(color: muted),
+                ),
+                value: _rootBootStart,
+                onChanged: (v) {
+                  setState(() => _rootBootStart = v);
+                  widget.onRootBootStartChanged(v);
+                },
+              ),
           ]),
           const SizedBox(height: 20),
           section('代理', [
@@ -4332,12 +4569,12 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('全局模式'),
               subtitle:
                   Text('所有流量都走代理', style: TextStyle(color: muted)),
-              trailing: !_rulesMode
+              trailing: _outMode == 1
                   ? const Icon(Icons.check, color: _accent)
                   : null,
               onTap: () {
-                setState(() => _rulesMode = false);
-                widget.onRulesModeChanged(false);
+                setState(() => _outMode = 1);
+                widget.onOutModeChanged(1);
               },
             ),
             ListTile(
@@ -4346,12 +4583,26 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('规则模式（分流）'),
               subtitle: Text('v2ray 原版绕过大陆：国内域名与 IP 直连，其余走代理',
                   style: TextStyle(color: muted)),
-              trailing: _rulesMode
+              trailing: _outMode == 0
                   ? const Icon(Icons.check, color: _accent)
                   : null,
               onTap: () {
-                setState(() => _rulesMode = true);
-                widget.onRulesModeChanged(true);
+                setState(() => _outMode = 0);
+                widget.onOutModeChanged(0);
+              },
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.shortcut),
+              title: const Text('直连模式'),
+              subtitle: Text('所有流量不走代理、直接连接',
+                  style: TextStyle(color: muted)),
+              trailing: _outMode == 2
+                  ? const Icon(Icons.check, color: _accent)
+                  : null,
+              onTap: () {
+                setState(() => _outMode = 2);
+                widget.onOutModeChanged(2);
               },
             ),
             ListTile(
@@ -4426,19 +4677,14 @@ class _SettingsPageState extends State<_SettingsPage> {
           ]),
           const SizedBox(height: 20),
           section('高级', [
-            SwitchListTile(
+            ListTile(
               contentPadding: EdgeInsets.zero,
-              secondary: const Icon(Icons.language_outlined),
-              title: const Text('IPv6 支持'),
+              leading: const Icon(Icons.language_outlined),
+              title: const Text('IPv6（自动）'),
               subtitle: Text(
-                '开启后 VPN 同时接管 IPv6 流量（节点服务器需有 IPv6 出口）；下次启动 VPN 时生效',
+                '${widget.ipv6Status}。VPN 模式启动时检测节点是否有 IPv6 出口、没有就自动禁用；Root 模式一律禁用。无需手动设置',
                 style: TextStyle(color: muted),
               ),
-              value: _ipv6Enabled,
-              onChanged: (v) {
-                setState(() => _ipv6Enabled = v);
-                widget.onIpv6Changed(v);
-              },
             ),
           ]),
           const SizedBox(height: 20),
@@ -4523,7 +4769,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.67.0 · app.flbox · Xray 内核',
+              'FlBox 0.68.0-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

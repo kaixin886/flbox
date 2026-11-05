@@ -170,40 +170,8 @@ func FlboxXrayMeasureAll(configsJSON, url *C.char) (out *C.char) {
 	return C.CString(res)
 }
 
-//export FlboxRootTunConfig
-func FlboxRootTunConfig(clashYAML, selectedNode *C.char, ipv6 C.int, includePkgs, excludePkgs *C.char) (out *C.char) {
-	defer func() {
-		if r := recover(); r != nil {
-			noteErr(fmt.Errorf("core panic recovered: %v", r))
-			out = nil
-		}
-	}()
-	parsePkgs := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		var pkgs []string
-		if err := json.Unmarshal([]byte(s), &pkgs); err != nil {
-			return nil
-		}
-		return pkgs
-	}
-	cfg, err := rootTunConfig(
-		C.GoString(clashYAML),
-		C.GoString(selectedNode),
-		ipv6 != 0,
-		parsePkgs(C.GoString(includePkgs)),
-		parsePkgs(C.GoString(excludePkgs)),
-	)
-	if err != nil {
-		noteErr(err)
-		return nil
-	}
-	return C.CString(cfg)
-}
-
 //export FlboxBridgeXrayConfig
-func FlboxBridgeXrayConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, uidsJSON *C.char) (out *C.char) {
+func FlboxBridgeXrayConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, uidsJSON *C.char, routeMode C.int) (out *C.char) {
 	defer func() {
 		if r := recover(); r != nil {
 			noteErr(fmt.Errorf("core panic recovered: %v", r))
@@ -223,6 +191,7 @@ func FlboxBridgeXrayConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.i
 		ipv6 != 0,
 		int(mode),
 		uids,
+		int(routeMode),
 	)
 	if err != nil {
 		noteErr(err)

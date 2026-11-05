@@ -43,6 +43,7 @@ func xrayTranslate(clashYAML, mode, logPath string) (string, error) {
 	result, err := xraytranslate.Translate([]byte(clashYAML), xraytranslate.Options{
 		VPN:     strings.HasPrefix(mode, "vpn"),
 		Rules:   strings.HasSuffix(mode, ":rules"),
+		Direct:  strings.HasSuffix(mode, ":direct"),
 		LogPath: logPath,
 	})
 	if err != nil {

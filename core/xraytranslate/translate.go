@@ -404,6 +404,11 @@ type Options struct {
 	// translation left domestic apps without network. Rule mode
 	// needs geoip.dat and geosite.dat in the Xray asset directory.
 	Rules bool
+	// Direct keeps the config's shape but exits everything
+	// locally: the final routing rule points at the freedom
+	// outbound, and neither the rules preset nor split DNS
+	// applies. It wins over Rules if both are set.
+	Direct bool
 }
 
 func buildConfig(p clashProxy, opts Options) (string, error) {
@@ -436,7 +441,13 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 	// only records that the session runs behind the system tunnel.
 	domainStrategy := "AsIs"
 	routingRules := []any{}
-	if opts.Rules {
+	// Direct mode's only routing change: the final rule
+	// exits through the freedom outbound instead of the node.
+	finalTag := "proxy"
+	if opts.Direct {
+		finalTag = "direct"
+	}
+	if opts.Rules && !opts.Direct {
 		// The v2ray preset: IPIfNonMatch is the load-bearing part.
 		// With AsIs, a domain destination never reaches the IP
 		// rules, so geoip:cn only fires for raw-IP traffic and most
@@ -466,7 +477,7 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 		map[string]any{
 			"type":        "field",
 			"inboundTag":  []string{"in", "tun"},
-			"outboundTag": "proxy",
+			"outboundTag": finalTag,
 		},
 	)
 	cfg := map[string]any{
@@ -489,7 +500,7 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 			"rules":          routingRules,
 		},
 	}
-	if opts.Rules {
+	if opts.Rules && !opts.Direct {
 		// Split DNS, v2rayNG-style: CN domains resolve locally
 		// (and must come back with CN IPs), the rest through the
 		// proxied resolver. IPIfNonMatch's internal resolutions
@@ -528,7 +539,7 @@ func Translate(clashYAML []byte, opts Options) (*Result, error) {
 		Skipped: []SkippedNode{},
 		Configs: map[string]string{},
 	}
-	if opts.Rules {
+	if opts.Rules && !opts.Direct {
 		// Rule mode is the fixed v2ray preset (geosite:cn +
 		// geoip:cn); the profile's own rules are not translated.
 		result.RulesApplied = 2

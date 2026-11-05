@@ -507,33 +507,68 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(null) }
                     }.start()
                 }
-                "flushDns" -> {
-                    // Flush netd's resolver cache: polluted
-                    // answers cached while direct (or while
-                    // DNS was broken) survive app restarts
-                    // and daemon restarts - the 0.62 sessions
-                    // pinned www.google.com to a bogus IP
-                    // for an hour and only an airplane-mode
-                    // toggle cleared it. Best effort: try
-                    // both command spellings, report the
-                    // output, never fail the caller.
+                "bootStartSet" -> {
+                    // Root-mode boot autostart (0.68), the
+                    // AsteriskNG design: a Magisk service.d
+                    // script starts flboxd at boot with the
+                    // configs the app last published - no app
+                    // process and no BootReceiver involved.
+                    // Enabling writes the script (0755) with
+                    // the daemon path and config paths baked
+                    // in; disabling removes it. The daemon
+                    // and bridge binaries are materialized
+                    // first so the script never points at
+                    // files that do not exist yet.
+                    val args = call.arguments as? Map<*, *>
+                    val enabled = args?.get("enabled") as? Boolean ?: false
+                    val configPath = args?.get("config") as? String
+                    val statusPath = args?.get("status") as? String
+                    val logPath = args?.get("log") as? String
+                    val prevLogPath = args?.get("prevLog") as? String
+                    val bridgePath = args?.get("bridge") as? String
                     Thread {
-                        var log = ""
+                        var ok = false
                         try {
-                            val proc = ProcessBuilder(
-                                "su", "-c",
-                                "ndc resolver flushdefaultif; cmd netd resolver flushdefaultif; echo flush-done"
-                            ).redirectErrorStream(true).start()
-                            val out = proc.inputStream.bufferedReader().readText()
-                            proc.waitFor()
-                            log = out.trim().replace("\n", " | ")
-                            if (log.length > 300) {
-                                log = log.substring(0, 300)
+                            if (!enabled) {
+                                val proc = ProcessBuilder(
+                                    "su", "-c",
+                                    "rm -f /data/adb/service.d/flbox.sh"
+                                ).redirectErrorStream(true).start()
+                                ok = proc.waitFor() == 0
+                            } else if (configPath != null && statusPath != null &&
+                                logPath != null && prevLogPath != null && bridgePath != null
+                            ) {
+                                val daemon = daemonBinary()?.absolutePath
+                                if (daemon != null && bridgeBinary() != null) {
+                                    val script = StringBuilder()
+                                        .append("#!/system/bin/sh\n")
+                                        .append("# FlBox root-mode boot start, installed by the app.\n")
+                                        .append("# Turn it off in FlBox settings (Root mode, boot autostart).\n")
+                                        .append("until [ \"\$(getprop sys.boot_completed)\" = \"1\" ]; do sleep 3; done\n")
+                                        .append("sleep 5\n")
+                                        .append("rm -f '").append(statusPath).append("'\n")
+                                        .append("[ -f '").append(logPath).append("' ] && mv '")
+                                        .append(logPath).append("' '").append(prevLogPath).append("'\n")
+                                        .append("printf '===== flboxd session (boot autostart) mode=ebpf ipv6=false =====\n' > '")
+                                        .append(logPath).append("'\n")
+                                        .append("nohup '").append(daemon).append("' '")
+                                        .append(configPath).append("' '").append(statusPath)
+                                        .append("' '").append(bridgePath).append("' >> '")
+                                        .append(logPath).append("' 2>&1 &\n")
+                                        .toString()
+                                    val tmp = File(cacheDir, "flbox-boot.sh")
+                                    tmp.writeText(script)
+                                    val cmd = "mkdir -p /data/adb/service.d && " +
+                                        "cp '" + tmp.absolutePath + "' /data/adb/service.d/flbox.sh && " +
+                                        "chmod 755 /data/adb/service.d/flbox.sh"
+                                    val proc = ProcessBuilder("su", "-c", cmd)
+                                        .redirectErrorStream(true).start()
+                                    ok = proc.waitFor() == 0
+                                }
                             }
                         } catch (e: Exception) {
-                            log = "exception: $e"
                         }
-                        runOnUiThread { result.success(mapOf("ok" to true, "log" to log)) }
+                        runOnUiThread { result.success(ok) }
                     }.start()
                 }
                 "netRules" -> {

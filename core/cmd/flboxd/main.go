@@ -1,11 +1,11 @@
 // flboxd is FlBox's root daemon: a standalone process
-// the app launches through su for the root modes.
+// the app launches through su for the root mode.
 // The app process itself can never hold root, so everything
-// that needs it (creating a TUN device and installing routes
-// for TUN mode; running the core beside the bpf2socks bridge
-// for eBPF mode) lives here. The core flavor follows the
-// config file: sing-box JSON for TUN mode, Xray JSON for
-// bridge mode (0.66, AsteriskNG's bridge-plus-Xray pairing).
+// that needs it (running the Xray core beside the
+// bpf2socks bridge) lives here. The core is Xray since
+// 0.66 (AsteriskNG's bridge-plus-Xray pairing); 0.68
+// removed the sing-box TUN flavor together with Root TUN
+// mode, so every config this daemon receives is Xray JSON.
 //
 // Usage:
 //   flboxd <config.json> <status-file>
@@ -40,11 +40,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sagernet/sing-box"
-	"github.com/sagernet/sing-box/include"
-	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common/json"
+	"github.com/xtls/xray-core/common/platform"
 	xcore "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/stats"
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
@@ -58,67 +56,31 @@ func writeStatus(path, text string) {
 	_ = os.WriteFile(path, []byte(text), 0644)
 }
 
-// runBox starts the sing-box instance and blocks until
-// SIGTERM/SIGINT. readyPath/readyText, when set, are
-// written right after a successful start: the plain path
-// uses it as its status file ("running"), the supervised
-// core as a pure readiness beacon for the supervisor.
-func runBox(configPath, readyPath, readyText string) error {
+// runXray starts the Xray instance, signals readiness,
+// and blocks until SIGTERM/SIGINT. When trafficPath is
+// non-empty (the supervised core child), a goroutine
+// publishes the cumulative proxy counters there every
+// two seconds: the core lives in this process, so the
+// app can only learn its traffic from that file.
+func runXray(configPath, readyPath, readyText, trafficPath string) error {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		return err
 	}
-	ctx := include.Context(context.Background())
-	options, err := json.UnmarshalExtendedContext[option.Options](ctx, raw)
-	if err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	instance, err := box.New(box.Options{Context: ctx, Options: options})
-	if err != nil {
-		return fmt.Errorf("create box: %w", err)
-	}
-	if err := instance.Start(); err != nil {
-		return fmt.Errorf("start box: %w", err)
-	}
-	if readyPath != "" {
-		writeStatus(readyPath, readyText)
-	}
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	<-sig
-	_ = instance.Close()
-	return nil
-}
-
-// configIsXray tells the two core config flavors apart:
-// Xray inbounds carry a "protocol", sing-box inbounds a
-// "type". The app generates exactly one flavor per mode,
-// so the first inbound settles it.
-func configIsXray(raw []byte) bool {
-	var probe struct {
-		Inbounds []struct {
-			Protocol string `json:"protocol"`
-		} `json:"inbounds"`
-	}
-	if err := stdjson.Unmarshal(raw, &probe); err != nil {
-		return false
-	}
-	return len(probe.Inbounds) > 0 && probe.Inbounds[0].Protocol != ""
-}
-
-// runXray is runBox's Xray twin: start the instance,
-// signal readiness, block until SIGTERM/SIGINT.
-func runXray(configPath, readyPath, readyText string) error {
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		return err
-	}
+	// Rule mode loads geoip.dat / geosite.dat from the
+	// asset location; the config lives in the app's
+	// documents directory, which is where the app
+	// releases them.
+	os.Setenv(platform.AssetLocation, filepath.Dir(configPath))
 	inst, err := xcore.StartInstance("json", raw)
 	if err != nil {
 		return fmt.Errorf("start xray: %w", err)
 	}
 	if readyPath != "" {
 		writeStatus(readyPath, readyText)
+	}
+	if trafficPath != "" {
+		go publishTraffic(inst, trafficPath)
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -127,16 +89,40 @@ func runXray(configPath, readyPath, readyText string) error {
 	return nil
 }
 
-// runCore dispatches on the config flavor.
+// publishTraffic writes {"up":N,"down":N} (cumulative
+// proxy-outbound bytes) to path every two seconds,
+// atomically, for the app's dashboard polling.
+func publishTraffic(inst *xcore.Instance, path string) {
+	feature := inst.GetFeature(stats.ManagerType())
+	mgr, ok := feature.(stats.Manager)
+	if !ok || mgr == nil {
+		return
+	}
+	counter := func(name string) int64 {
+		c := mgr.GetCounter(name)
+		if c == nil {
+			return 0
+		}
+		return c.Value()
+	}
+	for {
+		raw, err := stdjson.Marshal(map[string]any{
+			"up":   counter("outbound>>>proxy>>>traffic>>>uplink"),
+			"down": counter("outbound>>>proxy>>>traffic>>>downlink"),
+		})
+		if err == nil {
+			tmp := path + ".tmp"
+			if os.WriteFile(tmp, raw, 0644) == nil {
+				_ = os.Rename(tmp, path)
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// runCore runs the daemon's only core flavor: Xray.
 func runCore(configPath, readyPath, readyText string) error {
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		return err
-	}
-	if configIsXray(raw) {
-		return runXray(configPath, readyPath, readyText)
-	}
-	return runBox(configPath, readyPath, readyText)
+	return runXray(configPath, readyPath, readyText, "")
 }
 
 func bridgeBinaryPath() (string, error) {
@@ -253,7 +239,10 @@ func main() {
 	args := os.Args[1:]
 	switch {
 	case len(args) == 3 && args[0] == "--core":
-		if err := runCore(args[1], args[2], "ready\n"); err != nil {
+		// The supervised core also publishes its traffic
+		// counters next to the config for the app to poll.
+		trafficPath := filepath.Join(filepath.Dir(args[1]), "root-traffic.json")
+		if err := runXray(args[1], args[2], "ready\n", trafficPath); err != nil {
 			fmt.Fprintln(os.Stderr, "flboxd core:", err)
 			os.Exit(1)
 		}
