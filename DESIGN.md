@@ -478,3 +478,6 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 起因：白天普通模式测完 IPv6 开关留在开，重启后开机自启的 eBPF 会话让桥接管 v6，国内应用几乎全灭（用户实证关掉即愈）。用户问 AS 怎么做、并拍板改成 AS 那种。
 - AS 源码实证：IPv6 开关与系统级禁用是两个独立开关（disableSystemIpv6 = !enableIpv6 && enableRootIpv6Disabler，后者默认关）；AS 默认「关 IPv6」只是桥不接管、v6 走运营商原生直连，所以国内照常但属直连。桥的 C 配置解析是按 key 查找，未知 key 天然忽略——禁用标志可安全塞进桥配置文件。
 - FlBox 落法：新增独立开关「系统级禁用 IPv6」（pref ipv6_disabler，默认开以保持宁断不漏），仅 eBPF 模式在设置页出现（紧贴 IPv6 开关下方；VPN 模式不受影响）。_writeRootDaemonConfigs 把桥 JSON 解开、盖上 disableSystemIpv6 再写盘；flboxd 新增 bridgeDisablesIpv6（键缺失默认 true，兼容旧已发布配置/开机脚本），守卫三分支：IPv6 开→不守；关＋禁用开→守卫在；关＋禁用关→不守、v6 原生直连（守护日志 ipv6 guard: off - disabler switch off）。备份格式同步带 ipv6_disabler。
+
+## 0.71.2-beta2：代理页删当前订阅头卡（构建号 81）
+- 用户圈图点名删除 0.71.1 保留的当前订阅头部卡（名称＋已选节点＋本地/订阅角标）。代理页改为直接从「N 个节点」工具行开始；groupHeader 构建器、ProxiesPage 的 subs/activeSubId/onSwitchSub 三个入参一并清除。切换订阅仍只走配置页。

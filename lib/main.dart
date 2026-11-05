@@ -3300,9 +3300,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             vpnIpv6: _vpnIpv6,
           ),
           ProxiesPage(
-            subs: _subs.where((x) => x.enabled).toList(),
-            activeSubId: _activeSubId,
-            onSwitchSub: _switchSub,
             onEditNode: _openNodeEditor,
             onAddNode: () => _openNodeEditor(),
             onImportLink: _importFromLink,
@@ -4838,7 +4835,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.71.2-beta1 · app.flbox · Xray 内核',
+              'FlBox 0.71.2-beta2 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -4864,9 +4861,6 @@ class ProxiesPage extends StatefulWidget {
     required this.onEditNode,
     required this.onAddNode,
     required this.onImportLink,
-    required this.subs,
-    required this.activeSubId,
-    required this.onSwitchSub,
   });
 
   final XrayProfile? profile;
@@ -4882,9 +4876,6 @@ class ProxiesPage extends StatefulWidget {
   final ValueChanged<String> onEditNode;
   final VoidCallback onAddNode;
   final VoidCallback onImportLink;
-  final List<SubProfile> subs;
-  final String? activeSubId;
-  final ValueChanged<SubProfile> onSwitchSub;
 
   @override
   State<ProxiesPage> createState() => _ProxiesPageState();
@@ -4950,104 +4941,13 @@ class _ProxiesPageState extends State<ProxiesPage> {
             e.$2.name.toLowerCase().contains(_query.toLowerCase()))
           e.$2,
     ];
-    // Only the active subscription is shown on this
-    // page; switching subscriptions lives on the
-    // profiles page (user's call, 0.71.1).
-    final subs = widget.subs;
-    var ai = subs.indexWhere((s) => s.id == widget.activeSubId);
-    if (ai < 0) ai = 0;
-    Widget groupHeader(int idx) {
-      final sub = subs[idx];
-      final active = sub.id == widget.activeSubId;
-      return Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        decoration: BoxDecoration(
-          color: active
-              ? _accent.withValues(alpha: 0.07)
-              : _cardColor(context),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: active
-                ? _accent.withValues(alpha: 0.55)
-                : Theme.of(context)
-                    .colorScheme
-                    .onSurface
-                    .withValues(alpha: 0.05),
-            width: active ? 1.2 : 1,
-          ),
-        ),
-        child: Material(
-          type: MaterialType.transparency,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(20),
-            onTap: active ? null : () => widget.onSwitchSub(sub),
-            child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Row(
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: _accent.withValues(alpha: 0.10),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      sub.name.isEmpty
-                          ? '?'
-                          : String.fromCharCode(sub.name.runes.first),
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        color: _accent,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(sub.name,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 2),
-                        Text(
-                          active
-                              ? (widget.selectedNode ?? '未选择节点')
-                              : '${sub.nodeCount} 个节点',
-                          style: TextStyle(color: muted),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  Text(sub.url == null ? '本地' : '订阅',
-                      style: TextStyle(color: muted, fontSize: 12.5)),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
+    // Only the active subscription's nodes are shown
+    // here; switching subscriptions lives on the
+    // profiles page.
     return _PageFrame(
       title: '代理',
       child: CustomScrollView(
         slivers: [
-          if (subs.isNotEmpty)
-            SliverToBoxAdapter(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  groupHeader(ai),
-                ],
-              ),
-            ),
           SliverToBoxAdapter(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
