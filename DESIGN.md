@@ -560,3 +560,14 @@ Go core（core/，c-shared 导出 libflbox.so）
 - beta8 的自研极坐标波纹太浅，用户真机反馈「和之前没有区别」。本版改为真移植：lib/shapes/ 整套收入 prism_ui 的 shapes 库（FlClash UI 库所携、MIT 许可的 Material shapes Dart 移植，共 12 文件），画法换成 FlClash 的 _MorphPainter 原算式——Morph(circle, cookie9Sided)、随进度转 2π/9、本色阴影 (0,6)/blur 14；时序仍 450ms easeOutBack/easeInCubic。
 - 注意：发布版 Release 仍为 0.72.0-beta7（88ae884），beta8/beta9 均为其后迭代，未单独发 Release。
 - 待真机验收：启停形变与 FlClash 观感一致（圆→九瓣 cookie、带转动）。
+
+## 动画整套移植计划（2026-11-05 用户定：整套移植、慢慢来）
+- 批次1（beta10）：ElasticPress 弹性按压——prism 参数（弹簧 311/0.593、growthOf=min(1/4, 16/最长边)），落点：启停钮、节点卡、订阅卡。
+- 批次2：四页改 PageView 滑动切换（仿 FlClash home 的 PageView＋导航联动）。
+- 批次3：列表入场（交错淡入上浮）、订阅卡展开动画、代理分组指示器滑动。
+- 批次4：仪表盘速率曲线绘制动画、测速/刷新时的旋转指示等细节。
+- 边界：prism_ui 整库是 FlClash 的完整设计系统（两万行级、含主题/排版体系），不整库吞入；移植对象为用户可感知的动画行为与原参数，形变引擎（shapes）已整套收入为例外。
+
+## 0.72.0-beta10：动画批次1——ElasticPress（构建号 96）
+- 新增 _ElasticPress：Listener 听按压、弹簧模拟驱动 scale 膨胀（按下膨起、松手回弹带果冻感），减动效时跳变。启停钮撤掉 beta8 的 0.94 线性收缩改用它；节点卡（_NodeTile 调用点）与订阅卡（_subCard 调用点）各裹一层。
+- 待真机验收：按压启停钮/节点卡/订阅卡时有弹性膨起感、不影响点击与滚动。

@@ -7,6 +7,7 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -3877,8 +3878,88 @@ Widget _delayPill(int? delay, Color color) {
 /// same engine FlClash uses: lib/shapes/ vendors
 /// prism_ui's shapes library (the MIT-licensed Dart
 /// port of the Material shapes system), and the
-/// painter below follows their _MorphPainter. Pressing
-/// scales it to 0.94 - their ElasticPress, simplified.
+/// painter below follows their _MorphPainter. The
+/// press is _ElasticPress (batch 1 of the set).
+/// FlClash's ElasticPress reduced to its lift, with
+/// their numbers: the press spring is
+/// SpringDescription(mass 1, stiffness 311, damping
+/// ratio 0.593) from prism_ui's navigation_dock.dart -
+/// underdamped, so the child swells past its target
+/// and jellies back - and the swell fraction is
+/// growthOf(side) = min(1/4, 16 / longestSide), capping
+/// growth at 16 px on the longest side. Their
+/// drag-pull render transform stays with the dock;
+/// here a Listener hears the press and a Transform
+/// paints it.
+class _ElasticPress extends StatefulWidget {
+  const _ElasticPress({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_ElasticPress> createState() => _ElasticPressState();
+}
+
+class _ElasticPressState extends State<_ElasticPress>
+    with SingleTickerProviderStateMixin {
+  static final _pressSpring = SpringDescription.withDampingRatio(
+    mass: 1,
+    stiffness: 311,
+    ratio: 0.593,
+  );
+  late final AnimationController _lift = AnimationController(
+    vsync: this,
+    value: 0,
+  );
+
+  @override
+  void dispose() {
+    _lift.dispose();
+    super.dispose();
+  }
+
+  void _springTo(double target) {
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _lift.value = target;
+      return;
+    }
+    _lift.animateWith(
+      SpringSimulation(_pressSpring, _lift.value, target, 0),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: (_) => _springTo(1),
+      onPointerUp: (_) => _springTo(0),
+      onPointerCancel: (_) => _springTo(0),
+      child: AnimatedBuilder(
+        animation: _lift,
+        builder: (context, child) {
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              final w = constraints.maxWidth.isFinite
+                  ? constraints.maxWidth
+                  : 0.0;
+              final h = constraints.maxHeight.isFinite
+                  ? constraints.maxHeight
+                  : 0.0;
+              final side = math.max(w, h);
+              final growth = side > 0 ? math.min(0.25, 16 / side) : 0.25;
+              return Transform.scale(
+                scale: 1 + _lift.value * growth,
+                child: child,
+              );
+            },
+          );
+        },
+        child: widget.child,
+      ),
+    );
+  }
+}
+
 class _MorphToggle extends StatefulWidget {
   const _MorphToggle({
     required this.running,
@@ -3906,7 +3987,6 @@ class _MorphToggleState extends State<_MorphToggle>
     curve: Curves.easeOutBack,
     reverseCurve: Curves.easeInCubic,
   );
-  var _pressed = false;
 
   @override
   void didUpdateWidget(_MorphToggle oldWidget) {
@@ -3931,14 +4011,9 @@ class _MorphToggleState extends State<_MorphToggle>
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: widget.onTap,
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedScale(
-        scale: _pressed ? 0.94 : 1,
-        duration: const Duration(milliseconds: 150),
+    return _ElasticPress(
+      child: GestureDetector(
+        onTap: widget.onTap,
         child: AnimatedBuilder(
           animation: _progress,
           builder: (context, _) {
@@ -5049,7 +5124,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.72.0-beta9 · app.flbox · Xray 内核',
+              'FlBox 0.72.0-beta10 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -5275,7 +5350,8 @@ class _ProxiesPageState extends State<ProxiesPage> {
             itemCount: nodes.length,
             itemBuilder: (context, i) {
               final node = nodes[i];
-              return _NodeTile(
+              return _ElasticPress(
+                child: _NodeTile(
                 node: node,
                 info: isInfoNode(node.name),
                 muted: muted,
@@ -5287,6 +5363,7 @@ class _ProxiesPageState extends State<ProxiesPage> {
                 onTap: () => widget.onSelect(node.name),
                 onFav: () => widget.onToggleFav(node.name),
                 onEdit: () => widget.onEditNode(node.name),
+                ),
               );
             },
           ),
@@ -6293,7 +6370,7 @@ class ProfilesPage extends StatelessWidget {
               Text('暂无订阅。从文件导入，或粘贴订阅链接拉取；可以存多份随时切换。',
                   style: TextStyle(color: muted)),
             for (final sub in subs) ...[
-              _subCard(context, sub, muted),
+              _ElasticPress(child: _subCard(context, sub, muted)),
               const SizedBox(height: 12),
             ],
             if (activeSkipped.isNotEmpty) ...[
