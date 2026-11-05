@@ -45,6 +45,7 @@ func xrayTranslate(clashYAML, mode, logPath string) (string, error) {
 		Rules:   strings.HasSuffix(mode, ":rules"),
 		Direct:  strings.HasSuffix(mode, ":direct"),
 		LogPath: logPath,
+		LogOff:  strings.Contains(mode, ":logoff"),
 	})
 	if err != nil {
 		return "", err

@@ -149,61 +149,139 @@ func childCmd(name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// The IPv6 drop chain held during bridge sessions.
-// Local destinations stay reachable - loopback,
-// link-local and multicast (neighbour discovery must
-// keep working), and the bridge's token prefix (its
-// DNS-hijack listeners live there) - everything else
-// IPv6 leaving the device is dropped. Break, not leak:
-// the same contract the pre-bridge iptables data plane
-// had, which did not carry over when the bridge landed.
-const v6DropChain = "FLBOX6"
+// The IPv6 guard held during bridge sessions. The
+// bridge only declines to capture IPv6 (its emitted
+// programs bypass it), so "disabled" has to mean the
+// system itself has no IPv6 to leak: the supervisor
+// writes disable_ipv6=1 on every interface - the
+// mechanism AsteriskNG's asteriskd uses (sysctl, not
+// packet filtering) - re-asserts it every few seconds
+// because netd re-enables IPv6 when networks change,
+// and restores the recorded values when the session
+// ends. The ip6tables drop chain this replaces
+// (0.68.1) installed and verified cleanly yet did not
+// stop the leak on the reference device, so it is gone
+// rather than kept as a second guess.
+type v6Guard struct {
+	saved    map[string]string
+	done     chan struct{}
+	restored bool
+}
 
-func ip6tables(args ...string) error {
-	out, err := exec.Command("ip6tables", args...).CombinedOutput()
+func v6ReadDisable(name string) (string, error) {
+	b, err := os.ReadFile("/proc/sys/net/ipv6/conf/" + name + "/disable_ipv6")
 	if err != nil {
-		return fmt.Errorf("ip6tables %s: %v (%s)",
-			strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return "", err
 	}
-	return nil
+	return strings.TrimSpace(string(b)), nil
 }
 
-// v6DropRemove is best-effort: it also clears a chain a
-// SIGKILLed predecessor could not take down itself.
-func v6DropRemove() {
-	_ = ip6tables("-D", "OUTPUT", "-j", v6DropChain)
-	_ = ip6tables("-F", v6DropChain)
-	_ = ip6tables("-X", v6DropChain)
+func v6WriteDisable(name, value string) error {
+	return os.WriteFile("/proc/sys/net/ipv6/conf/"+name+"/disable_ipv6", []byte(value), 0o644)
 }
 
-func v6DropInstall() error {
-	v6DropRemove()
-	steps := [][]string{
-		{"-N", v6DropChain},
-		{"-A", v6DropChain, "-o", "lo", "-j", "RETURN"},
-		{"-A", v6DropChain, "-d", "::1/128", "-j", "RETURN"},
-		{"-A", v6DropChain, "-d", "fe80::/10", "-j", "RETURN"},
-		{"-A", v6DropChain, "-d", "ff00::/8", "-j", "RETURN"},
-		{"-A", v6DropChain, "-d", "fd7a:7374:6572:6973::/64", "-j", "RETURN"},
-		{"-A", v6DropChain, "-j", "DROP"},
-		{"-A", "OUTPUT", "-j", v6DropChain},
+// v6HasGlobalAddress reports whether any global-scope
+// IPv6 address exists (a leak needs one): the kernel's
+// if_inet6 table lists every address as 32 hex digits;
+// link-local fe80::/10 and loopback ::1 do not count.
+func v6HasGlobalAddress() bool {
+	b, err := os.ReadFile("/proc/net/if_inet6")
+	if err != nil {
+		return false
 	}
-	for _, s := range steps {
-		if err := ip6tables(s...); err != nil {
-			v6DropRemove()
-			return err
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || len(fields[0]) != 32 {
+			continue
+		}
+		addr := strings.ToLower(fields[0])
+		if strings.HasPrefix(addr, "fe8") || strings.HasPrefix(addr, "fe9") ||
+			strings.HasPrefix(addr, "fea") || strings.HasPrefix(addr, "feb") {
+			continue
+		}
+		if addr == "00000000000000000000000000000001" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func v6GuardStart() (*v6Guard, error) {
+	g := &v6Guard{saved: map[string]string{}, done: make(chan struct{})}
+	entries, err := os.ReadDir("/proc/sys/net/ipv6/conf")
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No IPv6 stack at all: nothing can leak.
+			return g, nil
+		}
+		return nil, fmt.Errorf("ipv6 guard: %w", err)
+	}
+	var failed []string
+	for _, e := range entries {
+		name := e.Name()
+		// "all" fans a write out to every interface,
+		// which would corrupt the restore bookkeeping;
+		// "default" is kept (it covers interfaces that
+		// appear later), loopback is never touched.
+		if name == "lo" || name == "all" {
+			continue
+		}
+		cur, err := v6ReadDisable(name)
+		if err != nil {
+			continue
+		}
+		g.saved[name] = cur
+		if cur == "1" {
+			continue
+		}
+		if err := v6WriteDisable(name, "1"); err != nil {
+			failed = append(failed, name)
+			fmt.Fprintf(os.Stderr, "flboxd: ipv6 guard: disable %s: %v\n", name, err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "flboxd: ipv6 guard: %s disable_ipv6 %s -> 1\n", name, cur)
+	}
+	if len(failed) > 0 && v6HasGlobalAddress() {
+		g.restore()
+		return nil, fmt.Errorf("ipv6 guard: could not disable IPv6 on %s while global addresses exist", strings.Join(failed, ", "))
+	}
+	go g.watch()
+	return g, nil
+}
+
+func (g *v6Guard) watch() {
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-g.done:
+			return
+		case <-t.C:
+			for name := range g.saved {
+				cur, err := v6ReadDisable(name)
+				if err == nil && cur != "1" {
+					if err := v6WriteDisable(name, "1"); err == nil {
+						fmt.Fprintf(os.Stderr, "flboxd: ipv6 guard: re-asserted disable on %s (was %s)\n", name, cur)
+					}
+				}
+			}
 		}
 	}
-	// Self-check before the session counts as leak-free.
-	if err := ip6tables("-C", "OUTPUT", "-j", v6DropChain); err != nil {
-		v6DropRemove()
-		return fmt.Errorf("verify jump: %w", err)
+}
+
+func (g *v6Guard) restore() {
+	if g.restored {
+		return
 	}
-	if err := ip6tables("-C", v6DropChain, "-j", "DROP"); err != nil {
-		v6DropRemove()
-		return fmt.Errorf("verify drop: %w", err)
+	g.restored = true
+	close(g.done)
+	for name, orig := range g.saved {
+		if err := v6WriteDisable(name, orig); err != nil {
+			fmt.Fprintf(os.Stderr, "flboxd: ipv6 guard: restore %s=%s: %v\n", name, orig, err)
+		}
 	}
-	return nil
+	fmt.Fprintf(os.Stderr, "flboxd: ipv6 guard: restored\n")
 }
 
 func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
@@ -228,13 +306,14 @@ func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 	// bridge by itself cannot enforce that (its
 	// enableIpv6=false only declines to capture, leaving
 	// the system route - and the leak - in place). The
-	// supervisor therefore holds an ip6tables drop chain
-	// for the length of the session; failing to install
-	// it fails the start rather than leaking quietly.
-	if err := v6DropInstall(); err != nil {
-		return fmt.Errorf("ipv6 drop: %w", err)
+	// supervisor's sysctl guard is what makes disabled
+	// true; failing it fails the start rather than
+	// leaking quietly.
+	guard, err := v6GuardStart()
+	if err != nil {
+		return err
 	}
-	defer v6DropRemove()
+	defer guard.restore()
 	self, err := os.Executable()
 	if err != nil {
 		return err

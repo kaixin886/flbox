@@ -521,6 +521,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// takes over IPv6 at the next start. eBPF mode ignores
   /// it - IPv6 there is force-disabled.
   bool _ipv6Enabled = false;
+  bool _logEnabled = true;
 
   /// The running VPN session's IPv6 state, captured from
   /// the switch at start and persisted: a resync that
@@ -650,6 +651,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
     _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
+    _logEnabled = prefs.getBool('log_enabled') ?? true;
     _vpnIpv6 = prefs.getBool('vpn_ipv6_effective') ?? false;
     _rootBootStart = prefs.getBool('root_boot_start') ?? false;
     _runMode = prefs.getString('run_mode') ?? 'vpn';
@@ -1113,6 +1115,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           'notify_sub_update': _notifySubUpdate,
           'root_boot_start': _rootBootStart,
           'ipv6_enabled': _ipv6Enabled,
+          'log_enabled': _logEnabled,
           'run_mode': _runMode,
           'sub_auto_interval_hours': _subAutoIntervalHours,
           'nav_style': _navStyle.index,
@@ -1187,6 +1190,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       var notifySubUpdate = _notifySubUpdate;
       var rootBootStart = _rootBootStart;
       var ipv6Enabled = _ipv6Enabled;
+      var logEnabled = _logEnabled;
       var intervalHours = _subAutoIntervalHours;
       var navStyle = _navStyle;
       var favNodes = _favNodes;
@@ -1207,6 +1211,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
         rootBootStart = bb('root_boot_start', rootBootStart);
         ipv6Enabled = bb('ipv6_enabled', ipv6Enabled);
+        logEnabled = bb('log_enabled', logEnabled);
         if (bp['run_mode'] is String) runMode = bp['run_mode'] as String;
         if (runMode == 'root_tun') runMode = 'vpn';
         bypassEnabled = bb('bypass_enabled', bypassEnabled);
@@ -1239,6 +1244,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _notifySubUpdate = notifySubUpdate;
         _rootBootStart = rootBootStart;
         _ipv6Enabled = ipv6Enabled;
+        _logEnabled = logEnabled;
         _runMode = runMode;
         _subAutoIntervalHours = intervalHours;
         _navStyle = navStyle;
@@ -1252,6 +1258,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await prefs.setBool('notify_sub_update', notifySubUpdate);
       await prefs.setBool('root_boot_start', rootBootStart);
       await prefs.setBool('ipv6_enabled', ipv6Enabled);
+      await prefs.setBool('log_enabled', logEnabled);
       await prefs.setString('run_mode', runMode);
       await prefs.setInt('sub_auto_interval_hours', intervalHours);
       await prefs.setInt('nav_style', navStyle.index);
@@ -1343,6 +1350,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// the proxy is up before the user ever opens FlBox. The
   /// app adopts the boot-started daemon through the usual
   /// status-file resync. Disabling removes the script.
+  /// Core log switch: persisted at once, applied the
+  /// next time a core config is generated (a session
+  /// start or a subscription switch). Off sets the Xray
+  /// log level to none in both cores - the daemon core's
+  /// info log is its biggest steady disk writer.
+  Future<void> _setLogEnabled(bool v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('log_enabled', v);
+    setState(() => _logEnabled = v);
+  }
+
   Future<void> _setRootBootStart(bool value) async {
     final prefs = await SharedPreferences.getInstance();
     if (!value) {
@@ -1486,12 +1504,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Future<XrayProfile> _translate(String text) {
     final logPath = _logPath;
     final outMode = _outMode;
+    final logOff = !_logEnabled;
     return Isolate.run(
       () => CoreBridge().translateXray(
         text,
         vpn: true,
         logPath: logPath,
         outMode: outMode,
+        logOff: logOff,
       ),
     );
   }
@@ -2235,6 +2255,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       );
       uids = res?.whereType<int>().toList() ?? <int>[];
     }
+    final logOff = !_logEnabled;
     final envelope = await Isolate.run(
       () => CoreBridge().bridgeXrayConfig(
         yaml,
@@ -2243,6 +2264,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         mode: mode,
         uids: uids,
         routeMode: routeMode,
+        logOff: logOff,
       ),
     );
     final decoded = jsonDecode(envelope) as Map<String, dynamic>;
@@ -3101,6 +3123,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           onAutoIntervalChanged: _setSubAutoInterval,
           ipv6Enabled: _ipv6Enabled,
           onIpv6Changed: _setIpv6Enabled,
+          logEnabled: _logEnabled,
+          onLogEnabledChanged: _setLogEnabled,
           rootBootStart: _rootBootStart,
           onRootBootStartChanged: _setRootBootStart,
           runMode: _runMode,
@@ -4276,6 +4300,8 @@ class _SettingsPage extends StatefulWidget {
     required this.onAutoIntervalChanged,
     required this.ipv6Enabled,
     required this.onIpv6Changed,
+    required this.logEnabled,
+    required this.onLogEnabledChanged,
     required this.rootBootStart,
     required this.onRootBootStartChanged,
     required this.runMode,
@@ -4304,6 +4330,8 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<int> onAutoIntervalChanged;
   final bool ipv6Enabled;
   final ValueChanged<bool> onIpv6Changed;
+  final bool logEnabled;
+  final ValueChanged<bool> onLogEnabledChanged;
   final bool rootBootStart;
   final ValueChanged<bool> onRootBootStartChanged;
   final String runMode;
@@ -4329,6 +4357,7 @@ class _SettingsPageState extends State<_SettingsPage> {
   // switch it toasts, and the check corrects on next open.)
   late bool _rootBootStart = widget.rootBootStart;
   late bool _ipv6Enabled = widget.ipv6Enabled;
+  late bool _logEnabled = widget.logEnabled;
   late String _runMode = widget.runMode;
   late bool _notifyOnStart = widget.notifyOnStart;
   late bool _notifySubUpdate = widget.notifySubUpdate;
@@ -4571,7 +4600,7 @@ class _SettingsPageState extends State<_SettingsPage> {
               subtitle: Text(
                 _runMode == 'ebpf'
                     ? 'eBPF 模式强制禁用，与此开关无关'
-                    : 'VPN 模式手动开关，下次启动时生效；节点没有 IPv6 出口时开启，v6 流量会进隧道失败、应用自动回落 IPv4，不会直连泄漏',
+                    : 'VPN 模式手动开关，下次启动时生效；开：v6 进隧道走节点（节点无 v6 出口则失败回落 v4）；关：v6 在隧道口直接丢弃，不直连泄漏',
                 style: TextStyle(color: muted),
               ),
               value: _runMode == 'ebpf' ? false : _ipv6Enabled,
@@ -4581,6 +4610,22 @@ class _SettingsPageState extends State<_SettingsPage> {
                       setState(() => _ipv6Enabled = v);
                       widget.onIpv6Changed(v);
                     },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              secondary: const Icon(Icons.receipt_long_outlined),
+              title: const Text('核心日志'),
+              subtitle: Text(
+                _logEnabled
+                    ? '开启：核心日志写入「工具 → 日志」'
+                    : '关闭：核心不再写日志（省电、少写盘），排障时再开；下次启动核心时生效',
+                style: TextStyle(color: muted),
+              ),
+              value: _logEnabled,
+              onChanged: (v) {
+                setState(() => _logEnabled = v);
+                widget.onLogEnabledChanged(v);
+              },
             ),
           ]),
           const SizedBox(height: 20),
@@ -4665,7 +4710,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.69.0-beta · app.flbox · Xray 内核',
+              'FlBox 0.70.0-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -4791,51 +4836,78 @@ class _ProxiesPageState extends State<ProxiesPage> {
       return Container(
         margin: const EdgeInsets.only(bottom: 12),
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
+          color: active
+              ? _accent.withValues(alpha: 0.07)
+              : _cardColor(context),
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: active
+                ? _accent.withValues(alpha: 0.55)
+                : Theme.of(context)
+                    .colorScheme
+                    .onSurface
+                    .withValues(alpha: 0.05),
+            width: active ? 1.2 : 1,
+          ),
         ),
-        child: ListTile(
-          shape: RoundedRectangleBorder(
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
             borderRadius: BorderRadius.circular(20),
-          ),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-          leading: Container(
-            width: 44,
-            height: 44,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color:
-                  Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
+            onTap: active ? null : () => widget.onSwitchSub(sub),
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _accent.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      sub.name.isEmpty
+                          ? '?'
+                          : String.fromCharCode(sub.name.runes.first),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: _accent,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(sub.name,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 2),
+                        Text(
+                          active
+                              ? (widget.selectedNode ?? '未选择节点')
+                              : '${sub.nodeCount} 个节点',
+                          style: TextStyle(color: muted),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Text(sub.url == null ? '本地' : '订阅',
+                      style: TextStyle(color: muted, fontSize: 12.5)),
+                  const SizedBox(width: 6),
+                  Icon(active ? Icons.expand_less : Icons.expand_more,
+                      color: muted),
+                ],
+              ),
             ),
-            child: Text(
-              sub.name.isEmpty
-                  ? '?'
-                  : String.fromCharCode(sub.name.runes.first),
-              style:
-                  const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-            ),
           ),
-          title: Text(sub.name,
-              style: const TextStyle(fontWeight: FontWeight.w600)),
-          subtitle: Text(
-            active ? (widget.selectedNode ?? '未选择节点') : '${sub.nodeCount} 个节点',
-            style: TextStyle(color: muted),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(sub.url == null ? '本地' : '订阅',
-                  style: TextStyle(color: muted, fontSize: 12.5)),
-              const SizedBox(width: 6),
-              Icon(active ? Icons.expand_less : Icons.expand_more,
-                  color: muted),
-            ],
-          ),
-          onTap: active ? null : () => widget.onSwitchSub(sub),
         ),
       );
     }
@@ -6095,8 +6167,14 @@ class ProfilesPage extends StatelessWidget {
           width: active ? 1.2 : 1,
         ),
       ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: (!active && sub.enabled) ? () => onSwitch(sub) : null,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
@@ -6182,16 +6260,6 @@ class ProfilesPage extends StatelessWidget {
           const SizedBox(height: 6),
           Row(
             children: [
-              if (!active)
-                FilledButton.tonal(
-                  onPressed: () => onSwitch(sub),
-                  style: FilledButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14),
-                  ),
-                  child: const Text('使用'),
-                ),
               const Spacer(),
               if (sub.url != null)
                 IconButton(
@@ -6216,6 +6284,9 @@ class ProfilesPage extends StatelessWidget {
             ],
           ),
         ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -6248,8 +6319,14 @@ class _ToolsPage extends StatelessWidget {
     Widget group(List<Widget> rows) {
       return Container(
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
+          color: _cardColor(context),
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: Theme.of(context)
+                .colorScheme
+                .onSurface
+                .withValues(alpha: 0.05),
+          ),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         child: Column(children: rows),
@@ -6485,7 +6562,7 @@ class _LogsPageState extends State<LogsPage> {
           ],
           if (_status != null) ...[
             const SizedBox(height: 16),
-            SelectableText(_status!),
+            Text(_status!),
           ],
           const SizedBox(height: 16),
           Expanded(
@@ -6496,7 +6573,7 @@ class _LogsPageState extends State<LogsPage> {
                         : '暂无守护日志。用 Root 模式启动一次后，守护进程的日志会写到这里。',
                     style: TextStyle(color: muted))
                 : SingleChildScrollView(
-                    child: SelectableText(
+                    child: Text(
                       _logTail,
                       style: const TextStyle(
                         fontSize: 11,

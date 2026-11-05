@@ -171,7 +171,7 @@ func FlboxXrayMeasureAll(configsJSON, url *C.char) (out *C.char) {
 }
 
 //export FlboxBridgeXrayConfig
-func FlboxBridgeXrayConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, uidsJSON *C.char, routeMode C.int) (out *C.char) {
+func FlboxBridgeXrayConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, uidsJSON *C.char, routeMode C.int, logOff C.int) (out *C.char) {
 	defer func() {
 		if r := recover(); r != nil {
 			noteErr(fmt.Errorf("core panic recovered: %v", r))
@@ -192,6 +192,7 @@ func FlboxBridgeXrayConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.i
 		int(mode),
 		uids,
 		int(routeMode),
+		logOff != 0,
 	)
 	if err != nil {
 		noteErr(err)

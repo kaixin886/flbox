@@ -409,6 +409,10 @@ type Options struct {
 	// outbound, and neither the rules preset nor split DNS
 	// applies. It wins over Rules if both are set.
 	Direct bool
+	// LogOff silences the core log entirely
+	// (loglevel none): the settings log switch
+	// in its off state.
+	LogOff bool
 }
 
 func buildConfig(p clashProxy, opts Options) (string, error) {
@@ -417,7 +421,9 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 		return "", err
 	}
 	logCfg := map[string]any{"loglevel": "warning", "access": "none"}
-	if opts.LogPath != "" {
+	if opts.LogOff {
+		logCfg["loglevel"] = "none"
+	} else if opts.LogPath != "" {
 		logCfg["loglevel"] = "info"
 		logCfg["error"] = opts.LogPath
 	}

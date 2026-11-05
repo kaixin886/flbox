@@ -53,7 +53,7 @@ rules:
 
 func parseRootXray(t *testing.T, node string) map[string]any {
 	t.Helper()
-	out, err := rootXrayConfig(rootTestYAML, node, routeGlobal)
+	out, err := rootXrayConfig(rootTestYAML, node, routeGlobal, false)
 	if err != nil {
 		t.Fatalf("rootXrayConfig(%s): %v", node, err)
 	}
@@ -140,7 +140,7 @@ func TestRootXrayStarts(t *testing.T) {
 	}
 	self.Close()
 	probe.Close()
-	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal)
+	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestRootXrayStarts(t *testing.T) {
 
 func parseRootXrayMode(t *testing.T, node string, mode int) map[string]any {
 	t.Helper()
-	out, err := rootXrayConfig(rootTestYAML, node, mode)
+	out, err := rootXrayConfig(rootTestYAML, node, mode, false)
 	if err != nil {
 		t.Fatalf("rootXrayConfig(%s, %d): %v", node, mode, err)
 	}

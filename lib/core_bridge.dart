@@ -17,6 +17,7 @@ typedef _BridgeConfigNative = Pointer<Utf8> Function(
   Int32,
   Pointer<Utf8>,
   Int32,
+  Int32,
 );
 typedef _BridgeConfigDart = Pointer<Utf8> Function(
   Pointer<Utf8>,
@@ -24,6 +25,7 @@ typedef _BridgeConfigDart = Pointer<Utf8> Function(
   int,
   int,
   Pointer<Utf8>,
+  int,
   int,
 );
 typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
@@ -197,11 +199,13 @@ class CoreBridge {
     required int mode,
     required List<int> uids,
     required int routeMode,
+    required bool logOff,
   }) {
     final a = clashYaml.toNativeUtf8();
     final b = selectedNode.toNativeUtf8();
     final c = jsonEncode(uids).toNativeUtf8();
-    final out = _take(_bridgeConfig(a, b, ipv6 ? 1 : 0, mode, c, routeMode));
+    final out =
+        _take(_bridgeConfig(a, b, ipv6 ? 1 : 0, mode, c, routeMode, logOff ? 1 : 0));
     malloc.free(a);
     malloc.free(b);
     malloc.free(c);
@@ -216,6 +220,7 @@ class CoreBridge {
     required bool vpn,
     required String logPath,
     int outMode = 1,
+    bool logOff = false,
   }) {
     final arg = clashYaml.toNativeUtf8();
     final mode = ((vpn ? 'vpn' : 'local') +
@@ -223,7 +228,8 @@ class CoreBridge {
                 ? ':rules'
                 : outMode == 2
                     ? ':direct'
-                    : ''))
+                    : '') +
+            (logOff ? ':logoff' : ''))
         .toNativeUtf8();
     final log = logPath.toNativeUtf8();
     final out = _take(_xrayTranslate(arg, mode, log));

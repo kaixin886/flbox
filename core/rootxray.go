@@ -73,7 +73,7 @@ var rootXrayPrivateCIDRs = []string{
 	"fe80::/10",
 }
 
-func rootXrayConfig(clashYAML, selectedNode string, routeMode int) (string, error) {
+func rootXrayConfig(clashYAML, selectedNode string, routeMode int, logOff bool) (string, error) {
 	profile, err := sbtranslate.ParseClash([]byte(clashYAML))
 	if err != nil {
 		return "", err
@@ -110,7 +110,11 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int) (string, erro
 	// The daemon's stderr is the daemon log file; info is
 	// the level that shows accepted connections without
 	// the per-packet noise debug produced in 0.62-0.65.
-	cfg["log"] = map[string]any{"loglevel": "info", "access": "none"}
+	if logOff {
+		cfg["log"] = map[string]any{"loglevel": "none", "access": "none"}
+	} else {
+		cfg["log"] = map[string]any{"loglevel": "info", "access": "none"}
+	}
 	cfg["inbounds"] = []any{
 		map[string]any{
 			"tag":      rootXraySocksTag,

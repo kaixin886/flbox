@@ -93,14 +93,16 @@ class FlboxVpnService : VpnService() {
             .setMtu(1500)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
-        if (ipv6) {
-            // Dual-stack capture: without the v6 address and the
-            // ::/0 route, IPv6 traffic bypasses the tunnel
-            // entirely - the leak the settings toggle closes.
-            // The address matches the forwarder's tun config.
-            builder.addAddress("fdfe:dcba:9876::1", 126)
-            builder.addRoute("::", 0)
-        }
+        // The v6 address and ::/0 route are installed in
+        // both switch states (0.70): with the switch on,
+        // the dual-stack forwarder carries the traffic;
+        // with it off, the v4-only forwarder drops every
+        // v6 packet the route delivers - break, not leak.
+        // Without the route, IPv6 bypasses the tunnel
+        // entirely on the carrier interface. The address
+        // matches the forwarder's tun config either way.
+        builder.addAddress("fdfe:dcba:9876::1", 126)
+        builder.addRoute("::", 0)
         // In allowlist split mode the checked apps are the only
         // ones routed into the tunnel; this app is then outside
         // automatically, which is exactly what the core needs.
