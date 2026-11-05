@@ -527,3 +527,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 补两处残漏：① 会话收养（_resyncCoreState）在幸存隧道上重启核心前未补库，同类坑、且失败会拆掉本可恢复的会话——已加 _ensureGeoData 前置；② _ensureGeoData 快路径只验存在性，而运行时下载回退是直写目标文件，全镜像失败会留下截断的 geosite.dat，下次启动会被放行再死于解析——快路径补与解压/下载校验一致的 >1MB 尺寸门槛。
 - 已知接受的边缘：开机自启脚本拉守护时若库缺失会启动失败（配置文件在的话），打开 App 手动启动根模式即补库恢复，不单独处理。
 - 待真机验收：与 beta2 合并验（普通模式启动＋DNS 出口）。
+
+## 0.72.0-beta4：普通模式直连 DNS 改回 localhost（构建号 90）
+- 真机失败（2026-11-05 18:16，构建 89）：普通模式全不通。核心日志定案：机场节点域名 aws-link1/2.lxyun.xyz 经 223.5.5.5 返回 record not found，skipFallback 又禁回退——节点域名解析被判死、整场零隧道；geosite:cn 命中的 fastcdn.hoyoverse.com 同死。53 劫持本身已生效（proxy/dns handling 行可见），败在服务器选址。
+- 认知修正：AS 方案里直连服务器用 "localhost"（即运营商解析器）是承重的——国内机场入口域名只有运营商 DNS 答得出，阿里公共 DNS 返回空记录。beta6 把普通模式也换成 223.5.5.5 是误改（当时只考虑了根守护内 localhost 被拒的约束）。
+- 修法：xraytranslate（普通模式）直连服务器改回 localhost，其余（门控/skipFallback/标签/DoH）不动，即 AS 方案原样。rootxray 维持 223.5.5.5：守护内 localhost 被 netd 拒答是实证约束，NTT 为 IP 节点不受影响；根模式＋域名型机场节点列为已知限制（后续若要解，须由 App 把系统 DNS 服务器地址注入根配置）。
+- 待真机验收：普通模式机场节点可连、全局/规则均通；IPCheck 的 DNS 出口（预期：国外域名走 DoH 显示 Google，国内直连走运营商属正常分流）。

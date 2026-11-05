@@ -507,17 +507,27 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 	// which is why VPN mode's leak tests exited via the
 	// carrier while root mode's exited via Google. In
 	// direct mode only the domestic server remains. The
-	// gated server is a plain-UDP resolver, not AS's
-	// "localhost": inside the root daemon netd refuses
-	// the core's system-resolver queries on [::1]:53
-	// (device-proven), and both modes keep one plan.
+	// gated server is AS's "localhost", and that choice
+	// is load-bearing, not cosmetic: the carrier
+	// resolver behind the system stub is the one that
+	// answers domestic airport entry domains
+	// (aws-link*.lxyun.xyz), while public Ali DNS
+	// returns "record not found" for them - with
+	// skipFallback that left the node itself
+	// unresolvable and VPN mode fully down
+	// (2026-11-05 build 89). Root mode cannot use
+	// localhost (netd refuses the daemon's queries),
+	// so rootxray keeps a plain-UDP server there and
+	// accepts the domain-node limitation; in-app, the
+	// core's resolver queries are answered like any
+	// app's, so this path takes the plan verbatim.
 	directDomains := []string{"geosite:cn"}
 	if p.Server != "" && net.ParseIP(p.Server) == nil {
 		directDomains = append(directDomains, "domain:"+p.Server)
 	}
 	dnsServers := []any{
 		map[string]any{
-			"address":      "223.5.5.5",
+			"address":      "localhost",
 			"domains":      directDomains,
 			"skipFallback": true,
 			"tag":          "direct-dns",
@@ -526,7 +536,7 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 	}
 	if opts.Direct {
 		dnsServers = []any{
-			map[string]any{"address": "223.5.5.5", "tag": "direct-dns"},
+			map[string]any{"address": "localhost", "tag": "direct-dns"},
 		}
 	}
 	dnsCfg := map[string]any{

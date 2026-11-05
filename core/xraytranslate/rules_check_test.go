@@ -40,7 +40,7 @@ func TestRulesModePreset(t *testing.T) {
 		`"domainStrategy":"IPIfNonMatch"`,
 		`"geosite:cn"`,
 		`"geoip:cn"`,
-		`"address":"223.5.5.5"`,
+		`"address":"localhost"`,
 		`"skipFallback":true`,
 		`"tag":"direct-dns"`,
 		`"https://8.8.8.8/dns-query"`,
