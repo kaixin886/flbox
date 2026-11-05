@@ -911,6 +911,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
         try {
           _tunFd = fd;
+          // Same geo dependency as any core start (the
+          // DNS plan's geosite gate): ensure first, or a
+          // revive on missing databases dies at parse
+          // and a recoverable session is torn down.
+          if (!await _ensureGeoData()) {
+            throw Exception('geo data unavailable');
+          }
           await _rotateLogIfHuge();
           CoreBridge().xrayStart(config, 0);
           await _ensureSbSetup();
@@ -1010,7 +1017,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     };
     if (!force &&
         await files['geoip.dat']!.exists() &&
-        await files['geosite.dat']!.exists()) {
+        await files['geosite.dat']!.exists() &&
+        await files['geoip.dat']!.length() > 1000000 &&
+        await files['geosite.dat']!.length() > 1000000) {
       _geoReady = true;
       return true;
     }
@@ -4853,7 +4862,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.72.0-beta2 · app.flbox · Xray 内核',
+              'FlBox 0.72.0-beta3 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
