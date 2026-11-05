@@ -512,3 +512,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 真因：FlboxVpnService 的 Builder 从未调用 addDnsServer。未声明 DNS 服务器时，Android 的 netd 在底层网络上自行解析应用查询，绕开 TUN；eBPF 模式因桥连 netd 的套接字一并抓取而免疫，这也解释了两模式的长期差异。Xray 侧 53 劫持规则本身无辜（曾误判其 inboundTag ["in","tun"] 有问题，核查后入站标签确为 "in"、规则可命中，去标签方案作废未发）。
 - 修法（FlboxVpnService.kt）：Builder 声明 `.addDnsServer("172.19.0.1")`（隧道地址，查询经 TUN 进核心由 53 劫持应答）；IPv6 开关开时另声明 v6 隧道地址 fdfe:dcba:9876::1（双栈转发器可承载；关时不声明，避免 netd 对死服务器反复重试）。
 - 待真机验收：普通模式重跑 IPCheck，DNS 出口应转 Google/美国（v4 与 v6 皆然）。
+
+## 0.72.0-beta：版本改名＋新计数规则（构建号 87）
+- 内容即 beta7（VPN 声明 DNS 服务器），beta7（86）未及构建即被改名覆盖。
+- 用户 2026-11-05 定新规：此后 beta 后缀逐小版递增，**每满 6 个 beta 版本号升一位**（0.72.0-beta、beta2…beta6 → 0.72.1-beta…），替代此前「大更新动数字、小更新递增后缀」的笼统口径。
