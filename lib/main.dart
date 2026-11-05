@@ -2711,6 +2711,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         await _vpnChannel.invokeMethod('stopVpn');
         await Future<void>.delayed(const Duration(milliseconds: 300));
       }
+      // The core's DNS plan references geosite:cn in
+      // every mode now (the gated direct server), so the
+      // geo databases must exist before any VPN start,
+      // not just rule-mode ones - the root start path
+      // ensures them since beta4; this path only ever
+      // relied on the rule-mode ensures elsewhere and a
+      // global-mode start on fresh data died at config
+      // parse (2026-11-05 build 87).
+      if (!await _ensureGeoData()) {
+        throw _StartFailure('分流规则库准备失败，检查网络后重试');
+      }
       await _rotateLogIfHuge();
       CoreBridge().xrayStart(config, 0);
       // IPv6 follows the manual switch: the VpnService
@@ -4842,7 +4853,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.72.0-beta · app.flbox · Xray 内核',
+              'FlBox 0.72.0-beta2 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
