@@ -64,16 +64,30 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 		"cgroupPath":          "/sys/fs/cgroup",
 		"enableIpv6":          ipv6,
 		"enableDnsHijack":     true,
-		// LAN destinations never enter the bridge; the
-		// box's ip_is_private rule stays as backstop for
-		// anything that still arrives.
+		// The bypass tables are AsteriskNG's defaults
+		// verbatim (RootDefaultBypassPrivateCidrs): LAN
+		// and special-use ranges never enter the bridge;
+		// the core's private-range rule stays as backstop
+		// for anything that still arrives.
 		"bypassPrivateCidrsV4": []any{
-			"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-			"169.254.0.0/16", "100.64.0.0/10",
+			"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10",
+			"127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+			"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24",
+			"192.168.0.0/16", "198.51.100.0/24", "203.0.113.0/24",
+			"224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32",
 		},
+		"bypassPrivateCidrsV6": []any{
+			"::/128", "::1/128", "::ffff:0:0/96", "100::/64",
+			"64:ff9b::/96", "2001::/32", "2001:10::/28",
+			"2001:20::/28", "2001:db8::/32", "2002::/16",
+			"fc00::/7", "fe80::/10", "ff00::/8",
+		},
+		"tokenIpv4Prefix": "127.128.0.0/9",
+		"tokenIpv6Prefix": "fd7a:7374:6572:6973::/64",
 		"policy": map[string]any{
-			"mode": mode,
-			"uids": uidList,
+			"mode":       mode,
+			"uids":       uidList,
+			"bypassUids": []any{},
 		},
 	}
 	out, err := json.Marshal(cfg)
@@ -87,7 +101,7 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 // writes to disk: {"core": "<xray config>", "bridge":
 // "<bpf2socks config>"}.
 func bridgeXrayConfigs(clashYAML, selectedNode string, ipv6 bool, mode int, uids []int, routeMode int, logOff bool) (string, error) {
-	core, err := rootXrayConfig(clashYAML, selectedNode, routeMode, logOff)
+	core, err := rootXrayConfig(clashYAML, selectedNode, routeMode, ipv6, logOff)
 	if err != nil {
 		return "", err
 	}

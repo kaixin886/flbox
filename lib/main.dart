@@ -2532,6 +2532,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (!hasBridge) {
         throw _StartFailure('此安装包未包含 eBPF 桥组件（bpf2socks）');
       }
+      // The core's DNS plan references geosite:cn in
+      // every mode now (AS's localhost split), so the
+      // geo databases must exist before any root start,
+      // not just rule-mode ones.
+      if (!await _ensureGeoData()) {
+        throw _StartFailure('分流规则库准备失败，检查网络后重试');
+      }
       await _launchRootDaemon();
       _logEvent('$_runMode started (node=$_selectedNode)');
       _startedAt = DateTime.now();
@@ -4835,7 +4842,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.71.2-beta3 · app.flbox · Xray 内核',
+              'FlBox 0.71.2-beta4 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

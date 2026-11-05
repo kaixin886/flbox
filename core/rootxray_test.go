@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ rules:
 
 func parseRootXray(t *testing.T, node string) map[string]any {
 	t.Helper()
-	out, err := rootXrayConfig(rootTestYAML, node, routeGlobal, false)
+	out, err := rootXrayConfig(rootTestYAML, node, routeGlobal, false, false)
 	if err != nil {
 		t.Fatalf("rootXrayConfig(%s): %v", node, err)
 	}
@@ -79,21 +80,27 @@ func TestRootXrayShapeDomainNode(t *testing.T) {
 		t.Errorf("socks inbound must accept UDP for the bridge: %v", in)
 	}
 	dns := cfg["dns"].(map[string]any)
-	if dns["tag"] != "dns" {
+	if dns["tag"] != "proxy-dns" {
 		t.Errorf("dns tag = %v, routing pins queries by it", dns["tag"])
+	}
+	if dns["queryStrategy"] != "UseIPv4" {
+		t.Errorf("queryStrategy = %v, want UseIPv4 with IPv6 off", dns["queryStrategy"])
 	}
 	servers := dns["servers"].([]any)
 	if len(servers) != 2 {
-		t.Fatalf("dns servers = %v, want remote + bootstrap", servers)
+		t.Fatalf("dns servers = %v, want direct + DoH", servers)
 	}
-	if servers[0] != "8.8.8.8" {
-		t.Errorf("first server = %v, want the remote 8.8.8.8", servers[0])
+	direct := servers[0].(map[string]any)
+	domains := direct["domains"].([]any)
+	if direct["address"] != "localhost" ||
+		direct["tag"] != "direct-dns" ||
+		direct["skipFallback"] != true ||
+		len(domains) != 2 || domains[0] != "geosite:cn" ||
+		domains[1] != "domain:a.example.com" {
+		t.Errorf("direct server wrong (AS plan: localhost for CN + node domain): %v", direct)
 	}
-	boot := servers[1].(map[string]any)
-	if boot["address"] != "223.5.5.5" ||
-		boot["domains"].([]any)[0] != "full:a.example.com" ||
-		boot["skipFallback"] != true {
-		t.Errorf("bootstrap server wrong (must serve only the node domain): %v", boot)
+	if servers[1] != "https://8.8.8.8/dns-query" {
+		t.Errorf("second server = %v, want the DoH proxy server", servers[1])
 	}
 	// Without sockopt.domainStrategy the core resolves
 	// the node domain through the OS resolver and the
@@ -120,8 +127,12 @@ func TestRootXrayShapeDomainNode(t *testing.T) {
 func TestRootXrayShapeIPNode(t *testing.T) {
 	cfg := parseRootXray(t, "node-b")
 	servers := cfg["dns"].(map[string]any)["servers"].([]any)
-	if len(servers) != 1 || servers[0] != "8.8.8.8" {
-		t.Errorf("IP-addressed node needs no bootstrap server: %v", servers)
+	if len(servers) != 2 {
+		t.Fatalf("dns servers = %v, want direct + DoH", servers)
+	}
+	domains := servers[0].(map[string]any)["domains"].([]any)
+	if len(domains) != 1 || domains[0] != "geosite:cn" {
+		t.Errorf("IP-addressed node adds no domain to the direct server: %v", domains)
 	}
 }
 
@@ -140,7 +151,10 @@ func TestRootXrayStarts(t *testing.T) {
 	}
 	self.Close()
 	probe.Close()
-	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal, false)
+	if assets := os.Getenv("FLBOX_TEST_ASSETS"); assets != "" {
+		os.Setenv("xray.location.asset", assets)
+	}
+	out, err := rootXrayConfig(rootTestYAML, "node-a", routeGlobal, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +179,7 @@ func TestRootXrayStarts(t *testing.T) {
 
 func parseRootXrayMode(t *testing.T, node string, mode int) map[string]any {
 	t.Helper()
-	out, err := rootXrayConfig(rootTestYAML, node, mode, false)
+	out, err := rootXrayConfig(rootTestYAML, node, mode, false, false)
 	if err != nil {
 		t.Fatalf("rootXrayConfig(%s, %d): %v", node, mode, err)
 	}
@@ -197,12 +211,12 @@ func TestRootXrayShapeRules(t *testing.T) {
 		t.Errorf("rule preset incomplete: geosite=%v geoip=%v in %v", sawGeosite, sawGeoip, rules)
 	}
 	servers := cfg["dns"].(map[string]any)["servers"].([]any)
-	if len(servers) != 3 {
-		t.Fatalf("rule mode dns servers = %v, want CN split + remote + bootstrap", servers)
+	if len(servers) != 2 {
+		t.Fatalf("rule mode dns servers = %v, want direct + DoH like every mode", servers)
 	}
 	cn := servers[0].(map[string]any)
-	if cn["address"] != "223.5.5.5" || cn["domains"].([]any)[0] != "geosite:cn" {
-		t.Errorf("first server must be the CN split: %v", cn)
+	if cn["address"] != "localhost" || cn["domains"].([]any)[0] != "geosite:cn" {
+		t.Errorf("first server must be the localhost CN split: %v", cn)
 	}
 }
 
@@ -215,7 +229,7 @@ func TestRootXrayShapeDirect(t *testing.T) {
 	}
 	for _, r := range rules {
 		rule := r.(map[string]any)
-		if tags, ok := rule["inboundTag"].([]any); ok && len(tags) == 1 && tags[0] == "dns" {
+		if tags, ok := rule["inboundTag"].([]any); ok && len(tags) == 1 && tags[0] == "proxy-dns" {
 			if rule["outboundTag"] != "direct" {
 				t.Errorf("direct mode dns queries must exit direct: %v", rule)
 			}

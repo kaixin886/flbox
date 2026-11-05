@@ -486,3 +486,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 用户 15:45 报 eBPF 模式 DNS 出口检测显示中国（AS 显示 Google/美国），16:09/16:11 对照实证：FlBox 规则与全局两模式出口均为山西移动 IDC 183.201.217.57/.58，即运营商递归 DNS。全局模式核心 DNS 只有 8.8.8.8 经节点、仍漏 → 定位不在核心分流、在抓取层。
 - AS 源码定案：asteriskd 启动 bpf2socks 时带 `--dns-enhancement`（App 侧需 本地DNS＋应用列表增强 两开关同开）。桥 config_load 的 dns_enhancement 只来自 argv 非配置文件；开启后 cgroup 程序读端口 53 socket 的 fwmark：命中 DNS_PROXY_DECISION 的强制代理、DNS_DIRECT_MARK 的放行，并给热点 UID 强制代理。安卓系统解析器（netd）发出的查询带这类 mark；不开增强时「legacy 模式保留既有 UDP 行为」——标记查询不被强制抓取，顺运营商 DNS 直出，这正是两模式同漏的原因。FlBox 内嵌的桥是同一份上游源码、一直支持该旗标，只是 flboxd 启动桥时从未传。
 - 修法：flboxd 拉桥命令加 --dns-enhancement（probe 不带，与 AS 一致）。预期真机：DNS 出口检测在规则/全局两模式均显示 Google/美国，与 AS 一致。待真机验收。
+
+## 0.71.2-beta4：DNS 与桥配置全量照搬 AS（构建号 83）
+- 用户 16:33 实证 beta3 无效（出口仍山西移动）且国内软件在关 v6 时连不上，指令「试试完全照搬 as 的」；16:36 发来其 AS 设置截图定锚：应用名单增强关、禁用系统 IPv6 关、IPv6 支持关、绕过直连地址关，开/关国内都正常。据此修正方向：他的 AS 根本没有 dnsEnhancement（名单增强关→守护不带旗标），beta3 的旗标系反方向，本版撤除；AS 的 DNS 抓取靠桥默认劫持，差异在核心 DNS 方案与桥配置面。
+- 核心 DNS 换 AS 默认方案（XrayDnsConfig＋VpnDefaults 实证）：服务器＝[{address:"localhost", domains:[geosite:cn, domain:<节点域名>], skipFallback, tag:"direct-dns"}, "https://8.8.8.8/dns-query"]，dns.tag="proxy-dns"，路由按服务器标签钉出站（direct-dns→direct、proxy-dns→proxy/直连模式→direct），queryStrategy 随 IPv6 开关 UseIP/UseIPv4；直连模式只剩 localhost。原 FlBox 形状（223.5.5.5 门控＋8.8.8.8 明文 UDP＋full: 引导）整套退役。
+- 因 DNS 方案在所有模式引用 geosite:cn，_startRootDaemon 启动前无条件 _ensureGeoData（此前仅规则模式在 init 时备）。
+- 桥配置对齐 AS 默认：bypassPrivateCidrsV4/V6 换 AS 的 RootDefaultBypassPrivateCidrs 全表，显式写 tokenIpv4Prefix 127.128.0.0/9、tokenIpv6Prefix fd7a:7374:6572:6973::/64，policy 补 bypassUids 空表。
+- 待真机验收：eBPF 规则/全局两模式 DNS 出口应为 Google/美国；IPv6 关＋系统级禁用开时国内软件应可连（若仍需 v6，则与 AS 的差别只剩守卫本身，用户 AS 里该开关本就关着）。

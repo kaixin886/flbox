@@ -21,37 +21,30 @@ import (
 //
 // Shape: the translator's per-node config, with the
 // front end replaced by the bridge-facing SOCKS inbound
-// and a two-tier DNS mirroring the sing-box root
-// configs: the node's own server domain resolves
-// through a direct bootstrap resolver (223.5.5.5),
-// everything else through the node to 8.8.8.8. The DNS
-// client's own queries carry the "dns" inbound tag and
-// routing pins them (bootstrap direct, the rest to the
-// node), so no resolution ever needs the tunnel it is
-// trying to raise. App DNS arriving over the bridge -
-// its destination is still the carrier resolver - is
-// routed by port to the dns outbound and answered by
-// that client: the Xray form of hijack-dns. Global
-// mode only, like the other root modes. (0.68: the
-// outbound mode now applies here too - the v2ray preset
-// for rule mode, an all-direct exit for direct mode. Rule
-// mode needs the geo databases in the asset directory;
-// flboxd points Xray's asset location at the config's
-// directory, which is where the app releases them.)
+// and AsteriskNG's DNS plan (copied in 0.71.2-beta4):
+// a "localhost" server gated to CN domains and the
+// node's own server domain, a DNS-over-HTTPS server
+// for the rest, and per-server tags steering the
+// client's own queries (direct-dns out direct, the
+// rest out the node). App DNS arriving over the
+// bridge - its destination is still the carrier
+// resolver - is routed by port to the dns outbound
+// and answered by that client: the Xray form of
+// hijack-dns. (0.68: the outbound mode applies here
+// too - the v2ray preset for rule mode, an all-direct
+// exit for direct mode. Rule mode needs the geo
+// databases in the asset directory; flboxd points
+// Xray's asset location at the config's directory.)
 //
-// Two Xray mechanics this shape depends on, both
-// learned the hard way (0.66 shipped without the first
-// and nothing flowed): the system dialer resolves an
-// outbound's server domain through the DNS client ONLY
-// when the outbound's sockopt carries a domainStrategy
-// - otherwise it falls to Go's system resolver, whose
+// One Xray mechanic this shape depends on, learned
+// the hard way (0.66 shipped without it and nothing
+// flowed): the system dialer resolves an outbound's
+// server domain through the DNS client ONLY when the
+// outbound's sockopt carries a domainStrategy -
+// otherwise it falls to Go's system resolver, whose
 // queries on Android go to netd at [::1]:53, and netd
 // refuses the bridge-bypassed core's unmarked sockets
-// ("lookup ... on [::1]:53: connection refused"). And
-// the DNS client ranks domain-matched servers first but
-// still admits them to the fallback order, so the
-// bootstrap server must sit behind the remote one and
-// carry skipFallback, or it answers every query itself.
+// ("lookup ... on [::1]:53: connection refused").
 const rootXraySocksTag = "socks-in"
 
 // Outbound modes, numbered to match the app's stored
@@ -73,7 +66,7 @@ var rootXrayPrivateCIDRs = []string{
 	"fe80::/10",
 }
 
-func rootXrayConfig(clashYAML, selectedNode string, routeMode int, logOff bool) (string, error) {
+func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, logOff bool) (string, error) {
 	profile, err := sbtranslate.ParseClash([]byte(clashYAML))
 	if err != nil {
 		return "", err
@@ -129,59 +122,40 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, logOff bool) 
 		},
 	}
 	serverIsDomain := serverHost != "" && net.ParseIP(serverHost) == nil
-	bootstrap := map[string]any{
-		"address":      "223.5.5.5",
-		"domains":      []string{"full:" + serverHost},
-		"skipFallback": true,
-	}
-	// The DNS shape follows the outbound mode. Global keeps
-	// the 0.67 arrangement (remote first, bootstrap behind
-	// it with skipFallback). Rule mode prepends the v2ray
-	// preset's CN split server - domain-matched, so it only
-	// ever sees CN queries, and its own queries are pinned
-	// direct by IP below, like the bootstrap's. Direct mode
-	// resolves everything locally.
-	dnsServers := []any{"8.8.8.8"}
-	usesAliDNS := false
-	switch routeMode {
-	case routeRules:
-		dnsServers = []any{
-			map[string]any{
-				"address":     "223.5.5.5",
-				"domains":     []string{"geosite:cn"},
-				"expectedIPs": []string{"geoip:cn"},
-			},
-			"8.8.8.8",
-		}
-		usesAliDNS = true
-	case routeDirect:
-		dnsServers = []any{"223.5.5.5", "8.8.8.8"}
-		usesAliDNS = true
-	}
+	// AS's DNS plan verbatim (its defaults): the direct
+	// server is "localhost" - the core asks the system
+	// resolver itself - gated to CN domains plus the
+	// node's server domain; everything else goes to
+	// Google over DNS-over-HTTPS. FlBox's earlier shape
+	// (plain-UDP 223.5.5.5/8.8.8.8 upstreams) is the one
+	// whose leak tests exited via the carrier on this
+	// phone while AS exited via Google.
+	directDomains := []string{"geosite:cn"}
 	if serverIsDomain {
-		dnsServers = append(dnsServers, bootstrap)
-		usesAliDNS = true
+		directDomains = append(directDomains, "domain:"+serverHost)
+	}
+	dnsServers := []any{
+		map[string]any{
+			"address":      "localhost",
+			"domains":      directDomains,
+			"skipFallback": true,
+			"tag":          "direct-dns",
+		},
+		"https://8.8.8.8/dns-query",
+	}
+	if routeMode == routeDirect {
+		dnsServers = []any{
+			map[string]any{"address": "localhost", "tag": "direct-dns"},
+		}
+	}
+	queryStrategy := "UseIPv4"
+	if ipv6 {
+		queryStrategy = "UseIP"
 	}
 	cfg["dns"] = map[string]any{
-		"tag":           "dns",
-		"queryStrategy": "UseIP",
+		"tag":           "proxy-dns",
+		"queryStrategy": queryStrategy,
 		"servers":       dnsServers,
-	}
-	rules := []any{
-		map[string]any{
-			"type":        "field",
-			"inboundTag":  []string{rootXraySocksTag},
-			"port":        "53",
-			"outboundTag": "dns",
-		},
-	}
-	if usesAliDNS {
-		rules = append(rules, map[string]any{
-			"type":        "field",
-			"inboundTag":  []string{"dns"},
-			"ip":          []string{"223.5.5.5/32"},
-			"outboundTag": "direct",
-		})
 	}
 	dnsFinal := "proxy"
 	final := "proxy"
@@ -189,11 +163,25 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, logOff bool) 
 		dnsFinal = "direct"
 		final = "direct"
 	}
-	rules = append(rules, map[string]any{
-		"type":        "field",
-		"inboundTag":  []string{"dns"},
-		"outboundTag": dnsFinal,
-	})
+	rules := []any{
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{rootXraySocksTag},
+			"network":     "tcp,udp",
+			"port":        "53",
+			"outboundTag": "dns",
+		},
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{"direct-dns"},
+			"outboundTag": "direct",
+		},
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{"proxy-dns"},
+			"outboundTag": dnsFinal,
+		},
+	}
 	// Rule mode inserts the v2ray bypass-mainland preset
 	// between the DNS pins and the private-range rule, and
 	// needs IPIfNonMatch for the IP half to ever fire on
