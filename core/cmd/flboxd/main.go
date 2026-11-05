@@ -211,6 +211,29 @@ func v6HasGlobalAddress() bool {
 // the supervisor is about to hand over enables IPv6
 // capture. An unreadable config means false: the
 // guard is the safe default.
+// bridgeDisablesIpv6 reads the disableSystemIpv6 key
+// the app stamps into the bridge file - AS's separate
+// RootIpv6Disabler switch riding the same file (the
+// bridge only looks keys up, so it never sees it).
+// Absent means on: configs published before the key
+// existed were written when off always meant disabled.
+func bridgeDisablesIpv6(path string) bool {
+	if path == "" {
+		return true
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	var cfg struct {
+		DisableSystemIpv6 *bool `json:"disableSystemIpv6"`
+	}
+	if err := stdjson.Unmarshal(raw, &cfg); err != nil || cfg.DisableSystemIpv6 == nil {
+		return true
+	}
+	return *cfg.DisableSystemIpv6
+}
+
 func bridgeWantsIpv6(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -330,6 +353,9 @@ func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 	var guard *v6Guard
 	if bridgeWantsIpv6(bridgeConfigPath) {
 		fmt.Fprintln(os.Stderr, "flboxd: ipv6 guard: off - user switch on, the bridge captures IPv6")
+		guard = &v6Guard{saved: map[string]string{}, done: make(chan struct{})}
+	} else if !bridgeDisablesIpv6(bridgeConfigPath) {
+		fmt.Fprintln(os.Stderr, "flboxd: ipv6 guard: off - disabler switch off, IPv6 stays native")
 		guard = &v6Guard{saved: map[string]string{}, done: make(chan struct{})}
 	} else {
 		var err error

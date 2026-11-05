@@ -1,5 +1,10 @@
 # FlBox 设计说明
 
+## 版本号规则（2026-11-05 用户定版）
+- 大更新：动 beta 前的数字（如 0.71.2-beta → 0.71.3-beta），beta 后缀清零。
+- 小更新：beta 前的数字不动，在 beta 后递增（如 0.71.2-beta1 → 0.71.2-beta2）。
+- 版本名不带加号：显示与记录都写 0.71.2-beta1 这样，不写 +构建号。pubspec 内部仍保留 +N 作装机序号（不出现在版本号里），否则同名新包装不上；设置页底部字符串同步的是不带加号的版本名。
+
 ## 目标
 
 从零自建的 Android 代理客户端：一机吃下机场 Clash 订阅与自建节点（VLESS/Hy2 等），界面仿 FlClash 版式，内核直连 sing-box 官方路线。不再 fork、不再做适配层缝合。
@@ -468,3 +473,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 
 ## 0.71.2-beta：提示条美化（构建号 79）
 - 用户截了切换订阅的默认 SnackBar（全宽黑条贴在玻璃栏上方）说影响观感。全局换 _showToast：悬浮胶囊（圆角 999、深灰 92% 不透明、居中文字），左右留 56、底部留 96 正好让开玻璃栏，时长 4 秒→2 秒，新提示顶掉旧的；_toast 与两处编辑页报错共三处调用统一走它。
+
+## 0.71.2-beta1：IPv6 改 AS 式双开关（构建号 80）
+- 起因：白天普通模式测完 IPv6 开关留在开，重启后开机自启的 eBPF 会话让桥接管 v6，国内应用几乎全灭（用户实证关掉即愈）。用户问 AS 怎么做、并拍板改成 AS 那种。
+- AS 源码实证：IPv6 开关与系统级禁用是两个独立开关（disableSystemIpv6 = !enableIpv6 && enableRootIpv6Disabler，后者默认关）；AS 默认「关 IPv6」只是桥不接管、v6 走运营商原生直连，所以国内照常但属直连。桥的 C 配置解析是按 key 查找，未知 key 天然忽略——禁用标志可安全塞进桥配置文件。
+- FlBox 落法：新增独立开关「系统级禁用 IPv6」（pref ipv6_disabler，默认开以保持宁断不漏），仅 eBPF 模式在设置页出现（紧贴 IPv6 开关下方；VPN 模式不受影响）。_writeRootDaemonConfigs 把桥 JSON 解开、盖上 disableSystemIpv6 再写盘；flboxd 新增 bridgeDisablesIpv6（键缺失默认 true，兼容旧已发布配置/开机脚本），守卫三分支：IPv6 开→不守；关＋禁用开→守卫在；关＋禁用关→不守、v6 原生直连（守护日志 ipv6 guard: off - disabler switch off）。备份格式同步带 ipv6_disabler。

@@ -543,12 +543,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _geoReady = false;
   Set<String> _favNodes = {};
   bool _notifyOnStart = true;
-  /// The manual IPv6 switch (0.34's preference, restored
-  /// in 0.68 after the user reversed the same-day
-  /// automatic-probe change): when on, the VPN tunnel
-  /// takes over IPv6 at the next start. eBPF mode ignores
-  /// it - IPv6 there is force-disabled.
+  /// The manual IPv6 switch: in VPN mode it decides
+  /// whether the tunnel takes over IPv6; in eBPF mode it
+  /// decides whether the bridge captures IPv6. Applies at
+  /// the next start.
   bool _ipv6Enabled = false;
+
+  /// AS-style separate disabler for eBPF mode: with the
+  /// IPv6 switch off, on means the daemon disables IPv6
+  /// system-wide during the session (the guard); off
+  /// means IPv6 stays native-direct, AS's default.
+  bool _ipv6Disabler = true;
   bool _logEnabled = true;
 
   /// The running VPN session's IPv6 state, captured from
@@ -679,6 +684,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
     _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
+    _ipv6Disabler = prefs.getBool('ipv6_disabler') ?? true;
     _logEnabled = prefs.getBool('log_enabled') ?? true;
     _vpnIpv6 = prefs.getBool('vpn_ipv6_effective') ?? false;
     _rootBootStart = prefs.getBool('root_boot_start') ?? false;
@@ -1143,6 +1149,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           'notify_sub_update': _notifySubUpdate,
           'root_boot_start': _rootBootStart,
           'ipv6_enabled': _ipv6Enabled,
+          'ipv6_disabler': _ipv6Disabler,
           'log_enabled': _logEnabled,
           'run_mode': _runMode,
           'sub_auto_interval_hours': _subAutoIntervalHours,
@@ -1218,6 +1225,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       var notifySubUpdate = _notifySubUpdate;
       var rootBootStart = _rootBootStart;
       var ipv6Enabled = _ipv6Enabled;
+      var ipv6Disabler = _ipv6Disabler;
       var logEnabled = _logEnabled;
       var intervalHours = _subAutoIntervalHours;
       var navStyle = _navStyle;
@@ -1239,6 +1247,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
         rootBootStart = bb('root_boot_start', rootBootStart);
         ipv6Enabled = bb('ipv6_enabled', ipv6Enabled);
+        ipv6Disabler = bb('ipv6_disabler', ipv6Disabler);
         logEnabled = bb('log_enabled', logEnabled);
         if (bp['run_mode'] is String) runMode = bp['run_mode'] as String;
         if (runMode == 'root_tun') runMode = 'vpn';
@@ -1272,6 +1281,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _notifySubUpdate = notifySubUpdate;
         _rootBootStart = rootBootStart;
         _ipv6Enabled = ipv6Enabled;
+        _ipv6Disabler = ipv6Disabler;
         _logEnabled = logEnabled;
         _runMode = runMode;
         _subAutoIntervalHours = intervalHours;
@@ -1286,6 +1296,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await prefs.setBool('notify_sub_update', notifySubUpdate);
       await prefs.setBool('root_boot_start', rootBootStart);
       await prefs.setBool('ipv6_enabled', ipv6Enabled);
+      await prefs.setBool('ipv6_disabler', ipv6Disabler);
       await prefs.setBool('log_enabled', logEnabled);
       await prefs.setString('run_mode', runMode);
       await prefs.setInt('sub_auto_interval_hours', intervalHours);
@@ -1368,7 +1379,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('ipv6_enabled', v);
     if (mounted) setState(() => _ipv6Enabled = v);
-    _toast(v ? 'IPv6 已开启，下次启动 VPN 时生效' : 'IPv6 已关闭，下次启动 VPN 时生效');
+    _toast(v ? 'IPv6 已开启，下次启动时生效' : 'IPv6 已关闭，下次启动时生效');
+  }
+
+  Future<void> _setIpv6Disabler(bool v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('ipv6_disabler', v);
+    if (mounted) setState(() => _ipv6Disabler = v);
+    _toast(v ? '系统级禁用 IPv6 已开启，下次启动 eBPF 时生效' : '系统级禁用 IPv6 已关闭，下次启动 eBPF 时 v6 走原生直连');
   }
 
   /// Root-mode boot autostart (0.68, AsteriskNG's design):
@@ -2301,7 +2319,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final cfgFile = File('${docs.path}/root-config.json');
     await cfgFile.writeAsString(decoded['core'] as String);
     final bridgeFile = File('${docs.path}/root-bridge.json');
-    await bridgeFile.writeAsString(decoded['bridge'] as String);
+    // AS keeps the two concerns apart: the bridge only
+    // hears enableIpv6, while the system-wide disable is
+    // a separate switch the daemon reads from this same
+    // file (the bridge's key-lookup parser ignores it).
+    final bridgeCfg =
+        jsonDecode(decoded['bridge'] as String) as Map<String, dynamic>;
+    bridgeCfg['disableSystemIpv6'] = _ipv6Disabler;
+    await bridgeFile.writeAsString(jsonEncode(bridgeCfg));
     return (config: cfgFile.path, bridge: bridgeFile.path);
   }
 
@@ -3176,6 +3201,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           onAutoIntervalChanged: _setSubAutoInterval,
           ipv6Enabled: _ipv6Enabled,
           onIpv6Changed: _setIpv6Enabled,
+          ipv6Disabler: _ipv6Disabler,
+          onIpv6DisablerChanged: _setIpv6Disabler,
           logEnabled: _logEnabled,
           onLogEnabledChanged: _setLogEnabled,
           rootBootStart: _rootBootStart,
@@ -4381,6 +4408,8 @@ class _SettingsPage extends StatefulWidget {
     required this.onAutoIntervalChanged,
     required this.ipv6Enabled,
     required this.onIpv6Changed,
+    required this.ipv6Disabler,
+    required this.onIpv6DisablerChanged,
     required this.logEnabled,
     required this.onLogEnabledChanged,
     required this.rootBootStart,
@@ -4411,6 +4440,8 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<int> onAutoIntervalChanged;
   final bool ipv6Enabled;
   final ValueChanged<bool> onIpv6Changed;
+  final bool ipv6Disabler;
+  final ValueChanged<bool> onIpv6DisablerChanged;
   final bool logEnabled;
   final ValueChanged<bool> onLogEnabledChanged;
   final bool rootBootStart;
@@ -4438,6 +4469,7 @@ class _SettingsPageState extends State<_SettingsPage> {
   // switch it toasts, and the check corrects on next open.)
   late bool _rootBootStart = widget.rootBootStart;
   late bool _ipv6Enabled = widget.ipv6Enabled;
+  late bool _ipv6Disabler = widget.ipv6Disabler;
   late bool _logEnabled = widget.logEnabled;
   late String _runMode = widget.runMode;
   late bool _notifyOnStart = widget.notifyOnStart;
@@ -4680,7 +4712,7 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('IPv6'),
               subtitle: Text(
                 _runMode == 'ebpf'
-                    ? 'eBPF 模式手动开关，下次启动时生效；开：桥尝试接管 v6 走节点（root 数据面 v6 普遍不稳，节点无 v6 出口则不通）；关：会话期间系统级禁用 v6，不直连泄漏'
+                    ? 'eBPF 模式手动开关，下次启动时生效；开：桥尝试接管 v6 走节点（root 数据面 v6 普遍不稳，节点无 v6 出口则不通）；关：看下方「系统级禁用 IPv6」开关，开则禁用、关则原生直连'
                     : 'VPN 模式手动开关，下次启动时生效；开：v6 进隧道走节点（节点无 v6 出口则失败回落 v4）；关：v6 在隧道口直接丢弃，不直连泄漏',
                 style: TextStyle(color: muted),
               ),
@@ -4690,6 +4722,23 @@ class _SettingsPageState extends State<_SettingsPage> {
                 widget.onIpv6Changed(v);
               },
             ),
+            if (_runMode == 'ebpf')
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                secondary: const Icon(Icons.block_outlined),
+                title: const Text('系统级禁用 IPv6'),
+                subtitle: Text(
+                  _ipv6Disabler
+                      ? '开（AS 式独立开关）：上方 IPv6 关闭时，会话期间逐网卡禁用系统 v6，应用回落 v4、不直连泄漏；下次启动时生效'
+                      : '关：上方 IPv6 关闭时桥不接管、系统也不禁，v6 走运营商原生直连（AS 的默认行为）；下次启动时生效',
+                  style: TextStyle(color: muted),
+                ),
+                value: _ipv6Disabler,
+                onChanged: (v) {
+                  setState(() => _ipv6Disabler = v);
+                  widget.onIpv6DisablerChanged(v);
+                },
+              ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               secondary: const Icon(Icons.receipt_long_outlined),
@@ -4789,7 +4838,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.71.2-beta · app.flbox · Xray 内核',
+              'FlBox 0.71.2-beta1 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
