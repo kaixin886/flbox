@@ -245,7 +245,7 @@ const _destinations = [
   _Destination(Icons.space_dashboard_outlined, '仪表盘'),
   _Destination(Icons.hub_outlined, '代理'),
   _Destination(Icons.description_outlined, '配置'),
-  _Destination(Icons.terminal, '日志'),
+  _Destination(Icons.handyman_outlined, '工具'),
 ];
 
 // Navigation bar appearance, switchable in Settings. The sliding glass
@@ -1300,6 +1300,31 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// Subscription editor (the netproxy-style form): name, link,
   /// per-subscription auto-update period, update route, and the
   /// node name filters applied on every refresh.
+  /// Profiles-page header action (0.69): refresh every
+  /// enabled subscription that has a URL, in order.
+  Future<void> _updateAllSubs() async {
+    final targets = _subs
+        .where((s) => s.enabled && (s.url?.isNotEmpty ?? false))
+        .toList();
+    if (targets.isEmpty) {
+      _toast('没有可更新的订阅');
+      return;
+    }
+    for (final sub in targets) {
+      try {
+        await _fetchSubscription(sub.url!, updateSub: sub, quiet: true);
+      } catch (_) {}
+    }
+    _toast('已刷新全部订阅（${targets.length} 个）');
+  }
+
+  /// Geo rule-set refresh, shared by the settings tile
+  /// and the tools page entry.
+  Future<void> _updateGeoData() async {
+    final ok = await _ensureGeoData(force: true);
+    _toast(ok ? '规则库已刷新（内置版本）' : '规则库刷新失败');
+  }
+
   /// The manual IPv6 switch: persisted at once, applied
   /// at the next VPN start (the tunnel's shape is fixed
   /// when the VpnService builds it). eBPF mode never
@@ -3071,10 +3096,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           outMode: _outMode,
           onOutModeChanged: _setOutMode,
           geoReady: _geoReady,
-          onUpdateGeo: () async {
-            final ok = await _ensureGeoData(force: true);
-            _toast(ok ? '规则库已刷新（内置版本）' : '规则库刷新失败');
-          },
+          onUpdateGeo: _updateGeoData,
           autoIntervalHours: _subAutoIntervalHours,
           onAutoIntervalChanged: _setSubAutoInterval,
           ipv6Enabled: _ipv6Enabled,
@@ -3100,6 +3122,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _rateHistory.dispose();
     _pageController.dispose();
     super.dispose();
+  }
+
+  /// The log page is a pushed route off the tools tab
+  /// since 0.69 (the reference layout's four tabs are
+  /// dashboard, proxies, profiles, tools).
+  void _openLogs() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LogsPage(ebpfMode: _runMode == 'ebpf'),
+      ),
+    );
   }
 
   void _select(int index) {
@@ -3143,6 +3176,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             outMode: _outMode,
             onOutModeChanged: _setOutMode,
             onShowProxies: () => _select(1),
+            onToggle: _busy ? null : _toggleCore,
+            busy: _busy,
             ebpfMode: _runMode == 'ebpf',
             vpnIpv6: _vpnIpv6,
           ),
@@ -3176,8 +3211,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onEditSub: _openSubEditor,
             onImportLink: _importFromLink,
             onToggleEnabled: _setSubEnabled,
+            onUpdateAll: _updateAllSubs,
           ),
-          LogsPage(),
+          _ToolsPage(
+            onOpenLogs: _openLogs,
+            onOpenSettings: _openSettings,
+            geoReady: _geoReady,
+            onUpdateGeo: _updateGeoData,
+          ),
         ],
       ),
       bottomNavigationBar: RepaintBoundary(
@@ -3194,24 +3235,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ),
         },
       ),
-      floatingActionButton: _index == 0
-          ? FloatingActionButton(
-              onPressed: _busy ? null : _toggleCore,
-              backgroundColor: _accent,
-              foregroundColor: Colors.white,
-              shape: const CircleBorder(),
-              child: _busy
-                  ? const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2.5,
-                        color: Colors.white,
-                      ),
-                    )
-                  : Icon(_running ? Icons.stop : Icons.play_arrow, size: 30),
-            )
-          : null,
     );
   }
 }
@@ -3675,9 +3698,14 @@ class _DashboardPage extends StatelessWidget {
     required this.outMode,
     required this.onOutModeChanged,
     required this.onShowProxies,
+    required this.onToggle,
+    required this.busy,
     this.ebpfMode = false,
     this.vpnIpv6 = false,
   });
+
+  final VoidCallback? onToggle;
+  final bool busy;
 
   final VoidCallback onOpenSettings;
   final bool running;
@@ -3800,7 +3828,7 @@ class _DashboardPage extends StatelessWidget {
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
     } else {
-      statusDetail = '已就绪，点右下角按钮启动';
+      statusDetail = '已就绪，点圆钮启动';
     }
     return _PageFrame(
       title: '仪表盘',
@@ -3863,60 +3891,99 @@ class _DashboardPage extends StatelessWidget {
                 children: [
                   _card(
                     context,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Row(
-                          children: [
-                            _iconTile(
-                              running
-                                  ? Icons.bolt
-                                  : Icons.power_settings_new,
-                              color: running
-                                  ? const Color(0xFF34A853)
-                                  : muted,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
                                 children: [
-                                  Text(
-                                    running ? '运行中' : '未启动',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleMedium,
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    statusDetail,
-                                    style: TextStyle(
-                                        color: muted, fontSize: 12.5),
+                                  Text('状态',
+                                      style: TextStyle(
+                                          color: muted, fontSize: 13)),
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: running
+                                          ? const Color(0xFF34A853)
+                                              .withValues(alpha: 0.12)
+                                          : muted.withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Text(
+                                      running ? '运行中' : '未运行',
+                                      style: TextStyle(
+                                        color: running
+                                            ? const Color(0xFF34A853)
+                                            : muted,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),
-                            ),
-                            if (running && startedAt != null)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF34A853)
-                                      .withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  _fmtDuration(DateTime.now()
-                                      .difference(startedAt!)),
-                                  style: const TextStyle(
-                                    color: Color(0xFF34A853),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
+                              const SizedBox(height: 12),
+                              Text(
+                                currentNode ?? '未选择节点',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleLarge
+                                    ?.copyWith(fontWeight: FontWeight.w600),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                          ],
+                              const SizedBox(height: 4),
+                              Text(
+                                statusDetail,
+                                style:
+                                    TextStyle(color: muted, fontSize: 12.5),
+                              ),
+                              if (running && startedAt != null) ...[
+                                const SizedBox(height: 10),
+                                Text(
+                                  '运行时长 ${_fmtDuration(DateTime.now().difference(startedAt!))}',
+                                  style: TextStyle(
+                                      color: muted, fontSize: 12.5),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        // The session switch lives in the
+                        // status card (the reference layout's
+                        // big round button); the floating
+                        // action button is gone.
+                        Material(
+                          color: _accent,
+                          shape: const CircleBorder(),
+                          elevation: 5,
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: onToggle,
+                            child: SizedBox(
+                              width: 76,
+                              height: 76,
+                              child: busy
+                                  ? const Padding(
+                                      padding: EdgeInsets.all(24),
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 3,
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : Icon(
+                                      running ? Icons.stop : Icons.play_arrow,
+                                      color: Colors.white,
+                                      size: 36,
+                                    ),
+                            ),
+                          ),
                         ),
                       ],
                     ),
@@ -4598,7 +4665,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.68.1-beta · app.flbox · Xray 内核',
+              'FlBox 0.69.0-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -4710,149 +4777,225 @@ class _ProxiesPageState extends State<ProxiesPage> {
             e.$2.name.toLowerCase().contains(_query.toLowerCase()))
           e.$2,
     ];
+    // 0.69: subscriptions are group cards, the reference
+    // layout's shape. The active subscription's card is
+    // the expanded one - the toolbar, search and node grid
+    // live under its header - and tapping another card
+    // switches to it (the profiles switch path, unchanged).
+    final subs = widget.subs;
+    var ai = subs.indexWhere((s) => s.id == widget.activeSubId);
+    if (ai < 0) ai = 0;
+    Widget groupHeader(int idx) {
+      final sub = subs[idx];
+      final active = sub.id == widget.activeSubId;
+      return Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: ListTile(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          leading: Container(
+            width: 44,
+            height: 44,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color:
+                  Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              sub.name.isEmpty
+                  ? '?'
+                  : String.fromCharCode(sub.name.runes.first),
+              style:
+                  const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            ),
+          ),
+          title: Text(sub.name,
+              style: const TextStyle(fontWeight: FontWeight.w600)),
+          subtitle: Text(
+            active ? (widget.selectedNode ?? '未选择节点') : '${sub.nodeCount} 个节点',
+            style: TextStyle(color: muted),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(sub.url == null ? '本地' : '订阅',
+                  style: TextStyle(color: muted, fontSize: 12.5)),
+              const SizedBox(width: 6),
+              Icon(active ? Icons.expand_less : Icons.expand_more,
+                  color: muted),
+            ],
+          ),
+          onTap: active ? null : () => widget.onSwitchSub(sub),
+        ),
+      );
+    }
+
     return _PageFrame(
       title: '代理',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Subscription tabs, like FlClash's group tabs: switching
-          // here reuses the profiles page's switch path.
-          if (widget.subs.length > 1) ...[
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
+      child: CustomScrollView(
+        slivers: [
+          if (subs.isNotEmpty)
+            SliverToBoxAdapter(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (var i = 0; i < widget.subs.length; i++) ...[
-                    if (i > 0) const SizedBox(width: 8),
-                    ChoiceChip(
-                      label: Text(widget.subs[i].name),
-                      selected: widget.subs[i].id == widget.activeSubId,
-                      onSelected: (_) => widget.onSwitchSub(widget.subs[i]),
-                    ),
-                  ],
+                  for (var k = 0; k < ai; k++) groupHeader(k),
+                  groupHeader(ai),
                 ],
               ),
             ),
-            const SizedBox(height: 12),
-          ],
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '${profile.nodes.length} 个节点',
-                  style: TextStyle(color: muted),
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.link),
-                tooltip: '导入单节点链接',
-                visualDensity: VisualDensity.compact,
-                onPressed: widget.onImportLink,
-              ),
-              IconButton(
-                icon: const Icon(Icons.add),
-                tooltip: '手动添加节点',
-                visualDensity: VisualDensity.compact,
-                onPressed: widget.onAddNode,
-              ),
-              FilledButton.tonal(
-                onPressed: widget.testing ? null : widget.onTestAll,
-                style: FilledButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                ),
-                child: Text(widget.testing
-                    ? '测速中 ${widget.delays.length}/'
-                        '${profile.nodes.where((n) => !isInfoNode(n.name)).length}'
-                    : '全部测速'),
-              ),
-              IconButton(
-                icon: const Icon(Icons.bolt),
-                tooltip: '测速并选最快',
-                visualDensity: VisualDensity.compact,
-                onPressed: widget.testing ? null : widget.onPickFastest,
-              ),
-              IconButton(
-                icon: const Icon(Icons.sort),
-                tooltip: '排序',
-                color: _sortOpen
-                    ? Theme.of(context).colorScheme.primary
-                    : null,
-                onPressed: () => setState(() => _sortOpen = !_sortOpen),
-              ),
-            ],
-          ),
-          // Inline sort options, not a popup menu: a modal popup
-          // layer swallows all gestures until an item is tapped, so
-          // the grid could not be scrolled with the menu open. The
-          // chips live in the page itself, scrolling always works.
-          AnimatedSize(
-            duration: const Duration(milliseconds: 150),
-            alignment: Alignment.topCenter,
-            child: !_sortOpen
-                ? const SizedBox(width: double.infinity)
-                : Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Row(
-                      children: [
-                        for (var i = 0; i < 3; i++) ...[
-                          if (i > 0) const SizedBox(width: 8),
-                          ChoiceChip(
-                            label: Text(
-                                const ['智能排序', '按延迟', '按名称'][i]),
-                            selected: _sortMode == i,
-                            onSelected: (_) => setState(() {
-                              _sortMode = i;
-                              _sortOpen = false;
-                            }),
-                          ),
-                        ],
-                      ],
+          SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${profile.nodes.length} 个节点',
+                        style: TextStyle(color: muted),
+                      ),
                     ),
+                    IconButton(
+                      icon: const Icon(Icons.link),
+                      tooltip: '导入单节点链接',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: widget.onImportLink,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      tooltip: '手动添加节点',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: widget.onAddNode,
+                    ),
+                    FilledButton.tonal(
+                      onPressed: widget.testing ? null : widget.onTestAll,
+                      style: FilledButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 12),
+                      ),
+                      child: Text(widget.testing
+                          ? '测速中 ${widget.delays.length}/'
+                              '${profile.nodes.where((n) => !isInfoNode(n.name)).length}'
+                          : '全部测速'),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.bolt),
+                      tooltip: '测速并选最快',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: widget.testing ? null : widget.onPickFastest,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.sort),
+                      tooltip: '排序',
+                      color: _sortOpen
+                          ? Theme.of(context).colorScheme.primary
+                          : null,
+                      onPressed: () =>
+                          setState(() => _sortOpen = !_sortOpen),
+                    ),
+                  ],
+                ),
+                // Inline sort options, not a popup menu: a modal popup
+                // layer swallows all gestures until an item is tapped, so
+                // the grid could not be scrolled with the menu open. The
+                // chips live in the page itself, scrolling always works.
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 150),
+                  alignment: Alignment.topCenter,
+                  child: !_sortOpen
+                      ? const SizedBox(width: double.infinity)
+                      : Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Row(
+                            children: [
+                              for (var i = 0; i < 3; i++) ...[
+                                if (i > 0) const SizedBox(width: 8),
+                                ChoiceChip(
+                                  label: Text(const [
+                                    '智能排序',
+                                    '按延迟',
+                                    '按名称'
+                                  ][i]),
+                                  selected: _sortMode == i,
+                                  onSelected: (_) => setState(() {
+                                    _sortMode = i;
+                                    _sortOpen = false;
+                                  }),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  decoration: const InputDecoration(
+                    hintText: '搜索节点',
+                    prefixIcon: Icon(Icons.search),
+                    isDense: true,
+                    border: OutlineInputBorder(),
                   ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            decoration: const InputDecoration(
-              hintText: '搜索节点',
-              prefixIcon: Icon(Icons.search),
-              isDense: true,
-              border: OutlineInputBorder(),
+                  onChanged: (v) => setState(() => _query = v),
+                ),
+                const SizedBox(height: 12),
+              ],
             ),
-            onChanged: (v) => setState(() => _query = v),
           ),
-          const SizedBox(height: 12),
-          Expanded(
-            // Builder, not a children list: with 30+ nodes the eager
-            // list built every tile on every page rebuild (search
-            // keystrokes, delay updates), which visibly hitched.
-            child: GridView.builder(
-              padding: EdgeInsets.zero,
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-                mainAxisExtent: 104,
+          // Lazy sliver grid: with 30+ nodes an eager list
+          // built every tile on every rebuild (search
+          // keystrokes, delay updates), which visibly hitched.
+          SliverGrid.builder(
+            gridDelegate:
+                const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 10,
+              mainAxisSpacing: 10,
+              mainAxisExtent: 104,
+            ),
+            itemCount: nodes.length,
+            itemBuilder: (context, i) {
+              final node = nodes[i];
+              return _NodeTile(
+                node: node,
+                info: isInfoNode(node.name),
+                muted: muted,
+                favorite: widget.favorites.contains(node.name),
+                hasDelay: widget.delays.containsKey(node.name),
+                delay: widget.delays[node.name],
+                delayColor: _delayColor(widget.delays[node.name]),
+                selected: node.name == widget.selectedNode,
+                onTap: () => widget.onSelect(node.name),
+                onFav: () => widget.onToggleFav(node.name),
+                onEdit: () => widget.onEditNode(node.name),
+              );
+            },
+          ),
+          if (subs.length > ai + 1)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var k = ai + 1; k < subs.length; k++)
+                      groupHeader(k),
+                  ],
+                ),
               ),
-              itemCount: nodes.length,
-              itemBuilder: (context, i) {
-                final node = nodes[i];
-                return _NodeTile(
-                  node: node,
-                  info: isInfoNode(node.name),
-                  muted: muted,
-                  favorite: widget.favorites.contains(node.name),
-                  hasDelay: widget.delays.containsKey(node.name),
-                  delay: widget.delays[node.name],
-                  delayColor: _delayColor(widget.delays[node.name]),
-                  selected: node.name == widget.selectedNode,
-                  onTap: () => widget.onSelect(node.name),
-                  onFav: () => widget.onToggleFav(node.name),
-                  onEdit: () => widget.onEditNode(node.name),
-                );
-              },
             ),
-          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 24)),
         ],
       ),
     );
@@ -5782,6 +5925,7 @@ class ProfilesPage extends StatelessWidget {
     required this.onEditSub,
     required this.onImportLink,
     required this.onToggleEnabled,
+    required this.onUpdateAll,
   });
 
   final List<SubProfile> subs;
@@ -5795,6 +5939,7 @@ class ProfilesPage extends StatelessWidget {
   final ValueChanged<SubProfile> onEditSub;
   final VoidCallback onImportLink;
   final void Function(SubProfile, bool) onToggleEnabled;
+  final VoidCallback onUpdateAll;
 
   String _updatedLabel(int ms) {
     if (ms <= 0) return '';
@@ -5832,6 +5977,21 @@ class ProfilesPage extends StatelessWidget {
         .withValues(alpha: 0.5);
     return _PageFrame(
       title: '配置',
+      action: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: '更新全部订阅',
+            onPressed: onUpdateAll,
+          ),
+          IconButton(
+            icon: const Icon(Icons.add),
+            tooltip: '从订阅链接导入',
+            onPressed: onImportUrl,
+          ),
+        ],
+      ),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -6061,8 +6221,106 @@ class ProfilesPage extends StatelessWidget {
   }
 }
 
+/// The tools tab (0.69): the reference layout's fourth
+/// tab. It gathers the entry points that used to be a
+/// tab of their own (logs) or a dashboard gear
+/// (settings), in the reference client's grouping: a
+/// function card, then the rest.
+class _ToolsPage extends StatelessWidget {
+  const _ToolsPage({
+    required this.onOpenLogs,
+    required this.onOpenSettings,
+    required this.geoReady,
+    required this.onUpdateGeo,
+  });
+
+  final VoidCallback onOpenLogs;
+  final VoidCallback onOpenSettings;
+  final bool geoReady;
+  final VoidCallback onUpdateGeo;
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = Theme.of(context)
+        .colorScheme
+        .onSurface
+        .withValues(alpha: 0.5);
+    Widget group(List<Widget> rows) {
+      return Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Column(children: rows),
+      );
+    }
+
+    Widget entry({
+      required IconData icon,
+      required String title,
+      required String subtitle,
+      VoidCallback? onTap,
+    }) {
+      return ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(icon),
+        title: Text(title),
+        subtitle: Text(subtitle, style: TextStyle(color: muted)),
+        trailing: onTap == null ? null : const Icon(Icons.chevron_right),
+        onTap: onTap,
+      );
+    }
+
+    return _PageFrame(
+      title: '工具',
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            group([
+              entry(
+                icon: Icons.terminal,
+                title: '日志',
+                subtitle: '核心与守护进程日志、内核自检',
+                onTap: onOpenLogs,
+              ),
+              entry(
+                icon: Icons.settings_outlined,
+                title: '设置',
+                subtitle: '运行模式、路由、连接、高级与备份恢复',
+                onTap: onOpenSettings,
+              ),
+              entry(
+                icon: Icons.library_books_outlined,
+                title: '分流规则库',
+                subtitle: geoReady ? '已内置于安装包，点按可刷新' : '开启规则模式时自动释放',
+                onTap: onUpdateGeo,
+              ),
+            ]),
+            const SizedBox(height: 20),
+            Text('其他', style: TextStyle(color: muted, fontSize: 13)),
+            const SizedBox(height: 8),
+            group([
+              entry(
+                icon: Icons.info_outline,
+                title: '关于 FlBox',
+                subtitle: 'app.flbox · Xray 内核',
+              ),
+            ]),
+            const SizedBox(height: 96),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class LogsPage extends StatefulWidget {
-  const LogsPage({super.key});
+  const LogsPage({super.key, this.ebpfMode = false});
+
+  final bool ebpfMode;
 
   @override
   State<LogsPage> createState() => _LogsPageState();
@@ -6190,6 +6448,13 @@ class _LogsPageState extends State<LogsPage> {
             },
           ),
           const SizedBox(height: 12),
+          if (widget.ebpfMode && _source == 0) ...[
+            Text(
+              'eBPF 模式下核心在守护进程中运行：「核心」是 VPN 模式的日志，当前会话请看「守护·本次」',
+              style: TextStyle(color: muted, fontSize: 12.5),
+            ),
+            const SizedBox(height: 12),
+          ],
           Row(
             children: [
               FilledButton.tonal(
