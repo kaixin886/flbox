@@ -435,3 +435,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **日志开关（用户点名）**：设置→高级新增「核心日志」开关（pref log_enabled，默认开，进备份）。关时两条核心配置路径都把 Xray loglevel 置 none：VPN 路径经 xraytranslate.Options.LogOff（FFI mode 串加 :logoff 段），Root 路径经 FlboxBridgeXrayConfig 新增 logOff 参数→rootXrayConfig。守护进程自身的 flboxd 行（启动/守卫/流量）不受影响——那是排障的最后信道，且量极小。下次生成配置时生效（启动会话或切订阅）。
 - **日志页去 SelectableText**：日志正文与自检结果改普通 Text，选区黑屏随之消失；日志分享本来就走文件（MT 管理器取 root-daemon.log / xray-error.log），页内复制非必需。
 - 待真机验收：①eBPF 启动后 IPCheck v6 探针无结果，且「守护·本次」日志能看到 ipv6 guard 逐网卡 disable 记录；停会话后 v6 恢复广电地址、日志有 restored；②会话中切一次网络（飞行模式开关）后 v6 仍不漏（守卫重申）；③代理页点 liangxin 卡切换、配置页点卡切换均有水波纹且真切换；④日志页长按不再发黑；⑤关日志开关后重启会话，日志页核心/守护日志不再增长（flboxd 自身行除外）。
+
+## 0.70.1-beta：导航栏药丸额外回弹修复（构建号 72）
+- 用户澄清「状态栏回弹」实为**导航栏**：滑动药丸（默认 NavStyle.slidingGlass）拉过去后多回弹一次。定案为双重结算：①药丸拖拽结束时 dragEnd 自己 _slideTo 一次，紧接着 onTap 触发父层 index 变化、didUpdateWidget 又 _slideTo 一次；②点导航跳页时 PageView 的 animateToPage 途经每一页都回调 onPageChanged，逐页 setState 使药丸动画逐页重启（跨多页时最明显）。
+- 修法：拖拽结束不再本地滑行，结算只由 didUpdateWidget 驱动（同目标且已在滑则跳过）；Shell 加 _pageAnimating 标志，程序化跳页期间 onPageChanged 的途经页一律忽略，到达目标或动画结束清标志。页面手势滑动（非程序化）不受影响。

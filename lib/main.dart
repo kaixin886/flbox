@@ -493,6 +493,7 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   final _pageController = PageController();
+  bool _pageAnimating = false;
   int _index = 0;
   NavStyle _navStyle = NavStyle.slidingGlass;
   XrayProfile? _profile;
@@ -3162,11 +3163,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void _select(int index) {
     if (index == _index) return;
     setState(() => _index = index);
-    _pageController.animateToPage(
-      index,
-      duration: const Duration(milliseconds: 340),
-      curve: Curves.easeOutCubic,
-    );
+    _pageAnimating = true;
+    _pageController
+        .animateToPage(
+          index,
+          duration: const Duration(milliseconds: 340),
+          curve: Curves.easeOutCubic,
+        )
+        .whenComplete(() => _pageAnimating = false);
   }
 
   void _setNavStyle(NavStyle style) {
@@ -3181,7 +3185,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       extendBody: true,
       body: PageView(
         controller: _pageController,
-        onPageChanged: (index) => setState(() => _index = index),
+        onPageChanged: (index) {
+          if (_pageAnimating) {
+            // A nav-initiated jump is in flight: the pages
+            // it passes through are not selections.
+            // Reacting to them re-set the index per page
+            // and restarted the nav pill's slide each
+            // time - one restart per page crossed.
+            if (index == _index) _pageAnimating = false;
+            return;
+          }
+          setState(() => _index = index);
+        },
         children: [
           _DashboardPage(
             onOpenSettings: _openSettings,
@@ -3464,7 +3479,11 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
   void didUpdateWidget(_SlidingGlassNavBar oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!_dragging && widget.index != oldWidget.index) {
-      _slideTo(widget.index.toDouble());
+      final target = widget.index.toDouble();
+      if (_slideController.isAnimating && _tween?.end == target) {
+        return; // already settling there
+      }
+      _slideTo(target);
     }
   }
 
@@ -3517,10 +3536,16 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
                   _dragging = false;
                   _pressController.reverse();
                   final target = _nearest;
-                  _slideTo(target.toDouble());
                   if (target != widget.index) {
                     HapticFeedback.selectionClick();
+                    // No local slide: the parent's index
+                    // change drives the settle through
+                    // didUpdateWidget. Sliding here as
+                    // well ran it twice - the extra
+                    // bounce after a pill drag.
                     widget.onTap(target);
+                  } else {
+                    _slideTo(target.toDouble());
                   }
                 },
                 onLongPressStart: (_) {
@@ -4710,7 +4735,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.70.0-beta · app.flbox · Xray 内核',
+              'FlBox 0.70.1-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
