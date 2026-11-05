@@ -439,3 +439,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.70.1-beta：导航栏药丸额外回弹修复（构建号 72）
 - 用户澄清「状态栏回弹」实为**导航栏**：滑动药丸（默认 NavStyle.slidingGlass）拉过去后多回弹一次。定案为双重结算：①药丸拖拽结束时 dragEnd 自己 _slideTo 一次，紧接着 onTap 触发父层 index 变化、didUpdateWidget 又 _slideTo 一次；②点导航跳页时 PageView 的 animateToPage 途经每一页都回调 onPageChanged，逐页 setState 使药丸动画逐页重启（跨多页时最明显）。
 - 修法：拖拽结束不再本地滑行，结算只由 didUpdateWidget 驱动（同目标且已在滑则跳过）；Shell 加 _pageAnimating 标志，程序化跳页期间 onPageChanged 的途经页一律忽略，到达目标或动画结束清标志。页面手势滑动（非程序化）不受影响。
+
+## 0.70.2-beta：内容钻到玻璃栏下面（构建号 73）
+- 用户截图圈出仪表盘底部：当前节点卡被导航栏挡住，并要求「这下面做透明、别让导航栏挡住」。此前 _PageFrame 底部留 120 的死区、页面内容到不了栏下，玻璃填充又是 0.52 的乳白，整条栏读起来像实心带子。
+- 改法（浮动栏的标准形态）：_PageFrame 底部 padding 120→24，内容借 extendBody 一直铺到屏底、滚动时从玻璃下穿过；四个标签页各自在滚动内容末尾加 104 的 spacer，保证最后一张卡仍能完整滚出栏外；玻璃填充 alpha 浅色 0.52→0.30、深色 0.50→0.38（模糊保留）。

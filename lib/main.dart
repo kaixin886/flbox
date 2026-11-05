@@ -3293,8 +3293,8 @@ class _GlassShell extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = Theme.of(context).colorScheme.brightness == Brightness.dark;
     final fill = dark
-        ? const Color(0xFF1D1D20).withValues(alpha: 0.5)
-        : Colors.white.withValues(alpha: 0.52 + pressGlow * 0.1);
+        ? const Color(0xFF1D1D20).withValues(alpha: 0.38)
+        : Colors.white.withValues(alpha: 0.30 + pressGlow * 0.08);
     return SafeArea(
       top: false,
       child: Padding(
@@ -3614,8 +3614,11 @@ class _PageFrame extends StatelessWidget {
     return SafeArea(
       bottom: false,
       child: Padding(
-        // Bottom padding clears the floating navigation bar.
-        padding: const EdgeInsets.fromLTRB(16, 24, 16, 120),
+        // Content runs under the floating glass bar
+        // (extendBody); each scrollable page carries
+        // its own bottom spacer so its last card can
+        // still scroll fully clear of the bar.
+        padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -4216,6 +4219,7 @@ class _DashboardPage extends StatelessWidget {
                 ],
               ),
             ),
+            const SizedBox(height: 104),
           ],
         ),
       ),
@@ -4735,7 +4739,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.70.1-beta · app.flbox · Xray 内核',
+              'FlBox 0.70.2-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -5092,7 +5096,7 @@ class _ProxiesPageState extends State<ProxiesPage> {
                 ),
               ),
             ),
-          const SliverToBoxAdapter(child: SizedBox(height: 24)),
+          const SliverToBoxAdapter(child: SizedBox(height: 104)),
         ],
       ),
     );
@@ -6142,6 +6146,7 @@ class ProfilesPage extends StatelessWidget {
                 ],
               ),
             ),
+            const SizedBox(height: 104),
           ],
         ),
       ),
@@ -6411,7 +6416,7 @@ class _ToolsPage extends StatelessWidget {
                 subtitle: 'app.flbox · Xray 内核',
               ),
             ]),
-            const SizedBox(height: 96),
+            const SizedBox(height: 104),
           ],
         ),
       ),
