@@ -464,6 +464,35 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(null) }
                     }.start()
                 }
+                "flushDns" -> {
+                    // Flush netd's resolver cache: polluted
+                    // answers cached while direct (or while
+                    // DNS was broken) survive app restarts
+                    // and daemon restarts - the 0.62 sessions
+                    // pinned www.google.com to a bogus IP
+                    // for an hour and only an airplane-mode
+                    // toggle cleared it. Best effort: try
+                    // both command spellings, report the
+                    // output, never fail the caller.
+                    Thread {
+                        var log = ""
+                        try {
+                            val proc = ProcessBuilder(
+                                "su", "-c",
+                                "ndc resolver flushdefaultif; cmd netd resolver flushdefaultif; echo flush-done"
+                            ).redirectErrorStream(true).start()
+                            val out = proc.inputStream.bufferedReader().readText()
+                            proc.waitFor()
+                            log = out.trim().replace("\n", " | ")
+                            if (log.length > 300) {
+                                log = log.substring(0, 300)
+                            }
+                        } catch (e: Exception) {
+                            log = "exception: $e"
+                        }
+                        runOnUiThread { result.success(mapOf("ok" to true, "log" to log)) }
+                    }.start()
+                }
                 "netRules" -> {
                     // eBPF mode steering: installs or clears
                     // the netfilter chains that feed the

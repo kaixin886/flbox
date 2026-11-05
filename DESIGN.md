@@ -369,3 +369,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 0.61 真机：规则首次装成功、电报/Play 通，但浏览器谷歌 ERR_CONNECTION_ABORTED、百度 ERR_CONNECTION_CLOSED，与 TUN 症状复现。daemon 日志（2135 行、5 个会话）定案三点：①全日志**零 ERROR**，失败会话 201 条 TCP 全部经节点拨通（双行日志、握手约 550ms）——拨号层无辜，info 级别看不见拨通后流的死因（sing-box 源码：拨通后关闭原因只记 debug）；②**DNS 劫持在 eBPF 下从未生效**：08:42 会话里 174 个发往运营商 DNS（43.239.172.1/.2:53）的包被当普通 UDP 经节点转发、反复重试。源码实锤：routePacketConnection 仅对 TUN 入站特判 protocol=dns 直劫，redirect/tproxy 须靠规则匹配，而 protocol 匹配须先有 sniff 动作——ebpfconfig 两样都缺（TUN 配置因此幸免）；③08:39 失败会话里 **UDP 到达数为零**、08:42 重启后的会话 UDP 立刻涌入，转向在安装校验通过后仍出现会话级不稳定（机制未定案）。
 - 修法（ebpfconfig）：route 规则改为 **port 53 hijack-dns 打头**＋sniff 动作＋protocol dns hijack 兜底（顺序：port→sniff→protocol→ip_is_private）；log 级别改 **debug**（eBPF 稳定后再降回 info），让下一份日志能直接给出流的死因。
 - 规则自检愈合：Kotlin netRules 新增只读 verify 动作（与安装同一 FLBOX_ALL_OK 判据）；Dart 在 eBPF 启动 6 秒后与 resync 认领活会话时各验一次，失败自动重装一次并记事件日志——落实「软件自己检测问题」的既定方向，也给③留了兜底。
+
+## 0.63：root 模式启动自动刷 netd DNS 缓存
+- 0.62 真机定案全貌：DNS 劫持修复生效（hijack 命中、泄漏归零、零真 ERROR），百度/必应/YouTube/GitHub/Play/电报全通；剩谷歌与 ChatGPT 死于 **netd 系统缓存里的污染记录**——守护进程两份日志里 www.google.com 查询均为 0 条、连接全指假 IP 104.244.42.197（chatgpt.com→107.181.166.244），记录疑写于 0.61 DNS 泄漏期、TTL 约 1 小时，强停浏览器与重启守护进程都刷不掉；用户开关飞行模式（换网逼 netd 倒缓存）后 **09:28 谷歌恢复、微信亦恢复**（微信「网络不可用」横幅同为该窗口的滞留状态，其 DNS/短连接在日志里一直健康）。
+- 修法：Kotlin 通道新增 flushDns（su 跑 `ndc resolver flushdefaultif` 与 `cmd netd resolver flushdefaultif` 两式、失败不抛、输出记事件日志）；Dart `_launchRootDaemon` 在守护进程 running 确认后调用 `_flushDnsCache()`——Root TUN 与 eBPF 两模式共用此启动路径，一并覆盖。原计划的 ebpf DNS ipv4_only 经微信自愈证据撤销，不做无证据改动。
+- 待验证：Root TUN 复测（同一 netd 缓存层若为 0.57/0.58 浏览器失败的主因，TUN 应随本次定案一并复活；0.58 的两条 handshake refused 证据太薄、亦可能为拨假 IP 被拒）。

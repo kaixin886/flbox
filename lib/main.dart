@@ -2141,10 +2141,33 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     for (var i = 0; i < 32; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 250));
       final s = await _readRootStatus();
-      if (s.startsWith('running')) return;
+      if (s.startsWith('running')) {
+        await _flushDnsCache();
+        return;
+      }
       if (s.startsWith('error:')) throw s.substring(6).trim();
     }
     throw '守护进程启动超时';
+  }
+
+  /// Poisoned answers cached by netd survive app and
+  /// daemon restarts - in the 0.62 sessions www.google.com
+  /// stayed pinned to a polluted IP for about an hour and
+  /// only an airplane-mode toggle cleared it. Flushing
+  /// the resolver cache at every root-mode start makes
+  /// the session's first queries go through the daemon's
+  /// own DNS. Best effort: failures are logged, never
+  /// thrown.
+  Future<void> _flushDnsCache() async {
+    try {
+      final res = await _vpnChannel.invokeMethod<Map<Object?, Object?>>(
+        'flushDns',
+        {},
+      );
+      _logEvent('dns cache flush: ${(res?['log'] as String?) ?? 'no reply'}');
+    } catch (e) {
+      _logEvent('dns cache flush failed: $e');
+    }
   }
 
   /// Installs or clears the eBPF mode netfilter steering
@@ -4542,7 +4565,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.62.0 · app.flbox · Xray 内核',
+              'FlBox 0.63.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
