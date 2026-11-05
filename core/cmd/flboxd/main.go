@@ -207,6 +207,21 @@ func v6HasGlobalAddress() bool {
 	return false
 }
 
+// bridgeWantsIpv6 reports whether the bridge config
+// the supervisor is about to hand over enables IPv6
+// capture. An unreadable config means false: the
+// guard is the safe default.
+func bridgeWantsIpv6(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		EnableIpv6 bool `json:"enableIpv6"`
+	}
+	return stdjson.Unmarshal(data, &cfg) == nil && cfg.EnableIpv6
+}
+
 func v6GuardStart() (*v6Guard, error) {
 	g := &v6Guard{saved: map[string]string{}, done: make(chan struct{})}
 	entries, err := os.ReadDir("/proc/sys/net/ipv6/conf")
@@ -302,16 +317,26 @@ func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 	if err != nil {
 		return fmt.Errorf("bridge probe failed: %w", err)
 	}
-	// IPv6 is force-disabled in bridge mode, and the
-	// bridge by itself cannot enforce that (its
-	// enableIpv6=false only declines to capture, leaving
-	// the system route - and the leak - in place). The
-	// supervisor's sysctl guard is what makes disabled
-	// true; failing it fails the start rather than
-	// leaking quietly.
-	guard, err := v6GuardStart()
-	if err != nil {
-		return err
+	// IPv6 in bridge mode follows the user's switch,
+	// carried by the bridge config's enableIpv6 (the
+	// app writes it from the settings toggle). Switch
+	// on: the bridge tries to capture v6 itself and the
+	// guard stands down. Switch off: the bridge only
+	// declines to capture, which by itself would leave
+	// the system route - and the leak - in place, so
+	// the supervisor's sysctl guard is what makes
+	// disabled true; failing it fails the start rather
+	// than leaking quietly.
+	var guard *v6Guard
+	if bridgeWantsIpv6(bridgeConfigPath) {
+		fmt.Fprintln(os.Stderr, "flboxd: ipv6 guard: off - user switch on, the bridge captures IPv6")
+		guard = &v6Guard{saved: map[string]string{}, done: make(chan struct{})}
+	} else {
+		var err error
+		guard, err = v6GuardStart()
+		if err != nil {
+			return err
+		}
 	}
 	defer guard.restore()
 	self, err := os.Executable()

@@ -2233,8 +2233,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// node the user last picked. IPv6 is hard-off in root
   /// mode (0.68): the bridge's IPv6 UDP path is best-effort
   /// by design (its recovery layer salvages packets by port
-  /// alone) and every root data plane surveyed mishandles
-  /// v6, so the bridge never gets to hook a v6 socket.
+  /// alone). The IPv6 switch governs the bridge too: on
+  /// lets it try to capture v6 through the node (root
+  /// data planes handle v6 poorly - an experiment, off
+  /// by default); off keeps the daemon's sysctl v6
+  /// guard on.
   Future<({String config, String bridge})> _writeRootDaemonConfigs() async {
     final node = _selectedNode;
     final yaml = _profileYaml;
@@ -2257,11 +2260,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       uids = res?.whereType<int>().toList() ?? <int>[];
     }
     final logOff = !_logEnabled;
+    final ipv6 = _ipv6Enabled;
     final envelope = await Isolate.run(
       () => CoreBridge().bridgeXrayConfig(
         yaml,
         node,
-        ipv6: false,
+        ipv6: ipv6,
         mode: mode,
         uids: uids,
         routeMode: routeMode,
@@ -4628,17 +4632,15 @@ class _SettingsPageState extends State<_SettingsPage> {
               title: const Text('IPv6'),
               subtitle: Text(
                 _runMode == 'ebpf'
-                    ? 'eBPF 模式强制禁用，与此开关无关'
+                    ? 'eBPF 模式手动开关，下次启动时生效；开：桥尝试接管 v6 走节点（root 数据面 v6 普遍不稳，节点无 v6 出口则不通）；关：会话期间系统级禁用 v6，不直连泄漏'
                     : 'VPN 模式手动开关，下次启动时生效；开：v6 进隧道走节点（节点无 v6 出口则失败回落 v4）；关：v6 在隧道口直接丢弃，不直连泄漏',
                 style: TextStyle(color: muted),
               ),
-              value: _runMode == 'ebpf' ? false : _ipv6Enabled,
-              onChanged: _runMode == 'ebpf'
-                  ? null
-                  : (v) {
-                      setState(() => _ipv6Enabled = v);
-                      widget.onIpv6Changed(v);
-                    },
+              value: _ipv6Enabled,
+              onChanged: (v) {
+                setState(() => _ipv6Enabled = v);
+                widget.onIpv6Changed(v);
+              },
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -4739,7 +4741,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.70.2-beta · app.flbox · Xray 内核',
+              'FlBox 0.70.3-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
