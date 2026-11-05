@@ -4765,7 +4765,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.70.5-beta · app.flbox · Xray 内核',
+              'FlBox 0.71.0-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -6460,25 +6460,18 @@ class LogsPage extends StatefulWidget {
 }
 
 class _LogsPageState extends State<LogsPage> {
-  // Three log sources (0.66): the in-process core log
-  // (Xray plus the app's own [flbox] lifecycle lines) and
-  // the root daemon's per-session files - current session
-  // and the rotated previous one. The page opens on
-  // whichever file changed most recently, which is the
-  // one the user is almost certainly here for.
-  static const _sourceNames = ['核心', '守护·本次', '守护·上次'];
-  static const _sourceFiles = [
+  static const _names = ['核心', '守护·本次', '守护·上次'];
+  static const _files = [
     'xray-error.log',
     'root-daemon.log',
     'root-daemon.prev.log',
   ];
 
-  String? _status;
-  String _logTail = '';
-  List<String> _logLines = const [];
-  String _logMeta = '';
-  bool _loading = false;
   int _source = 0;
+  List<String> _lines = const [];
+  String _meta = '';
+  String? _status;
+  bool _loading = false;
 
   @override
   void initState() {
@@ -6491,8 +6484,8 @@ class _LogsPageState extends State<LogsPage> {
       final docs = await getApplicationDocumentsDirectory();
       var newest = -1;
       var newestTime = DateTime.fromMillisecondsSinceEpoch(0);
-      for (var i = 0; i < _sourceFiles.length; i++) {
-        final f = File('${docs.path}/${_sourceFiles[i]}');
+      for (var i = 0; i < _files.length; i++) {
+        final f = File('${docs.path}/${_files[i]}');
         if (await f.exists()) {
           final t = (await f.stat()).modified;
           if (t.isAfter(newestTime)) {
@@ -6503,20 +6496,21 @@ class _LogsPageState extends State<LogsPage> {
       }
       if (newest >= 0 && mounted) setState(() => _source = newest);
     } catch (_) {}
-    _loadLog();
+    _load();
   }
 
-  Future<void> _loadLog() async {
+  Future<void> _load() async {
     setState(() => _loading = true);
+    var meta = '';
+    var lines = const <String>[];
     try {
       final docs = await getApplicationDocumentsDirectory();
-      final file = File('${docs.path}/${_sourceFiles[_source]}');
+      final file = File('${docs.path}/${_files[_source]}');
       if (await file.exists()) {
         final size = await file.length();
-        _logMeta = '${_sourceNames[_source]}日志 · $size 字节';
-        // Tail read only: the file grows to megabytes, and a
-        // whole-file strict UTF-8 decode throws on any damaged byte
-        // - which left this page blank while the file kept growing.
+        meta = '${_names[_source]}日志 · $size 字节';
+        // Tail only: a whole-file decode of a multi-MB log
+        // is slow, and one bad byte blanks the page.
         final raf = await file.open();
         try {
           const chunk = 96 * 1024;
@@ -6528,128 +6522,118 @@ class _LogsPageState extends State<LogsPage> {
             final nl = text.indexOf('\n');
             if (nl >= 0) text = text.substring(nl + 1);
           }
-          final lines = text.split('\n');
-          final tail = lines.length > 200
-              ? lines.sublist(lines.length - 200)
-              : lines;
-          _logTail = tail.join('\n').trim();
-          _logLines = tail;
+          final all = text.split('\n');
+          lines = all.length > 200 ? all.sublist(all.length - 200) : all;
         } finally {
           await raf.close();
         }
       } else {
-        _logMeta = '${_sourceNames[_source]}日志尚不存在';
-        _logTail = '';
-        _logLines = const [];
+        meta = '${_names[_source]}日志尚不存在';
       }
-    } catch (_) {
-      _logTail = '';
-      _logLines = const [];
-    }
-    if (mounted) setState(() => _loading = false);
-  }
-
-  Future<void> _clearLog() async {
-    try {
-      final docs = await getApplicationDocumentsDirectory();
-      final file = File('${docs.path}/${_sourceFiles[_source]}');
-      // Truncate, never delete: the core keeps the file open, and
-      // deleting the path would send all later lines to an unlinked
-      // inode (the page would show "no logs" until a core restart).
-      if (await file.exists()) await file.writeAsString('');
-      _logMeta = '${_sourceNames[_source]}日志已清空（截断）';
     } catch (_) {}
     if (mounted) {
       setState(() {
-        _logTail = '';
-        _logLines = const [];
+        _meta = meta;
+        _lines = lines;
+        _loading = false;
       });
     }
   }
 
+  Future<void> _clear() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final file = File('${docs.path}/${_files[_source]}');
+      // Truncate, never delete: the writer keeps the file
+      // open, and unlinking would swallow later lines.
+      if (await file.exists()) await file.writeAsString('');
+      setState(() {
+        _meta = '${_names[_source]}日志已清空（截断）';
+        _lines = const [];
+      });
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
-    final muted = Theme.of(context)
-        .colorScheme
-        .onSurface
-        .withValues(alpha: 0.5);
-    return _PageFrame(
-      title: '日志',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SegmentedButton<int>(
-            segments: [
-              for (var i = 0; i < _sourceNames.length; i++)
-                ButtonSegment(value: i, label: Text(_sourceNames[i])),
-            ],
-            selected: {_source},
-            onSelectionChanged: (sel) {
-              setState(() => _source = sel.first);
-              _loadLog();
-            },
-          ),
-          const SizedBox(height: 12),
-          if (widget.ebpfMode && _source == 0) ...[
-            Text(
-              'eBPF 模式下核心在守护进程中运行：「核心」是 VPN 模式的日志，当前会话请看「守护·本次」',
-              style: TextStyle(color: muted, fontSize: 12.5),
+    final muted =
+        Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5);
+    return Scaffold(
+      appBar: AppBar(title: const Text('日志')),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SegmentedButton<int>(
+              segments: [
+                for (var i = 0; i < _names.length; i++)
+                  ButtonSegment(value: i, label: Text(_names[i])),
+              ],
+              selected: {_source},
+              onSelectionChanged: (s) {
+                setState(() => _source = s.first);
+                _load();
+              },
             ),
-            const SizedBox(height: 12),
-          ],
-          Row(
-            children: [
-              FilledButton.tonal(
-                onPressed: () {
-                  try {
-                    setState(() => _status = CoreBridge().xrayStatus());
-                  } catch (e) {
-                    setState(() => _status = '自检失败：$e');
-                  }
-                },
-                child: const Text('内核自检'),
-              ),
-              const SizedBox(width: 12),
-              FilledButton.tonal(
-                onPressed: _loading ? null : _loadLog,
-                child: Text(_loading ? '刷新中…' : '刷新日志'),
-              ),
-              const SizedBox(width: 12),
-              TextButton(
-                onPressed: _clearLog,
-                child: const Text('清空'),
+            if (widget.ebpfMode && _source == 0) ...[
+              const SizedBox(height: 10),
+              Text(
+                'eBPF 模式下核心在守护进程中运行：「核心」是 VPN 模式的日志，当前会话请看「守护·本次」',
+                style: TextStyle(color: muted, fontSize: 12.5),
               ),
             ],
-          ),
-          if (_logMeta.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                FilledButton.tonal(
+                  onPressed: () {
+                    try {
+                      setState(() => _status = CoreBridge().xrayStatus());
+                    } catch (e) {
+                      setState(() => _status = '自检失败：$e');
+                    }
+                  },
+                  child: const Text('内核自检'),
+                ),
+                const SizedBox(width: 10),
+                FilledButton.tonal(
+                  onPressed: _loading ? null : _load,
+                  child: Text(_loading ? '刷新中…' : '刷新日志'),
+                ),
+                const Spacer(),
+                TextButton(onPressed: _clear, child: const Text('清空')),
+              ],
+            ),
             const SizedBox(height: 8),
-            Text(_logMeta, style: TextStyle(color: muted, fontSize: 12)),
-          ],
-          if (_status != null) ...[
-            const SizedBox(height: 16),
-            Text(_status!),
-          ],
-          const SizedBox(height: 16),
-          Expanded(
-            child: _logTail.isEmpty
-                ? Text(
-                    _source == 0
-                        ? '暂无日志。启动一次内核后，Xray 的运行日志会写到这里。'
-                        : '暂无守护日志。用 Root 模式启动一次后，守护进程的日志会写到这里。',
-                    style: TextStyle(color: muted))
-                : ListView.builder(
-                    itemCount: _logLines.length,
-                    itemBuilder: (context, i) => Text(
-                      _logLines[i],
-                      style: const TextStyle(
-                        fontSize: 11,
-                        height: 1.45,
-                        fontFamily: 'monospace',
+            Text(_meta, style: TextStyle(color: muted, fontSize: 12)),
+            if (_status != null) ...[
+              const SizedBox(height: 10),
+              Text(_status!),
+            ],
+            const SizedBox(height: 10),
+            Expanded(
+              child: _lines.isEmpty
+                  ? Text(
+                      _source == 0
+                          ? '暂无日志。启动一次内核后，Xray 的运行日志会写到这里。'
+                          : '暂无守护日志。用 Root 模式启动一次后，守护进程的日志会写到这里。',
+                      style: TextStyle(color: muted),
+                    )
+                  : ListView.builder(
+                      itemCount: _lines.length,
+                      itemBuilder: (context, i) => Text(
+                        _lines[i],
+                        style: const TextStyle(
+                          fontSize: 11,
+                          height: 1.45,
+                          fontFamily: 'monospace',
+                        ),
                       ),
                     ),
-                  ),
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }
