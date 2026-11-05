@@ -180,6 +180,24 @@ class MainActivity : FlutterActivity() {
         return lines.joinToString("\n")
     }
 
+    // Read-only version of the install verification, for
+    // the app's self-checks (a few seconds after start,
+    // and whenever a live session is re-adopted): the
+    // 0.61 session showed steering can look perfect at
+    // install time yet deliver no UDP minutes later, so
+    // presence is re-proven instead of assumed. Same
+    // FLBOX_ALL_OK marker as the install script.
+    private fun buildVerifyRulesScript(): String {
+        val lines = mutableListOf<String>()
+        lines += "echo == verify =="
+        lines += "iptables -t nat -S OUTPUT | grep FLBOX_NAT && iptables -t mangle -S OUTPUT | grep FLBOX_MNG && iptables -t mangle -S PREROUTING | grep FLBOX_PRE && ip rule | grep -i 0x2b2c && echo FLBOX_ALL_OK"
+        lines += "iptables -t nat -S OUTPUT"
+        lines += "iptables -t mangle -S OUTPUT"
+        lines += "iptables -t mangle -S PREROUTING"
+        lines += "ip rule"
+        return lines.joinToString("\n")
+    }
+
     // android.os.SELinux is a hidden API and not in the
     // SDK stubs, so read the state the way native tools
     // do: the enforce node, with getenforce as fallback.
@@ -456,7 +474,8 @@ class MainActivity : FlutterActivity() {
                     // a bare boolean cost a whole evening
                     // in 0.59.
                     val args = call.arguments as? Map<*, *>
-                    val install = (args?.get("action") as? String) == "install"
+                    val action = args?.get("action") as? String ?: "clear"
+                    val install = action == "install"
                     val include = (args?.get("includePkgs") as? List<*>)
                         ?.mapNotNull { it as? String } ?: emptyList()
                     val exclude = (args?.get("excludePkgs") as? List<*>)
@@ -465,7 +484,11 @@ class MainActivity : FlutterActivity() {
                         var ok = false
                         var log = ""
                         try {
-                            val script = buildNetRulesScript(install, include, exclude)
+                            val script = if (action == "verify") {
+                                buildVerifyRulesScript()
+                            } else {
+                                buildNetRulesScript(install, include, exclude)
+                            }
                             val proc = ProcessBuilder("su", "-c", script)
                                 .redirectErrorStream(true)
                                 .start()
@@ -475,7 +498,11 @@ class MainActivity : FlutterActivity() {
                             if (log.length > 4000) {
                                 log = log.substring(log.length - 4000)
                             }
-                            ok = if (install) log.contains("FLBOX_ALL_OK") else exit == 0
+                            ok = if (action == "clear") {
+                                exit == 0
+                            } else {
+                                log.contains("FLBOX_ALL_OK")
+                            }
                         } catch (e: Exception) {
                             log = "exception: $e"
                         }

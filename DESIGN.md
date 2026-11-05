@@ -364,3 +364,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 修法：FLBOX_MNG 只做 `-p udp -j MARK --set-xmark 0x2B2C`（OUTPUT 合法）；新增 mangle PREROUTING 链 FLBOX_PRE，仅对 mark 0x2B2C 的 UDP 做 TPROXY --on-port 7893；ip rule/table 100 不变（marked 包经 lo 回环进 PREROUTING）。本地豁免改显式 CIDR 段（0/8、10/8、100.64/10、127/8、169.254/16、172.16/12、192.168/16、224/4、255.255.255.255/32）；v6 链本地豁免改 `-d ::1/128`。
 - verify 升级：FLBOX_ALL_OK 须同时 grep 到 nat OUTPUT 的 FLBOX_NAT、mangle OUTPUT 的 FLBOX_MNG、mangle PREROUTING 的 FLBOX_PRE 与 ip rule 的 0x2b2c，并 dump FLBOX_PRE 与 ip rule 全表；清除脚本同步拆 FLBOX_PRE。
 - 顺手：selinuxState 只接受 enforcing/permissive/disabled 单词答案，不再把 getenforce 的报错文本当状态显示（0.60 弹窗里露出的那串 permission denied）。
+
+## 0.62：eBPF 的 DNS 劫持修复 + debug 日志 + 规则自检愈合
+- 0.61 真机：规则首次装成功、电报/Play 通，但浏览器谷歌 ERR_CONNECTION_ABORTED、百度 ERR_CONNECTION_CLOSED，与 TUN 症状复现。daemon 日志（2135 行、5 个会话）定案三点：①全日志**零 ERROR**，失败会话 201 条 TCP 全部经节点拨通（双行日志、握手约 550ms）——拨号层无辜，info 级别看不见拨通后流的死因（sing-box 源码：拨通后关闭原因只记 debug）；②**DNS 劫持在 eBPF 下从未生效**：08:42 会话里 174 个发往运营商 DNS（43.239.172.1/.2:53）的包被当普通 UDP 经节点转发、反复重试。源码实锤：routePacketConnection 仅对 TUN 入站特判 protocol=dns 直劫，redirect/tproxy 须靠规则匹配，而 protocol 匹配须先有 sniff 动作——ebpfconfig 两样都缺（TUN 配置因此幸免）；③08:39 失败会话里 **UDP 到达数为零**、08:42 重启后的会话 UDP 立刻涌入，转向在安装校验通过后仍出现会话级不稳定（机制未定案）。
+- 修法（ebpfconfig）：route 规则改为 **port 53 hijack-dns 打头**＋sniff 动作＋protocol dns hijack 兜底（顺序：port→sniff→protocol→ip_is_private）；log 级别改 **debug**（eBPF 稳定后再降回 info），让下一份日志能直接给出流的死因。
+- 规则自检愈合：Kotlin netRules 新增只读 verify 动作（与安装同一 FLBOX_ALL_OK 判据）；Dart 在 eBPF 启动 6 秒后与 resync 认领活会话时各验一次，失败自动重装一次并记事件日志——落实「软件自己检测问题」的既定方向，也给③留了兜底。

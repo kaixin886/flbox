@@ -60,6 +60,22 @@ func TestEbpfConfigShape(t *testing.T) {
 	if remote["detour"] != "node-b" {
 		t.Errorf("dns-remote detour = %v, want the pinned node", remote["detour"])
 	}
+	// DNS hijack must lead with a port-53 rule: the
+	// protocol-only form never fired for tproxy traffic
+	// in the 0.61 device session (carrier DNS went out
+	// via the node as ordinary UDP).
+	rules := route["rules"].([]any)
+	first, _ := rules[0].(map[string]any)
+	if first["action"] != "hijack-dns" {
+		t.Errorf("first route rule = %v, want port-53 hijack-dns first", first)
+	}
+	if ports, _ := first["port"].([]any); len(ports) != 1 || ports[0] != float64(53) {
+		t.Errorf("first route rule port = %v, want [53]", first["port"])
+	}
+	logCfg := root["log"].(map[string]any)
+	if logCfg["level"] != "debug" {
+		t.Errorf("log level = %v, want debug while eBPF is unproven", logCfg["level"])
+	}
 }
 
 // The ebpf daemon has no TUN, so a healthy config should

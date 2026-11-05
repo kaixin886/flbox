@@ -807,6 +807,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (status.startsWith('running')) {
         _logEvent('resync: adopted live root daemon session');
         _adoptSession();
+        if (_runMode == 'ebpf') {
+          // Adopting a live session also re-proves its
+          // steering; a vanished rule heals in place.
+          unawaited(_verifyRulesAndHeal());
+        }
       } else if (_runMode == 'ebpf') {
         // A dead daemon must not leave netfilter rules
         // steering traffic into listeners nobody owns.
@@ -2171,6 +2176,42 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
+  /// Read-only check that the eBPF steering is still
+  /// fully hooked (all three chain jumps plus the fwmark
+  /// rule), with the kernel's own rule lists as proof.
+  Future<({bool ok, String log})> _netRulesVerify() async {
+    try {
+      final res = await _vpnChannel
+          .invokeMethod<Map<Object?, Object?>>('netRules', {
+            'action': 'verify',
+            'includePkgs': <String>[],
+            'excludePkgs': <String>[],
+          });
+      return (
+        ok: res?['ok'] == true,
+        log: (res?['log'] as String?) ?? '',
+      );
+    } catch (e) {
+      return (ok: false, log: 'channel error: $e');
+    }
+  }
+
+  /// The 0.61 session verified clean at install time yet
+  /// delivered no UDP minutes later: steering presence is
+  /// re-proven after start and on session re-adoption,
+  /// and a failed check heals by reinstalling the rules
+  /// once instead of leaving a half-steered phone.
+  Future<void> _verifyRulesAndHeal() async {
+    if (_runMode != 'ebpf') return;
+    final v = await _netRulesVerify();
+    if (v.ok) return;
+    _logEvent('ebpf rules verify failed, reinstalling');
+    final r = await _netRules(true);
+    _logEvent(
+      r.ok ? 'ebpf rules healed by reinstall' : 'ebpf rules heal failed',
+    );
+  }
+
   String? _deviceInfoCache;
 
   Future<String> _deviceInfo() async {
@@ -2354,6 +2395,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _startedAt = DateTime.now();
       setState(() => _running = true);
       unawaited(_markWasRunning(true));
+      if (_runMode == 'ebpf') {
+        // Install-time verification is not enough (0.61:
+        // clean at install, no UDP minutes later) - prove
+        // the steering again once the session settles.
+        unawaited(
+          Future<void>.delayed(
+            const Duration(seconds: 6),
+          ).then((_) => _verifyRulesAndHeal()),
+        );
+      }
     } catch (e) {
       await _showStartError(e);
     } finally {
@@ -4491,7 +4542,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.61.0 · app.flbox · Xray 内核',
+              'FlBox 0.62.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

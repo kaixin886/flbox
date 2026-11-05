@@ -94,6 +94,18 @@ func ebpfConfig(clashYAML, selectedNode string) (string, error) {
 		"auto_detect_interface": true,
 		"default_mark":          ebpfCoreMark,
 		"rules": []any{
+			// DNS must be hijacked by destination port
+			// first: the protocol form below only matches
+			// after a sniff pass, and the 0.61 device log
+			// proved it never fired for tproxy traffic -
+			// carrier DNS queries (43.239.172.1/.2:53)
+			// were forwarded through the node as ordinary
+			// UDP, 174 packets of retries in 78 seconds.
+			// The TUN config gets away with protocol-only
+			// because the TUN stack special-cases DNS; a
+			// redirect/tproxy inbound has no such path.
+			map[string]any{"port": []any{53}, "action": "hijack-dns"},
+			map[string]any{"action": "sniff"},
 			map[string]any{"protocol": "dns", "action": "hijack-dns"},
 			map[string]any{"ip_is_private": true, "outbound": "direct"},
 		},
@@ -139,7 +151,14 @@ func ebpfConfig(clashYAML, selectedNode string) (string, error) {
 		}
 	}
 	root["dns"] = dns
-	root["log"] = map[string]any{"level": "info", "timestamp": true}
+	// Debug while the eBPF data plane is still being
+	// proven: at info level sing-box stays silent about
+	// why an established stream died (post-dial close
+	// reasons are debug-only), and the 0.61 session -
+	// 201 clean dials, zero errors, dead browser pages -
+	// showed that silence is exactly what we cannot
+	// afford yet. Back to info once this mode is stable.
+	root["log"] = map[string]any{"level": "debug", "timestamp": true}
 
 	out, err := json.Marshal(root)
 	if err != nil {
