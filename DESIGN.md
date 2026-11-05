@@ -415,3 +415,4 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 用户圈图指定删除设置→连接里的「启动后自动连接」（auto_connect）与「开机自启恢复」（restore_on_boot）：两开关、Shell 侧字段/存储/setter、启动序列的应用侧自动启动分支、备份字段一并移除；打开应用不再自动启动任何会话（Root 开机自启走 service.d 脚本＋resync 收养，VPN 手动点按钮）。was_running 记账随之删除。AndroidManifest 注销 BootReceiver（其类文件因 push-files 无删除通道留仓但已无注册、永不触发）。
 - 顺手修：设置页 Root eBPF 副文案写死「全局模式」，改为跟随当前出站模式（规则/全局/直连）。
 - 真机另发现（待用户拍板）：eBPF 的 IPv6「禁用」实为桥不接管——bpf2socks 在 enableIpv6=false 时不改写 v6 流量，v6 沿系统路由直连（IPCheck 实证出口为广电山西真地址），与旧 iptables 版 eBPF 的丢弃式禁用（宁断不漏）不同；换桥时丢弃没跟过来。修法候选：flboxd 在桥会话期间维护 ip6tables 非本地 v6 出站 DROP、停会话清除。
+- 0.68.1 续（同日，用户拍板「宁断不漏」）：flboxd 在桥会话期间维护 ip6tables 链 FLBOX6——OUTPUT 跳入，非本地 IPv6 一律 DROP（豁免 loopback/::1、fe80::/10、ff00::/8 与桥令牌前缀 fd7a:7374:6572:6973::/64）；探针通过后、拉起子进程前安装，装不上或自检（-C）不过则整个会话启动失败、绝不静默泄漏；会话结束 defer 清除，启动时先清残链（防 SIGKILL 遗留，重启手机亦自清）。验收：eBPF 运行时 IPCheck 的 v6 探针应无结果，停掉 FlBox 后 v6 恢复直连。

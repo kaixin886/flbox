@@ -8,9 +8,10 @@
 // mode, so every config this daemon receives is Xray JSON.
 //
 // Usage:
-//   flboxd <config.json> <status-file>
-//   flboxd <config.json> <status-file> <bridge-config.json>
-//   flboxd --core <config.json> <ready-file>
+//
+//	flboxd <config.json> <status-file>
+//	flboxd <config.json> <status-file> <bridge-config.json>
+//	flboxd --core <config.json> <ready-file>
 //
 // The status file is the whole control channel back to the
 // app: the daemon writes "running\n<pid>\n" once everything
@@ -148,6 +149,63 @@ func childCmd(name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// The IPv6 drop chain held during bridge sessions.
+// Local destinations stay reachable - loopback,
+// link-local and multicast (neighbour discovery must
+// keep working), and the bridge's token prefix (its
+// DNS-hijack listeners live there) - everything else
+// IPv6 leaving the device is dropped. Break, not leak:
+// the same contract the pre-bridge iptables data plane
+// had, which did not carry over when the bridge landed.
+const v6DropChain = "FLBOX6"
+
+func ip6tables(args ...string) error {
+	out, err := exec.Command("ip6tables", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip6tables %s: %v (%s)",
+			strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// v6DropRemove is best-effort: it also clears a chain a
+// SIGKILLed predecessor could not take down itself.
+func v6DropRemove() {
+	_ = ip6tables("-D", "OUTPUT", "-j", v6DropChain)
+	_ = ip6tables("-F", v6DropChain)
+	_ = ip6tables("-X", v6DropChain)
+}
+
+func v6DropInstall() error {
+	v6DropRemove()
+	steps := [][]string{
+		{"-N", v6DropChain},
+		{"-A", v6DropChain, "-o", "lo", "-j", "RETURN"},
+		{"-A", v6DropChain, "-d", "::1/128", "-j", "RETURN"},
+		{"-A", v6DropChain, "-d", "fe80::/10", "-j", "RETURN"},
+		{"-A", v6DropChain, "-d", "ff00::/8", "-j", "RETURN"},
+		{"-A", v6DropChain, "-d", "fd7a:7374:6572:6973::/64", "-j", "RETURN"},
+		{"-A", v6DropChain, "-j", "DROP"},
+		{"-A", "OUTPUT", "-j", v6DropChain},
+	}
+	for _, s := range steps {
+		if err := ip6tables(s...); err != nil {
+			v6DropRemove()
+			return err
+		}
+	}
+	// Self-check before the session counts as leak-free.
+	if err := ip6tables("-C", "OUTPUT", "-j", v6DropChain); err != nil {
+		v6DropRemove()
+		return fmt.Errorf("verify jump: %w", err)
+	}
+	if err := ip6tables("-C", v6DropChain, "-j", "DROP"); err != nil {
+		v6DropRemove()
+		return fmt.Errorf("verify drop: %w", err)
+	}
+	return nil
+}
+
 func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 	bridgeBin, err := bridgeBinaryPath()
 	if err != nil {
@@ -166,6 +224,17 @@ func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 	if err != nil {
 		return fmt.Errorf("bridge probe failed: %w", err)
 	}
+	// IPv6 is force-disabled in bridge mode, and the
+	// bridge by itself cannot enforce that (its
+	// enableIpv6=false only declines to capture, leaving
+	// the system route - and the leak - in place). The
+	// supervisor therefore holds an ip6tables drop chain
+	// for the length of the session; failing to install
+	// it fails the start rather than leaking quietly.
+	if err := v6DropInstall(); err != nil {
+		return fmt.Errorf("ipv6 drop: %w", err)
+	}
+	defer v6DropRemove()
 	self, err := os.Executable()
 	if err != nil {
 		return err
