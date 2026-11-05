@@ -52,14 +52,9 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-        <receiver
-            android:name=".BootReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
-            </intent-filter>
-        </receiver>
+        <!-- No BOOT_COMPLETED receiver: app-side boot
+             restore was removed in 0.68.1. Root mode boots
+             through the Magisk service.d script instead. -->
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

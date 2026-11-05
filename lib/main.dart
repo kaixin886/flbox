@@ -514,9 +514,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   String get _outModeName => const ['rules', 'global', 'direct'][_outMode];
   bool _geoReady = false;
   Set<String> _favNodes = {};
-  bool _autoConnect = false;
-  bool _restoreOnBoot = false;
-  bool _wasRunning = false;
   bool _notifyOnStart = true;
   /// The manual IPv6 switch (0.34's preference, restored
   /// in 0.68 after the user reversed the same-day
@@ -650,9 +647,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } else {
       _outMode = (prefs.getBool('rules_mode') ?? false) ? 0 : 1;
     }
-    _autoConnect = prefs.getBool('auto_connect') ?? false;
-    _restoreOnBoot = prefs.getBool('restore_on_boot') ?? false;
-    _wasRunning = prefs.getBool('was_running') ?? false;
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
     _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
@@ -748,17 +742,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     await _checkBgSubUpdates();
     await _runDueSubscriptionUpdates();
     await _resyncCoreState();
-    // With the root boot script installed, the daemon
-    // starts itself at boot and the resync above adopts it;
-    // an app-side start here would race the script's copy.
-    final bootScriptOwnsStart = _daemonMode && _rootBootStart;
-    if (!bootScriptOwnsStart &&
-        (_autoConnect || (_restoreOnBoot && _wasRunning)) &&
-        _profile != null &&
-        !_running &&
-        mounted) {
-      await _toggleCore();
-    }
+    // No app-side autostart remains (0.68.1, user call):
+    // the auto-connect and boot-restore switches were
+    // removed, so opening the app never starts a session
+    // by itself. The root boot script, when installed,
+    // starts the daemon at boot and the resync above
+    // adopts it; VPN sessions start from the button.
   }
 
   bool _sbReady = false;
@@ -923,7 +912,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _running = true;
       _startedAt = DateTime.now();
     });
-    unawaited(_markWasRunning(true));
     _startPolling();
   }
 
@@ -1098,29 +1086,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _setAutoConnect(bool value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('auto_connect', value);
-    setState(() => _autoConnect = value);
-  }
-
-  Future<void> _setRestoreOnBoot(bool value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('restore_on_boot', value);
-    setState(() => _restoreOnBoot = value);
-  }
-
-  /// Records whether the core was up when the app/process last
-  /// had a say; the boot receiver reconnects only when this is
-  /// true and the user opted into boot restore.
-  Future<void> _markWasRunning(bool value) async {
-    _wasRunning = value;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('was_running', value);
-    } catch (_) {}
-  }
-
   /// Exports every subscription (metadata + stored YAML) and the
   /// user-facing settings as one JSON file the user picks a home
   /// for; falls back to the clipboard when the platform cannot
@@ -1144,8 +1109,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         'activeSub': _activeSubId,
         'prefs': {
           'outbound_mode': _outMode,
-          'auto_connect': _autoConnect,
-          'restore_on_boot': _restoreOnBoot,
           'notify_on_start': _notifyOnStart,
           'notify_sub_update': _notifySubUpdate,
           'root_boot_start': _rootBootStart,
@@ -1220,8 +1183,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
       }
       var outMode = _outMode;
-      var autoConnect = _autoConnect;
-      var restoreOnBoot = _restoreOnBoot;
       var notifyOnStart = _notifyOnStart;
       var notifySubUpdate = _notifySubUpdate;
       var rootBootStart = _rootBootStart;
@@ -1242,8 +1203,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         } else if (bp['rules_mode'] is bool) {
           outMode = (bp['rules_mode'] as bool) ? 0 : 1;
         }
-        autoConnect = bb('auto_connect', autoConnect);
-        restoreOnBoot = bb('restore_on_boot', restoreOnBoot);
         notifyOnStart = bb('notify_on_start', notifyOnStart);
         notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
         rootBootStart = bb('root_boot_start', rootBootStart);
@@ -1276,8 +1235,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _subs = newSubs;
         _activeSubId = activeId;
         _outMode = outMode;
-        _autoConnect = autoConnect;
-        _restoreOnBoot = restoreOnBoot;
         _notifyOnStart = notifyOnStart;
         _notifySubUpdate = notifySubUpdate;
         _rootBootStart = rootBootStart;
@@ -1291,8 +1248,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _splitAllow = bypassAllow;
       });
       await prefs.setInt('outbound_mode', outMode);
-      await prefs.setBool('auto_connect', autoConnect);
-      await prefs.setBool('restore_on_boot', restoreOnBoot);
       await prefs.setBool('notify_on_start', notifyOnStart);
       await prefs.setBool('notify_sub_update', notifySubUpdate);
       await prefs.setBool('root_boot_start', rootBootStart);
@@ -2481,7 +2436,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _startedAt = DateTime.now();
       setState(() => _running = true);
       _startPolling();
-      unawaited(_markWasRunning(true));
     } catch (e) {
       await _showStartError(e);
     } finally {
@@ -2506,7 +2460,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _logEvent('$_runMode stopped');
     } catch (_) {}
     _stopPolling();
-    unawaited(_markWasRunning(false));
     if (mounted) setState(() => _running = false);
   }
 
@@ -2592,7 +2545,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       } catch (_) {}
     }
     _stopPolling();
-    unawaited(_markWasRunning(false));
     if (mounted) setState(() => _running = false);
   }
 
@@ -2654,7 +2606,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _logEvent('core started (mode=$_outModeName, node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
-      unawaited(_markWasRunning(true));
       _startPolling();
       unawaited(_primeStatus());
     } catch (e) {
@@ -3124,10 +3075,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             final ok = await _ensureGeoData(force: true);
             _toast(ok ? '规则库已刷新（内置版本）' : '规则库刷新失败');
           },
-          autoConnect: _autoConnect,
-          onAutoConnectChanged: _setAutoConnect,
-          restoreOnBoot: _restoreOnBoot,
-          onRestoreOnBootChanged: _setRestoreOnBoot,
           autoIntervalHours: _subAutoIntervalHours,
           onAutoIntervalChanged: _setSubAutoInterval,
           ipv6Enabled: _ipv6Enabled,
@@ -4258,8 +4205,6 @@ class _SettingsPage extends StatefulWidget {
     required this.onOutModeChanged,
     required this.geoReady,
     required this.onUpdateGeo,
-    required this.autoConnect,
-    required this.onAutoConnectChanged,
     required this.autoIntervalHours,
     required this.onAutoIntervalChanged,
     required this.ipv6Enabled,
@@ -4268,8 +4213,6 @@ class _SettingsPage extends StatefulWidget {
     required this.onRootBootStartChanged,
     required this.runMode,
     required this.onRunModeChanged,
-    required this.restoreOnBoot,
-    required this.onRestoreOnBootChanged,
     required this.onExportBackup,
     required this.onImportBackup,
   });
@@ -4290,8 +4233,6 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<int> onOutModeChanged;
   final bool geoReady;
   final VoidCallback onUpdateGeo;
-  final bool autoConnect;
-  final ValueChanged<bool> onAutoConnectChanged;
   final int autoIntervalHours;
   final ValueChanged<int> onAutoIntervalChanged;
   final bool ipv6Enabled;
@@ -4300,8 +4241,6 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<bool> onRootBootStartChanged;
   final String runMode;
   final ValueChanged<String> onRunModeChanged;
-  final bool restoreOnBoot;
-  final ValueChanged<bool> onRestoreOnBootChanged;
   final VoidCallback onExportBackup;
   final VoidCallback onImportBackup;
 
@@ -4321,8 +4260,6 @@ class _SettingsPageState extends State<_SettingsPage> {
   // this page's own setState and forwards the change up. (The
   // routing-mode copy is optimistic: if the shell rejects the
   // switch it toasts, and the check corrects on next open.)
-  late bool _autoConnect = widget.autoConnect;
-  late bool _restoreOnBoot = widget.restoreOnBoot;
   late bool _rootBootStart = widget.rootBootStart;
   late bool _ipv6Enabled = widget.ipv6Enabled;
   late String _runMode = widget.runMode;
@@ -4408,7 +4345,7 @@ class _SettingsPageState extends State<_SettingsPage> {
               contentPadding: EdgeInsets.zero,
               title: const Text('Root eBPF'),
               subtitle: Text(
-                'root 守护进程＋流量重定向接管，无 TUN 设备；当前 IPv4、全局模式',
+                'root 守护进程＋流量重定向接管，无 TUN 设备；当前 IPv4，出站为${_outMode == 0 ? '规则' : (_outMode == 2 ? '直连' : '全局')}模式',
                 style: TextStyle(color: muted),
               ),
               trailing: _runMode == 'ebpf'
@@ -4530,32 +4467,6 @@ class _SettingsPageState extends State<_SettingsPage> {
           ]),
           const SizedBox(height: 20),
           section('连接', [
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(Icons.power_settings_new),
-              title: const Text('启动后自动连接'),
-              subtitle: Text('打开 FlBox 时自动启动上次的节点',
-                  style: TextStyle(color: muted)),
-              value: _autoConnect,
-              onChanged: (v) {
-                setState(() => _autoConnect = v);
-                widget.onAutoConnectChanged(v);
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(Icons.restart_alt),
-              title: const Text('开机自启恢复'),
-              subtitle: Text(
-                '手机重启后自动恢复上次连接（需在系统里允许 FlBox 自启动）',
-                style: TextStyle(color: muted),
-              ),
-              value: _restoreOnBoot,
-              onChanged: (v) {
-                setState(() => _restoreOnBoot = v);
-                widget.onRestoreOnBootChanged(v);
-              },
-            ),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.schedule_outlined),
@@ -4687,7 +4598,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.68.0-beta · app.flbox · Xray 内核',
+              'FlBox 0.68.1-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

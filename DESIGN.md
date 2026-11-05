@@ -410,3 +410,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **eBPF 仪表盘流量（用户指正「这些都不显示」）**：flboxd 的 --core 子进程每 2 秒把 proxy 出站累计上/下行字节原子写入 root-traffic.json；Dart 轮询改双源（VPN 读进程内计数、Root 读该文件），速率/累计/实时速率曲线共用同一套计算，Root 模式仪表盘不再恒 0/暂无数据。计数器回退（核心重启）处理与 VPN 同逻辑。
 - 待真机验收：①eBPF 规则模式国内直连、国外走代理、Muse 冷启仍通；②直连模式在 VPN/eBPF 下全流量直连；③VPN 模式：NTT（无 v6 出口）启动自动关 v6、机场节点自动开 v6 且真通；④开机自启：开启→重启→不打开应用代理已可用，打开应用能收养会话且状态正确；⑤eBPF 仪表盘速率与累计有数；⑥Root TUN 入口消失、模式组只剩 VPN/Root eBPF。
 - **0.68 内更正（同日，用户改口）**：IPv6 改回**手动开关**（VPN 模式，设置→高级，pref ipv6_enabled，默认关，下次启动生效，进备份）——自动探测整套（_decideVpnIpv6/_probeNodeIpv6/按节点缓存）已移除；**eBPF 模式强制禁用不变**（开关在该模式下置灰锁定、桥配置恒 ipv6=false）。仪表盘状态行随之去掉「（自动）」字样。验收③相应改为：手动开开关＋有 v6 出口的节点启动后 v6 真通、关开关则 v4-only。
+
+## 0.68.1-beta：删两个自启开关（构建号 69，0.68 已被构建过）
+- 用户圈图指定删除设置→连接里的「启动后自动连接」（auto_connect）与「开机自启恢复」（restore_on_boot）：两开关、Shell 侧字段/存储/setter、启动序列的应用侧自动启动分支、备份字段一并移除；打开应用不再自动启动任何会话（Root 开机自启走 service.d 脚本＋resync 收养，VPN 手动点按钮）。was_running 记账随之删除。AndroidManifest 注销 BootReceiver（其类文件因 push-files 无删除通道留仓但已无注册、永不触发）。
+- 顺手修：设置页 Root eBPF 副文案写死「全局模式」，改为跟随当前出站模式（规则/全局/直连）。
+- 真机另发现（待用户拍板）：eBPF 的 IPv6「禁用」实为桥不接管——bpf2socks 在 enableIpv6=false 时不改写 v6 流量，v6 沿系统路由直连（IPCheck 实证出口为广电山西真地址），与旧 iptables 版 eBPF 的丢弃式禁用（宁断不漏）不同；换桥时丢弃没跟过来。修法候选：flboxd 在桥会话期间维护 ip6tables 非本地 v6 出站 DROP、停会话清除。
