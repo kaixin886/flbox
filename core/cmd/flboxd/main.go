@@ -395,7 +395,13 @@ func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	bridge := childCmd(bridgeBin, "--start", "--config", bridgeConfigPath, "--pid", "/dev/null")
+	// --dns-enhancement is how AS gets system-resolver
+	// queries captured: netd marks its DNS sockets, and
+	// only with this flag does the bridge force-proxy
+	// marked port-53 traffic. Without it those queries
+	// egressed via the carrier resolver (the DNS leak
+	// tests showed the carrier in every mode).
+	bridge := childCmd(bridgeBin, "--start", "--config", bridgeConfigPath, "--pid", "/dev/null", "--dns-enhancement")
 	if err := bridge.Start(); err != nil {
 		_ = core.Process.Signal(syscall.SIGTERM)
 		<-coreDone

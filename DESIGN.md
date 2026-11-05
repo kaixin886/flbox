@@ -481,3 +481,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 
 ## 0.71.2-beta2：代理页删当前订阅头卡（构建号 81）
 - 用户圈图点名删除 0.71.1 保留的当前订阅头部卡（名称＋已选节点＋本地/订阅角标）。代理页改为直接从「N 个节点」工具行开始；groupHeader 构建器、ProxiesPage 的 subs/activeSubId/onSwitchSub 三个入参一并清除。切换订阅仍只走配置页。
+
+## 0.71.2-beta3：eBPF DNS 出口修复——桥加 --dns-enhancement（构建号 82）
+- 用户 15:45 报 eBPF 模式 DNS 出口检测显示中国（AS 显示 Google/美国），16:09/16:11 对照实证：FlBox 规则与全局两模式出口均为山西移动 IDC 183.201.217.57/.58，即运营商递归 DNS。全局模式核心 DNS 只有 8.8.8.8 经节点、仍漏 → 定位不在核心分流、在抓取层。
+- AS 源码定案：asteriskd 启动 bpf2socks 时带 `--dns-enhancement`（App 侧需 本地DNS＋应用列表增强 两开关同开）。桥 config_load 的 dns_enhancement 只来自 argv 非配置文件；开启后 cgroup 程序读端口 53 socket 的 fwmark：命中 DNS_PROXY_DECISION 的强制代理、DNS_DIRECT_MARK 的放行，并给热点 UID 强制代理。安卓系统解析器（netd）发出的查询带这类 mark；不开增强时「legacy 模式保留既有 UDP 行为」——标记查询不被强制抓取，顺运营商 DNS 直出，这正是两模式同漏的原因。FlBox 内嵌的桥是同一份上游源码、一直支持该旗标，只是 flboxd 启动桥时从未传。
+- 修法：flboxd 拉桥命令加 --dns-enhancement（probe 不带，与 AS 一致）。预期真机：DNS 出口检测在规则/全局两模式均显示 Google/美国，与 AS 一致。待真机验收。
