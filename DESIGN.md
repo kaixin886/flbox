@@ -448,3 +448,7 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 用户在 0.70.2 上验收反馈：普通模式开 IPv6 用 NTT（无 v6 出口）没 v6、换带 v6 的节点正常（符合预期）；并要求「把 eBPF 强制关闭的关了，让他也能自己开关」。
 - 改动三处：设置页 IPv6 开关在 eBPF 下解禁（值与回调与 VPN 共用，副文案改 eBPF 版）；根配置生成把开关真值传给桥配置（此前恒 false），经既有 FFI 参数落到桥 JSON 的 enableIpv6；flboxd 读桥配置决定守卫去留——enableIpv6=true 时守卫不启动（日志打 `ipv6 guard: off`）、桥自行尝试接管 v6 走节点，false/读不到时守卫照常（安全默认，含开机脚本的旧配置）。
 - 预期与 AS 一致：root 数据面 v6 普遍不稳，此开关在 eBPF 下定位为用户自主要求的实验位；关态仍是宁断不漏的守卫语义。
+
+## 0.70.4-beta：普通模式 UDP 全灭修复（构建号 75）
+- 用户报普通模式下 IPCheck 的 WebRTC/STUN 四项全「连接错误」，AS 正常。定案在 Xray 源码：mixed 就是 socks 服务的别名，其 UDP associate 仅在入站 settings 带 `"udp": true` 时启用（infra/conf/socks.go 的 UDP 字段默认 false、proxy/socks 按 UdpEnabled 决定是否处理）；FlBox 的 7890 混合入站从 0.23 转发器架构起就没带 settings，转发器送来的 UDP 在核心门口被拒——TCP 一切正常，所以日常浏览毫无症状，只有 STUN/游戏/语音这类纯 UDP 暴露。eBPF 模式的桥面入站一直有 udp:true，未中招。
+- 出站侧核过：Xray 本版 VLESS 出站对 vision 流量的 UDP 会转 mux 经 TCP 连接送达（仅 UDP/443 被 XTLS 拒，STUN 端口 3478/19302 不受影响），故入口开 UDP 即全线通。修法：入站补 `"settings": {"udp": true}` 一行。

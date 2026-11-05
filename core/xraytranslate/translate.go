@@ -433,6 +433,12 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 			"listen":   "127.0.0.1",
 			"port":     7890,
 			"protocol": "mixed",
+			// Without this the socks server refuses UDP
+			// associate outright (Xray default) and every
+			// app UDP flow dies at the core's front door:
+			// WebRTC/STUN, game and voice UDP. The
+			// forwarder feeds UDP as SOCKS5 associate.
+			"settings": map[string]any{"udp": true},
 			"sniffing": map[string]any{
 				"enabled":      true,
 				"destOverride": []string{"http", "tls", "quic"},
