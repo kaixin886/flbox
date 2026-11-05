@@ -518,11 +518,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _restoreOnBoot = false;
   bool _wasRunning = false;
   bool _notifyOnStart = true;
-  /// The VPN session's effective IPv6 state, decided per
-  /// node at start (0.68): true only when a probe through
-  /// the node proved an IPv6 egress. Persisted so a resync
-  /// that restarts the forwarder on a surviving tunnel
-  /// reuses the value the tunnel was built with.
+  /// The manual IPv6 switch (0.34's preference, restored
+  /// in 0.68 after the user reversed the same-day
+  /// automatic-probe change): when on, the VPN tunnel
+  /// takes over IPv6 at the next start. eBPF mode ignores
+  /// it - IPv6 there is force-disabled.
+  bool _ipv6Enabled = false;
+
+  /// The running VPN session's IPv6 state, captured from
+  /// the switch at start and persisted: a resync that
+  /// restarts the forwarder on a surviving tunnel rebuilds
+  /// it the way the tunnel was built, even if the switch
+  /// moved mid-session or the process restarted.
   bool _vpnIpv6 = false;
   bool _rootBootStart = false;
   String _runMode = 'vpn';
@@ -648,6 +655,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _wasRunning = prefs.getBool('was_running') ?? false;
     _notifyOnStart = prefs.getBool('notify_on_start') ?? true;
     _notifySubUpdate = prefs.getBool('notify_sub_update') ?? true;
+    _ipv6Enabled = prefs.getBool('ipv6_enabled') ?? false;
     _vpnIpv6 = prefs.getBool('vpn_ipv6_effective') ?? false;
     _rootBootStart = prefs.getBool('root_boot_start') ?? false;
     _runMode = prefs.getString('run_mode') ?? 'vpn';
@@ -1141,6 +1149,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           'notify_on_start': _notifyOnStart,
           'notify_sub_update': _notifySubUpdate,
           'root_boot_start': _rootBootStart,
+          'ipv6_enabled': _ipv6Enabled,
           'run_mode': _runMode,
           'sub_auto_interval_hours': _subAutoIntervalHours,
           'nav_style': _navStyle.index,
@@ -1216,6 +1225,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       var notifyOnStart = _notifyOnStart;
       var notifySubUpdate = _notifySubUpdate;
       var rootBootStart = _rootBootStart;
+      var ipv6Enabled = _ipv6Enabled;
       var intervalHours = _subAutoIntervalHours;
       var navStyle = _navStyle;
       var favNodes = _favNodes;
@@ -1237,6 +1247,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         notifyOnStart = bb('notify_on_start', notifyOnStart);
         notifySubUpdate = bb('notify_sub_update', notifySubUpdate);
         rootBootStart = bb('root_boot_start', rootBootStart);
+        ipv6Enabled = bb('ipv6_enabled', ipv6Enabled);
         if (bp['run_mode'] is String) runMode = bp['run_mode'] as String;
         if (runMode == 'root_tun') runMode = 'vpn';
         bypassEnabled = bb('bypass_enabled', bypassEnabled);
@@ -1270,6 +1281,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _notifyOnStart = notifyOnStart;
         _notifySubUpdate = notifySubUpdate;
         _rootBootStart = rootBootStart;
+        _ipv6Enabled = ipv6Enabled;
         _runMode = runMode;
         _subAutoIntervalHours = intervalHours;
         _navStyle = navStyle;
@@ -1284,6 +1296,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await prefs.setBool('notify_on_start', notifyOnStart);
       await prefs.setBool('notify_sub_update', notifySubUpdate);
       await prefs.setBool('root_boot_start', rootBootStart);
+      await prefs.setBool('ipv6_enabled', ipv6Enabled);
       await prefs.setString('run_mode', runMode);
       await prefs.setInt('sub_auto_interval_hours', intervalHours);
       await prefs.setInt('nav_style', navStyle.index);
@@ -1332,12 +1345,15 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// Subscription editor (the netproxy-style form): name, link,
   /// per-subscription auto-update period, update route, and the
   /// node name filters applied on every refresh.
-  /// Settings-page wording for the automatic IPv6 behaviour.
-  String get _ipv6StatusText {
-    if (_runMode == 'ebpf') return 'Root 模式自动禁用';
-    if (_running && _vpnIpv6) return '已启用（当前节点支持 IPv6）';
-    if (_running) return '已自动禁用（当前节点无 IPv6 服务）';
-    return '启动时按节点自动检测';
+  /// The manual IPv6 switch: persisted at once, applied
+  /// at the next VPN start (the tunnel's shape is fixed
+  /// when the VpnService builds it). eBPF mode never
+  /// consults it.
+  Future<void> _setIpv6Enabled(bool v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('ipv6_enabled', v);
+    if (mounted) setState(() => _ipv6Enabled = v);
+    _toast(v ? 'IPv6 已开启，下次启动 VPN 时生效' : 'IPv6 已关闭，下次启动 VPN 时生效');
   }
 
   /// Root-mode boot autostart (0.68, AsteriskNG's design):
@@ -2613,13 +2629,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       }
       await _rotateLogIfHuge();
       CoreBridge().xrayStart(config, 0);
-      // IPv6 is automatic since 0.68: probe the node's
-      // egress through the freshly started core BEFORE the
-      // tunnel exists, because the VpnService builder and
-      // the forwarder both need the verdict up front. A
-      // node without an IPv6 egress gets a v4-only tunnel,
-      // so apps never chase AAAA answers into a black hole.
-      final v6 = await _decideVpnIpv6();
+      // IPv6 follows the manual switch: the VpnService
+      // builder and the forwarder both take the value up
+      // front, and the session records it.
+      final v6 = _ipv6Enabled;
       _tunReady = Completer<int>();
       await _vpnChannel.invokeMethod('startVpn', {
         'bypass': _bypassPkgs.toList(),
@@ -2637,9 +2650,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       unawaited(SharedPreferences.getInstance()
           .then((p) => p.setBool('vpn_ipv6_effective', v6)));
       _logEvent('vpn forwarder started (sing-box tun -> 127.0.0.1:7890)');
-      _logEvent(v6
-          ? 'ipv6 auto: enabled (node has an IPv6 egress)'
-          : 'ipv6 auto: disabled (node has no IPv6 egress)');
+      _logEvent('ipv6 manual: ${v6 ? 'on' : 'off'}');
       _logEvent('core started (mode=$_outModeName, node=$_selectedNode)');
       _startedAt = DateTime.now();
       setState(() => _running = true);
@@ -2660,112 +2671,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await _showStartError(e);
     } finally {
       if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  /// Decides the VPN tunnel's IPv6 shape for the selected
-  /// node: a cached verdict when this node was probed
-  /// before, otherwise a live probe through the running
-  /// core. The cache is keyed by node name; a same-named
-  /// node in another subscription reuses the verdict, which
-  /// is acceptable for a personal client.
-  Future<bool> _decideVpnIpv6() async {
-    final node = _selectedNode;
-    if (node == null) return false;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      var cache = <String, dynamic>{};
-      final raw = prefs.getString('ipv6_probe_cache');
-      if (raw != null) {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map<String, dynamic>) cache = decoded;
-      }
-      final hit = cache[node];
-      if (hit is bool) {
-        _logEvent('ipv6 auto: cached verdict for $node: $hit');
-        return hit;
-      }
-      final ok = await _probeNodeIpv6();
-      cache[node] = ok;
-      await prefs.setString('ipv6_probe_cache', jsonEncode(cache));
-      _logEvent('ipv6 auto: probed $node: '
-          '${ok ? 'IPv6 egress found' : 'no IPv6 egress'}');
-      return ok;
-    } catch (e) {
-      _logEvent('ipv6 auto: decision failed: $e');
-      return false;
-    }
-  }
-
-  /// An IPv6 egress exists iff a TCP connect to a well-known
-  /// IPv6 anycast address succeeds through the node's
-  /// outbound. The probe is a SOCKS5 CONNECT to a literal
-  /// IPv6 address through the local mixed inbound, so DNS
-  /// plays no part and the answer describes the node, not
-  /// the local network.
-  Future<bool> _probeNodeIpv6() async {
-    for (final target in const [
-      '2606:4700:4700::1111',
-      '2606:4700:4700::1001',
-    ]) {
-      if (await _socksConnectV6(target, 443)) return true;
-    }
-    return false;
-  }
-
-  Future<bool> _socksConnectV6(String address, int port) async {
-    Socket? socket;
-    StreamSubscription<List<int>>? sub;
-    try {
-      // The freshly started core may need a moment to bind.
-      for (var i = 0; i < 10 && socket == null; i++) {
-        try {
-          socket = await Socket.connect('127.0.0.1', 7890);
-        } catch (_) {
-          await Future<void>.delayed(const Duration(milliseconds: 200));
-        }
-      }
-      final s = socket;
-      if (s == null) return false;
-      final buf = <int>[];
-      final signal = StreamController<void>.broadcast();
-      sub = s.listen(
-        (d) {
-          buf.addAll(d);
-          if (!signal.isClosed) signal.add(null);
-        },
-        onError: (_) {
-          if (!signal.isClosed) signal.close();
-        },
-        onDone: () {
-          if (!signal.isClosed) signal.close();
-        },
-      );
-      Future<bool> need(int n) async {
-        if (buf.length >= n) return true;
-        try {
-          await for (final _ in signal.stream.timeout(
-            const Duration(seconds: 6),
-          )) {
-            if (buf.length >= n) return true;
-          }
-        } catch (_) {}
-        return buf.length >= n;
-      }
-
-      s.add(const [5, 1, 0]);
-      if (!await need(2)) return false;
-      if (buf[0] != 5 || buf[1] != 0) return false;
-      buf.clear();
-      final raw = InternetAddress(address).rawAddress;
-      s.add([5, 1, 0, 4, ...raw, (port >> 8) & 0xff, port & 0xff]);
-      if (!await need(4)) return false;
-      return buf[1] == 0;
-    } catch (_) {
-      return false;
-    } finally {
-      await sub?.cancel();
-      socket?.destroy();
     }
   }
 
@@ -3225,7 +3130,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           onRestoreOnBootChanged: _setRestoreOnBoot,
           autoIntervalHours: _subAutoIntervalHours,
           onAutoIntervalChanged: _setSubAutoInterval,
-          ipv6Status: _ipv6StatusText,
+          ipv6Enabled: _ipv6Enabled,
+          onIpv6Changed: _setIpv6Enabled,
           rootBootStart: _rootBootStart,
           onRootBootStartChanged: _setRootBootStart,
           runMode: _runMode,
@@ -3943,7 +3849,7 @@ class _DashboardPage extends StatelessWidget {
       statusDetail = ebpfMode
           ? 'Xray 核心 · bpf2socks 桥 · eBPF 模式'
           : 'Xray 核心 · sing-box 数据通路 · VPN 模式'
-              '${vpnIpv6 ? ' · IPv6 开' : ' · IPv6 关（自动）'}';
+              '${vpnIpv6 ? ' · IPv6 开' : ' · IPv6 关'}';
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
     } else {
@@ -4356,7 +4262,8 @@ class _SettingsPage extends StatefulWidget {
     required this.onAutoConnectChanged,
     required this.autoIntervalHours,
     required this.onAutoIntervalChanged,
-    required this.ipv6Status,
+    required this.ipv6Enabled,
+    required this.onIpv6Changed,
     required this.rootBootStart,
     required this.onRootBootStartChanged,
     required this.runMode,
@@ -4387,7 +4294,8 @@ class _SettingsPage extends StatefulWidget {
   final ValueChanged<bool> onAutoConnectChanged;
   final int autoIntervalHours;
   final ValueChanged<int> onAutoIntervalChanged;
-  final String ipv6Status;
+  final bool ipv6Enabled;
+  final ValueChanged<bool> onIpv6Changed;
   final bool rootBootStart;
   final ValueChanged<bool> onRootBootStartChanged;
   final String runMode;
@@ -4416,6 +4324,7 @@ class _SettingsPageState extends State<_SettingsPage> {
   late bool _autoConnect = widget.autoConnect;
   late bool _restoreOnBoot = widget.restoreOnBoot;
   late bool _rootBootStart = widget.rootBootStart;
+  late bool _ipv6Enabled = widget.ipv6Enabled;
   late String _runMode = widget.runMode;
   late bool _notifyOnStart = widget.notifyOnStart;
   late bool _notifySubUpdate = widget.notifySubUpdate;
@@ -4677,14 +4586,23 @@ class _SettingsPageState extends State<_SettingsPage> {
           ]),
           const SizedBox(height: 20),
           section('高级', [
-            ListTile(
+            SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.language_outlined),
-              title: const Text('IPv6（自动）'),
+              secondary: const Icon(Icons.language_outlined),
+              title: const Text('IPv6'),
               subtitle: Text(
-                '${widget.ipv6Status}。VPN 模式启动时检测节点是否有 IPv6 出口、没有就自动禁用；Root 模式一律禁用。无需手动设置',
+                _runMode == 'ebpf'
+                    ? 'eBPF 模式强制禁用，与此开关无关'
+                    : 'VPN 模式手动开关，下次启动时生效；节点没有 IPv6 出口时开启，v6 流量会进隧道失败、应用自动回落 IPv4，不会直连泄漏',
                 style: TextStyle(color: muted),
               ),
+              value: _runMode == 'ebpf' ? false : _ipv6Enabled,
+              onChanged: _runMode == 'ebpf'
+                  ? null
+                  : (v) {
+                      setState(() => _ipv6Enabled = v);
+                      widget.onIpv6Changed(v);
+                    },
             ),
           ]),
           const SizedBox(height: 20),
