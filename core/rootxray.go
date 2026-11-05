@@ -22,7 +22,7 @@ import (
 // Shape: the translator's per-node config, with the
 // front end replaced by the bridge-facing SOCKS inbound
 // and AsteriskNG's DNS plan (copied in 0.71.2-beta4):
-// a "localhost" server gated to CN domains and the
+// a domestic UDP server gated to CN domains and the
 // node's own server domain, a DNS-over-HTTPS server
 // for the rest, and per-server tags steering the
 // client's own queries (direct-dns out direct, the
@@ -122,21 +122,25 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, lo
 		},
 	}
 	serverIsDomain := serverHost != "" && net.ParseIP(serverHost) == nil
-	// AS's DNS plan verbatim (its defaults): the direct
-	// server is "localhost" - the core asks the system
-	// resolver itself - gated to CN domains plus the
-	// node's server domain; everything else goes to
-	// Google over DNS-over-HTTPS. FlBox's earlier shape
-	// (plain-UDP 223.5.5.5/8.8.8.8 upstreams) is the one
-	// whose leak tests exited via the carrier on this
-	// phone while AS exited via Google.
+	// AS's DNS plan, with one device-forced deviation:
+	// AS's direct server is "localhost" (the core asks
+	// the system resolver itself), but inside this
+	// daemon netd refuses the core's resolver queries
+	// outright - "lookup ... on [::1]:53: read:
+	// connection refused", 61 times in the 2026-11-05
+	// device log, every CN lookup dead while DoH
+	// answered fine. So the gated direct server is a
+	// plain-UDP domestic resolver instead, dialed
+	// through routing like any other traffic; the gate
+	// (CN domains plus the node's server domain),
+	// skipFallback and the DoH server stay AS's.
 	directDomains := []string{"geosite:cn"}
 	if serverIsDomain {
 		directDomains = append(directDomains, "domain:"+serverHost)
 	}
 	dnsServers := []any{
 		map[string]any{
-			"address":      "localhost",
+			"address":      "223.5.5.5",
 			"domains":      directDomains,
 			"skipFallback": true,
 			"tag":          "direct-dns",
@@ -145,7 +149,7 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, lo
 	}
 	if routeMode == routeDirect {
 		dnsServers = []any{
-			map[string]any{"address": "localhost", "tag": "direct-dns"},
+			map[string]any{"address": "223.5.5.5", "tag": "direct-dns"},
 		}
 	}
 	queryStrategy := "UseIPv4"
@@ -219,13 +223,18 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, lo
 		"rules":          rules,
 	}
 	outbounds, _ := cfg["outbounds"].([]any)
-	// The proxy outbound must resolve the node's server
-	// domain through the DNS client (see the header
-	// comment): merge sockopt.domainStrategy into
-	// whatever streamSettings the translator produced.
+	// The proxy and direct outbounds must resolve domain
+	// destinations through the DNS client, never the OS
+	// resolver (see the header comment): the proxy for
+	// the node's server domain, the direct outbound for
+	// sniffed CN destinations like wx.qlogo.cn, whose
+	// system-resolver lookups died on the same [::1]:53
+	// refusals in the 2026-11-05 device log. Merge
+	// sockopt.domainStrategy into whatever
+	// streamSettings the translator produced.
 	for _, ob := range outbounds {
 		o, _ := ob.(map[string]any)
-		if o["tag"] != "proxy" {
+		if o["tag"] != "proxy" && o["tag"] != "direct" {
 			continue
 		}
 		stream, _ := o["streamSettings"].(map[string]any)
@@ -238,12 +247,24 @@ func rootXrayConfig(clashYAML, selectedNode string, routeMode int, ipv6 bool, lo
 			sockopt = map[string]any{}
 			stream["sockopt"] = sockopt
 		}
-		sockopt["domainStrategy"] = "UseIPv4"
+		strategy := "UseIPv4"
+		if o["tag"] == "direct" {
+			strategy = queryStrategy
+		}
+		sockopt["domainStrategy"] = strategy
 	}
-	cfg["outbounds"] = append(outbounds, map[string]any{
-		"tag":      "dns",
-		"protocol": "dns",
-	})
+	hasDNSOutbound := false
+	for _, ob := range outbounds {
+		if o, _ := ob.(map[string]any); o["tag"] == "dns" {
+			hasDNSOutbound = true
+		}
+	}
+	if !hasDNSOutbound {
+		cfg["outbounds"] = append(outbounds, map[string]any{
+			"tag":      "dns",
+			"protocol": "dns",
+		})
+	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return "", err

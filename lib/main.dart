@@ -2351,7 +2351,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (await daemonLog.exists()) await daemonLog.rename(prevLog.path);
       await daemonLog.writeAsString(
         '===== flboxd session ${DateTime.now().toIso8601String()} '
-        'mode=ebpf node=$_selectedNode ipv6=false =====\n',
+        'mode=ebpf node=$_selectedNode ipv6=$_ipv6Enabled =====\n',
       );
     } catch (_) {}
     final ok =
@@ -4842,7 +4842,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.71.2-beta5 · app.flbox · Xray 内核',
+              'FlBox 0.71.2-beta6 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -6513,6 +6513,42 @@ class _LogsPageState extends State<LogsPage> {
     } catch (_) {}
   }
 
+  Future<void> _export() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final file = File('${docs.path}/${_files[_source]}');
+      if (!await file.exists()) {
+        setState(() => _status = '该日志尚不存在，无法导出');
+        return;
+      }
+      final bytes = await file.readAsBytes();
+      final stamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '')
+          .split('.')
+          .first;
+      final name =
+          'flbox-${_files[_source].replaceAll('.log', '')}-$stamp.log';
+      String? saved;
+      try {
+        saved = await FilePicker.platform.saveFile(
+          dialogTitle: '保存日志文件',
+          fileName: name,
+          bytes: bytes,
+        );
+      } catch (_) {
+        saved = null;
+      }
+      if (mounted) {
+        setState(
+          () => _status = saved != null ? '日志已导出：$name' : '导出已取消或保存失败',
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _status = '导出失败：$e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final muted =
@@ -6561,6 +6597,7 @@ class _LogsPageState extends State<LogsPage> {
                   child: Text(_loading ? '刷新中…' : '刷新日志'),
                 ),
                 const Spacer(),
+                TextButton(onPressed: _export, child: const Text('导出文件')),
                 TextButton(onPressed: _clear, child: const Text('清空')),
               ],
             ),

@@ -9,6 +9,7 @@ package xraytranslate
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -492,8 +493,69 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 			"outboundTag": finalTag,
 		},
 	)
+	// The DNS plan is AsteriskNG's, the same one root mode
+	// runs (rootxray.go): a "localhost" server gated to CN
+	// domains and the node's own server domain, a
+	// DNS-over-HTTPS server for the rest, per-server tags
+	// steering the client's own queries (direct-dns out
+	// direct, the rest out the final exit). App DNS
+	// arriving through the forwarder still targets the
+	// carrier resolver, so the first routing rule sends
+	// port 53 to the dns outbound and this client answers
+	// it; before, that traffic fell through to the final
+	// rule as raw UDP and the carrier resolver answered,
+	// which is why VPN mode's leak tests exited via the
+	// carrier while root mode's exited via Google. In
+	// direct mode only the domestic server remains. The
+	// gated server is a plain-UDP resolver, not AS's
+	// "localhost": inside the root daemon netd refuses
+	// the core's system-resolver queries on [::1]:53
+	// (device-proven), and both modes keep one plan.
+	directDomains := []string{"geosite:cn"}
+	if p.Server != "" && net.ParseIP(p.Server) == nil {
+		directDomains = append(directDomains, "domain:"+p.Server)
+	}
+	dnsServers := []any{
+		map[string]any{
+			"address":      "223.5.5.5",
+			"domains":      directDomains,
+			"skipFallback": true,
+			"tag":          "direct-dns",
+		},
+		"https://8.8.8.8/dns-query",
+	}
+	if opts.Direct {
+		dnsServers = []any{
+			map[string]any{"address": "223.5.5.5", "tag": "direct-dns"},
+		}
+	}
+	dnsCfg := map[string]any{
+		"tag":           "proxy-dns",
+		"queryStrategy": "UseIP",
+		"servers":       dnsServers,
+	}
+	routingRules = append([]any{
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{"in", "tun"},
+			"network":     "tcp,udp",
+			"port":        "53",
+			"outboundTag": "dns",
+		},
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{"direct-dns"},
+			"outboundTag": "direct",
+		},
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{"proxy-dns"},
+			"outboundTag": finalTag,
+		},
+	}, routingRules...)
 	cfg := map[string]any{
 		"log":   logCfg,
+		"dns":   dnsCfg,
 		"stats": map[string]any{},
 		"policy": map[string]any{
 			"system": map[string]any{
@@ -504,30 +566,24 @@ func buildConfig(p clashProxy, opts Options) (string, error) {
 		"inbounds": inbounds,
 		"outbounds": []any{
 			outbound,
-			map[string]any{"tag": "direct", "protocol": "freedom"},
+			map[string]any{
+				"tag":      "direct",
+				"protocol": "freedom",
+				// Domain destinations resolve through the
+				// DNS client, not the OS resolver - the
+				// root daemon's OS resolver is refused by
+				// netd, and both modes keep one behavior.
+				"streamSettings": map[string]any{
+					"sockopt": map[string]any{"domainStrategy": "UseIP"},
+				},
+			},
 			map[string]any{"tag": "block", "protocol": "blackhole"},
+			map[string]any{"tag": "dns", "protocol": "dns"},
 		},
 		"routing": map[string]any{
 			"domainStrategy": domainStrategy,
 			"rules":          routingRules,
 		},
-	}
-	if opts.Rules && !opts.Direct {
-		// Split DNS, v2rayNG-style: CN domains resolve locally
-		// (and must come back with CN IPs), the rest through the
-		// proxied resolver. IPIfNonMatch's internal resolutions
-		// go through this client too, so routing and DNS agree.
-		cfg["dns"] = map[string]any{
-			"queryStrategy": "UseIP",
-			"servers": []any{
-				map[string]any{
-					"address":     "223.5.5.5",
-					"domains":     []string{"geosite:cn"},
-					"expectedIPs": []string{"geoip:cn"},
-				},
-				"8.8.8.8",
-			},
-		}
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {

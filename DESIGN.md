@@ -498,3 +498,10 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 真机定案（2026-11-05 17:00–17:06）：用户清除 FlBox 数据后 eBPF 启动必失败，报错 bridge probe failed／BPF hook 10 conflict（connect4 独占钩子上是真实程序而非安卓放行占位）；AS 同刻启动也死于 apply_rules；把两个软件都卸载后占用依旧。真身：flboxd 是 su 拉起的脱离式 root 进程，清数据删掉的恰是应用停它用的状态文件，卸载更不会给它发信号——孤儿会话一直挂着桥的 cgroup 钩子，后来的每次启动都撞上自己的前任。用户以 Termux `su -c "pkill -TERM -f flboxd"` 手动回收成功（守护进程收到 TERM 会走正常关停、桥退出时恢复钩子）。
 - 修法：flboxd 监督者在探针之前先 reclaimPreviousSession——扫描 /proc，对同目录（自身所在目录）下其他 flboxd/bpf2socks 进程先 SIGTERM 等 3 秒、残存 SIGKILL，再跑一次桥 `--stop`（--pid /dev/null，只做 pinned 程序 reconcile，兜底硬杀残留的挂载）。只按 argv[0] 的目录＋文件名匹配，自家启动链（su/sh 的 argv[0] 不在此列）不会误伤。
 - 待真机验收：装 beta5 后不清数据直接覆盖装、或先清数据再启动，eBPF 均应能正常拉起；beta4 的 DNS 验收（出口 Google/美国、国内软件连通）仍在本版一并验。
+
+## 0.71.2-beta6：核心去系统解析器依赖＋普通模式 DNS 对齐＋日志导出（构建号 85）
+- beta4 真机验收（2026-11-05 17:10–17:16）：DNS 出口四项全 Google/美国——通过；但 eBPF 规则模式 IPv6 关时国内仍全灭。用户导出守护日志全文定案：核心 DNS 的 localhost 服务器查询被 netd 在 [::1]:53 拒答（connection refused，一次会话 61 处，如 lhp.map.qq.com、szshort.mixpay.wechatpay.cn），skipFallback 下国内域名返回 nil；freedom 直连出站解析嗅探到的域名目的地（wx.qlogo.cn、paydns.weixin.qq.com）走系统解析器、同死于 [::1]:53（direct 出站从未配 domainStrategy，只有 proxy 出站 0.67 配了）。DoH 路径完好。AS 同方案能活是其守护进程上下文差异，FlBox 守护内 localhost 实证为死路。
+- 修法（根模式 rootxray.go）：门控直连服务器 localhost→223.5.5.5（明文 UDP、经路由直出，门控/skipFallback/DoH 不动）；direct 出站补 sockopt.domainStrategy（随 queryStrategy），与 proxy 出站同等待遇——核心内一切域名解析只走 DNS 客户端。
+- 普通模式对齐（xraytranslate，beta5 后本地已先行移植 AS 方案全套：dns 出站＋53 端口规则＋服务器标签钉路由、全模式生效）：本版把其直连服务器同步换 223.5.5.5、freedom 出站补 domainStrategy=UseIP。原旧形状（223.5.5.5 门控＋expectedIPs＋8.8.8.8 明文、无 dns 出站）退役——那正是普通模式 DNS 出口偏运营商的原因（应用 DNS 顺最终规则以原始 UDP 落到运营商解析器）。
+- 附带：日志页加「导出文件」按钮（当前源整文件经系统保存对话框导出，用户 17:17 点名）；守护会话横幅的 ipv6 字段原为硬编码 false，本版改写真值（本次诊断曾被它误导：实为桥配置 enableIpv6 决定守卫，本会话守卫未启动与配置一致、非键名不一致）。
+- 含 beta5 全部内容（守护自回收），beta5 未单独构建。待真机验收：eBPF 规则模式 IPv6 关＋系统级禁用开时国内软件可开、DNS 出口仍 Google；普通模式 DNS 出口转 Google；日志导出可用。

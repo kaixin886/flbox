@@ -40,8 +40,14 @@ func TestRulesModePreset(t *testing.T) {
 		`"domainStrategy":"IPIfNonMatch"`,
 		`"geosite:cn"`,
 		`"geoip:cn"`,
-		`"223.5.5.5"`,
-		`"expectedIPs":["geoip:cn"]`,
+		`"address":"223.5.5.5"`,
+		`"skipFallback":true`,
+		`"tag":"direct-dns"`,
+		`"https://8.8.8.8/dns-query"`,
+		`"domainStrategy":"UseIP"`,
+		`"sockopt":{"domainStrategy":"UseIP"}`,
+		`"port":"53"`,
+		`"protocol":"dns"`,
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Fatalf("rules-mode config missing %s\n%s", want, cfg)
@@ -64,7 +70,10 @@ func TestRulesModePreset(t *testing.T) {
 	if !strings.Contains(cfg2, `"domainStrategy":"AsIs"`) {
 		t.Fatalf("global mode must stay AsIs\n%s", cfg2)
 	}
-	if strings.Contains(cfg2, "geosite:cn") || strings.Contains(cfg2, "223.5.5.5") {
-		t.Fatalf("global mode must not contain the preset\n%s", cfg2)
+	if strings.Contains(cfg2, `"ip":["geoip:cn"]`) {
+		t.Fatalf("global mode must not contain the routing preset\n%s", cfg2)
+	}
+	if !strings.Contains(cfg2, `"https://8.8.8.8/dns-query"`) {
+		t.Fatalf("global mode must still carry the DNS plan\n%s", cfg2)
 	}
 }

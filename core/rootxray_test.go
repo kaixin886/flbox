@@ -92,12 +92,12 @@ func TestRootXrayShapeDomainNode(t *testing.T) {
 	}
 	direct := servers[0].(map[string]any)
 	domains := direct["domains"].([]any)
-	if direct["address"] != "localhost" ||
+	if direct["address"] != "223.5.5.5" ||
 		direct["tag"] != "direct-dns" ||
 		direct["skipFallback"] != true ||
 		len(domains) != 2 || domains[0] != "geosite:cn" ||
 		domains[1] != "domain:a.example.com" {
-		t.Errorf("direct server wrong (AS plan: localhost for CN + node domain): %v", direct)
+		t.Errorf("direct server wrong (gated domestic server for CN + node domain): %v", direct)
 	}
 	if servers[1] != "https://8.8.8.8/dns-query" {
 		t.Errorf("second server = %v, want the DoH proxy server", servers[1])
@@ -109,6 +109,20 @@ func TestRootXrayShapeDomainNode(t *testing.T) {
 	sockopt := proxy["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
 	if sockopt["domainStrategy"] != "UseIPv4" {
 		t.Errorf("proxy outbound sockopt = %v, want domainStrategy UseIPv4", sockopt)
+	}
+	// The direct outbound needs the same treatment: it
+	// dials sniffed domain destinations (wx.qlogo.cn),
+	// and OS-resolver lookups for those died on the
+	// same netd refusal in the 2026-11-05 device log.
+	for _, ob := range cfg["outbounds"].([]any) {
+		o := ob.(map[string]any)
+		if o["tag"] != "direct" {
+			continue
+		}
+		so := o["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
+		if so["domainStrategy"] != "UseIPv4" {
+			t.Errorf("direct outbound sockopt = %v, want domainStrategy UseIPv4 with IPv6 off", so)
+		}
 	}
 	rules := cfg["routing"].(map[string]any)["rules"].([]any)
 	first := rules[0].(map[string]any)
@@ -215,8 +229,8 @@ func TestRootXrayShapeRules(t *testing.T) {
 		t.Fatalf("rule mode dns servers = %v, want direct + DoH like every mode", servers)
 	}
 	cn := servers[0].(map[string]any)
-	if cn["address"] != "localhost" || cn["domains"].([]any)[0] != "geosite:cn" {
-		t.Errorf("first server must be the localhost CN split: %v", cn)
+	if cn["address"] != "223.5.5.5" || cn["domains"].([]any)[0] != "geosite:cn" {
+		t.Errorf("first server must be the gated CN split: %v", cn)
 	}
 }
 
