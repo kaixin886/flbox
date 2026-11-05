@@ -493,3 +493,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 因 DNS 方案在所有模式引用 geosite:cn，_startRootDaemon 启动前无条件 _ensureGeoData（此前仅规则模式在 init 时备）。
 - 桥配置对齐 AS 默认：bypassPrivateCidrsV4/V6 换 AS 的 RootDefaultBypassPrivateCidrs 全表，显式写 tokenIpv4Prefix 127.128.0.0/9、tokenIpv6Prefix fd7a:7374:6572:6973::/64，policy 补 bypassUids 空表。
 - 待真机验收：eBPF 规则/全局两模式 DNS 出口应为 Google/美国；IPv6 关＋系统级禁用开时国内软件应可连（若仍需 v6，则与 AS 的差别只剩守卫本身，用户 AS 里该开关本就关着）。
+
+## 0.71.2-beta5：守护进程自回收上一会话（构建号 84）
+- 真机定案（2026-11-05 17:00–17:06）：用户清除 FlBox 数据后 eBPF 启动必失败，报错 bridge probe failed／BPF hook 10 conflict（connect4 独占钩子上是真实程序而非安卓放行占位）；AS 同刻启动也死于 apply_rules；把两个软件都卸载后占用依旧。真身：flboxd 是 su 拉起的脱离式 root 进程，清数据删掉的恰是应用停它用的状态文件，卸载更不会给它发信号——孤儿会话一直挂着桥的 cgroup 钩子，后来的每次启动都撞上自己的前任。用户以 Termux `su -c "pkill -TERM -f flboxd"` 手动回收成功（守护进程收到 TERM 会走正常关停、桥退出时恢复钩子）。
+- 修法：flboxd 监督者在探针之前先 reclaimPreviousSession——扫描 /proc，对同目录（自身所在目录）下其他 flboxd/bpf2socks 进程先 SIGTERM 等 3 秒、残存 SIGKILL，再跑一次桥 `--stop`（--pid /dev/null，只做 pinned 程序 reconcile，兜底硬杀残留的挂载）。只按 argv[0] 的目录＋文件名匹配，自家启动链（su/sh 的 argv[0] 不在此列）不会误伤。
+- 待真机验收：装 beta5 后不清数据直接覆盖装、或先清数据再启动，eBPF 均应能正常拉起；beta4 的 DNS 验收（出口 Google/美国、国内软件连通）仍在本版一并验。

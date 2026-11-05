@@ -37,6 +37,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -322,6 +323,80 @@ func (g *v6Guard) restore() {
 	fmt.Fprintf(os.Stderr, "flboxd: ipv6 guard: restored\n")
 }
 
+func pidsAlive(pids []int) []int {
+	var out []int
+	for _, pid := range pids {
+		if syscall.Kill(pid, 0) == nil {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// A previous daemon survives everything the app can lose: clearing
+// app data deletes the status file the app stops it through, and
+// uninstalling the app never signals a detached root process. The
+// orphan keeps the bridge's cgroup hooks, so the next start's probe
+// hits its own predecessor (hook conflict) and other eBPF proxies
+// fail against the same leftovers. Reclaim before probing: SIGTERM
+// any other process running this daemon or the bridge from this
+// same directory - the supervisor's own shutdown restores the
+// cgroup programs - then let the bridge's --stop reconcile pinned
+// programs a hard-killed predecessor may have left behind.
+func reclaimPreviousSession(bridgeBin, bridgeConfigPath string) {
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(self)
+	var stale []int
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		argv0 := string(raw)
+		if i := strings.IndexByte(argv0, 0); i >= 0 {
+			argv0 = argv0[:i]
+		}
+		if filepath.Dir(argv0) != dir {
+			continue
+		}
+		switch filepath.Base(argv0) {
+		case "flboxd", "bpf2socks":
+			stale = append(stale, pid)
+		}
+	}
+	for _, pid := range stale {
+		fmt.Fprintf(os.Stderr, "flboxd: reclaiming previous session: SIGTERM pid %d\n", pid)
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	for deadline := time.Now().Add(3 * time.Second); len(stale) > 0 && time.Now().Before(deadline); {
+		stale = pidsAlive(stale)
+		if len(stale) > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	for _, pid := range stale {
+		fmt.Fprintf(os.Stderr, "flboxd: reclaiming previous session: SIGKILL pid %d\n", pid)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	if len(stale) > 0 {
+		time.Sleep(500 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	stopOut, stopErr := exec.CommandContext(stopCtx, bridgeBin, "--stop", "--config", bridgeConfigPath, "--pid", "/dev/null").CombinedOutput()
+	stopCancel()
+	if stopErr != nil {
+		fmt.Fprintf(os.Stderr, "flboxd: previous session reconcile: %v: %s\n", stopErr, strings.TrimSpace(string(stopOut)))
+	}
+}
+
 func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 	bridgeBin, err := bridgeBinaryPath()
 	if err != nil {
@@ -330,6 +405,7 @@ func runSupervisor(configPath, statusPath, bridgeConfigPath string) error {
 	if err := os.MkdirAll("/sys/fs/bpf/flbox", 0o755); err != nil {
 		return fmt.Errorf("prepare bpf fs dir: %w", err)
 	}
+	reclaimPreviousSession(bridgeBin, bridgeConfigPath)
 	// Capability probe first: a kernel that cannot run the
 	// bridge fails here with the probe's JSON in the log,
 	// before anything is hooked.
