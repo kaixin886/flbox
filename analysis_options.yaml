@@ -13,6 +13,10 @@ analyzer:
   exclude:
     - build/**
     - android/**
+    # Vendored prism_ui shapes library (MIT), kept
+    # byte-identical to upstream; not held to this
+    # project's lint bar.
+    - lib/shapes/**
 
 linter:
   # The lint rules applied to this project can be customized in the

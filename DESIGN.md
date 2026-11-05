@@ -555,3 +555,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 - FlClash 仪表盘的 _StartToggle（current_outbound.dart）：静止时圆形＋播放字形，运行时 450ms easeOutBack 形变为 M3 cookie-9 边形并转动 1/9 圈，字形同步形变。本仓无法直搬其 MaterialShapes 路径形变与字形字体，等价实现：自研 _MorphPainter 以极坐标九波调制半径画同一形变（深度随动画值），播放/停止图标交叉淡入＋缩放，按压 0.94 缩放（对应其 ElasticPress 的简化），系统减动效时直接跳变。
 - 仪表盘状态卡的大圆钮替换为 _MorphToggle（76px 不变，忙碌转圈保留）。其余动画（编辑模式摇晃、国家徽章自旋等）与 FlClash 自有设计系统耦合深，本版未搬。
 - 待真机验收：启停时按钮形变顺滑、无卡顿；忙碌/停止全程可点。
+
+## 0.72.0-beta9：直接移植 FlClash 的形变引擎（构建号 95）
+- beta8 的自研极坐标波纹太浅，用户真机反馈「和之前没有区别」。本版改为真移植：lib/shapes/ 整套收入 prism_ui 的 shapes 库（FlClash UI 库所携、MIT 许可的 Material shapes Dart 移植，共 12 文件），画法换成 FlClash 的 _MorphPainter 原算式——Morph(circle, cookie9Sided)、随进度转 2π/9、本色阴影 (0,6)/blur 14；时序仍 450ms easeOutBack/easeInCubic。
+- 注意：发布版 Release 仍为 0.72.0-beta7（88ae884），beta8/beta9 均为其后迭代，未单独发 Release。
+- 待真机验收：启停形变与 FlClash 观感一致（圆→九瓣 cookie、带转动）。

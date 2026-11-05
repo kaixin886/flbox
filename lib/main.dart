@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import 'core_bridge.dart';
+import 'shapes/shapes.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -3866,18 +3867,18 @@ Widget _delayPill(int? delay, Color color) {
   );
 }
 
-/// The dashboard start/stop toggle, ported from
-/// FlClash's _StartToggle (current_outbound.dart): a
-/// circle with a play glyph while stopped that eases -
-/// 450 ms, easeOutBack forward, easeInCubic back - into
-/// a nine-lobed cookie turned by a ninth of a circle
-/// while running, the glyph crossfading to stop. The
-/// original morphs between two MaterialShapes paths;
-/// here the cookie is the same polar idea drawn
-/// directly, radius modulated by a nine-wave whose
-/// depth follows the animation value, which needs no
-/// shape library. Pressing scales it to 0.94 - their
-/// ElasticPress, simplified.
+/// The dashboard start/stop toggle, FlClash's
+/// _StartToggle (current_outbound.dart) carried over
+/// directly: a circle with a play glyph while stopped
+/// that eases - 450 ms, easeOutBack forward,
+/// easeInCubic back - into the Material cookie-9 shape
+/// turned by a ninth of a circle while running, the
+/// glyph crossfading to stop. The morph runs on the
+/// same engine FlClash uses: lib/shapes/ vendors
+/// prism_ui's shapes library (the MIT-licensed Dart
+/// port of the Material shapes system), and the
+/// painter below follows their _MorphPainter. Pressing
+/// scales it to 0.94 - their ElasticPress, simplified.
 class _MorphToggle extends StatefulWidget {
   const _MorphToggle({
     required this.running,
@@ -3992,11 +3993,19 @@ class _MorphToggleState extends State<_MorphToggle>
   }
 }
 
-/// Draws the toggle outline: a circle whose radius
-/// gains a nine-wave scallop as progress goes 0 -> 1
-/// (the M3 cookie 9-sided shape in polar form), the
-/// scallops turning with the value like the original's
-/// progress * 2pi / 9 rotation.
+/// The morph itself, built once: circle at rest,
+/// cookie-9 running - the exact pair FlClash's toggle
+/// morphs between.
+final _startMorph = Morph(
+  MaterialShapes.circle,
+  MaterialShapes.cookie9Sided,
+);
+
+/// Paints the morph the way FlClash's _MorphPainter
+/// does: the normalized path is centered, turned by
+/// progress * 2pi / 9, scaled to the widget, given a
+/// soft shadow in the fill's own tint (offset (0, 6),
+/// blur 14), then filled.
 class _MorphPainter extends CustomPainter {
   _MorphPainter({required this.progress, required this.color});
 
@@ -4005,28 +4014,28 @@ class _MorphPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2 - 4;
-    final depth = 0.055 * progress;
-    final turn = progress * 2 * math.pi / 9;
-    final path = Path();
-    const steps = 180;
-    for (var i = 0; i <= steps; i++) {
-      final a = i / steps * 2 * math.pi;
-      final r = radius * (1 + depth * math.cos(9 * (a - turn)));
-      final point = Offset(
-        center.dx + r * math.cos(a),
-        center.dy + r * math.sin(a),
-      );
-      if (i == 0) {
-        path.moveTo(point.dx, point.dy);
-      } else {
-        path.lineTo(point.dx, point.dy);
-      }
-    }
-    path.close();
-    canvas.drawShadow(path, Colors.black.withValues(alpha: 0.35), 5, false);
+    final path = _startMorph.toPath(progress: progress);
+    canvas
+      ..save()
+      ..translate(size.width / 2, size.height / 2)
+      ..rotate(progress * 2 * math.pi / 9)
+      ..scale(size.width, size.height)
+      ..translate(-0.5, -0.5);
+    canvas.save();
+    canvas
+      ..translate(0, 6 / size.height)
+      ..drawPath(
+        path,
+        Paint()
+          ..color = color.withValues(alpha: 0.3)
+          ..maskFilter = MaskFilter.blur(
+            BlurStyle.normal,
+            14 / 2 / size.width,
+          ),
+      )
+      ..restore();
     canvas.drawPath(path, Paint()..color = color);
+    canvas.restore();
   }
 
   @override
@@ -5040,7 +5049,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.72.0-beta8 · app.flbox · Xray 内核',
+              'FlBox 0.72.0-beta9 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
