@@ -3558,8 +3558,10 @@ class _GlassNavBar extends StatelessWidget {
   }
 }
 
-// Sliding glass: looks exactly like the static glass bar, but the pill
-// can be dragged between items and swells while pressed.
+// Sliding glass: FlClash's navigation dock in behavior -
+// the lens rides springs (travel / settle / follow), stretches
+// with its own speed (the goo), items swell as it passes and
+// under their own press, and drags rubber-band past the ends.
 class _SlidingGlassNavBar extends StatefulWidget {
   const _SlidingGlassNavBar({
     required this.index,
@@ -3579,76 +3581,139 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
     with TickerProviderStateMixin {
   static const _horizontalPadding = 5.0;
 
-  late final AnimationController _slideController;
-  late final AnimationController _pressController;
-  late final CurvedAnimation _slideCurve;
-  Tween<double>? _tween;
-  double _pos = 0;
+  // The dock's springs, from prism_ui's
+  // navigation_dock.dart: travel 400 ms with a small
+  // bounce, settle after a drag 500 ms with more,
+  // finger-follow stiff and short (1024 / 0.9), item
+  // press the shared 311 / 0.593.
+  static final _travelSpring = SpringDescription.withDurationAndBounce(
+    duration: const Duration(milliseconds: 400),
+    bounce: 0.15,
+  );
+  static final _settleSpring = SpringDescription.withDurationAndBounce(
+    duration: const Duration(milliseconds: 500),
+    bounce: 0.32,
+  );
+  static final _followSpring = SpringDescription.withDampingRatio(
+    mass: 1,
+    stiffness: 1024,
+    ratio: 0.9,
+  );
+  static final _pressSpring = SpringDescription.withDampingRatio(
+    mass: 1,
+    stiffness: 311,
+    ratio: 0.593,
+  );
+
+  late final AnimationController _lens;
+  late final AnimationController _press;
+  double _stretch = 0;
+  double _dragTarget = 0;
+  int? _pressedItem;
+  int? _expectingIndex;
   bool _dragging = false;
 
   @override
   void initState() {
     super.initState();
-    _pos = widget.index.toDouble();
-    _slideController = AnimationController(
+    _lens = AnimationController.unbounded(
       vsync: this,
-      duration: const Duration(milliseconds: 280),
+      value: widget.index.toDouble(),
     );
-    _slideCurve = CurvedAnimation(
-      parent: _slideController,
-      curve: Curves.easeOutCubic,
-    );
-    _slideController.addListener(() {
-      final tween = _tween;
-      if (tween != null) {
-        setState(() => _pos = tween.evaluate(_slideCurve));
-      }
-    });
-    _pressController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 160),
-    );
+    _lens.addListener(_onLens);
+    _press = AnimationController(vsync: this, value: 0);
+  }
+
+  double get _pos => _lens.value;
+
+  void _onLens() {
+    // The goo: the lens stretches along its travel by
+    // an amount following its speed and relaxes as it
+    // slows. Smoothed per tick so the painted value
+    // does not jitter; the AnimatedBuilder below is
+    // driven by the same controller and reads it.
+    final target = (_lens.velocity * 0.045).clamp(-0.32, 0.32).toDouble();
+    _stretch += (target - _stretch) * 0.4;
   }
 
   @override
   void didUpdateWidget(_SlidingGlassNavBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!_dragging && widget.index != oldWidget.index) {
-      final target = widget.index.toDouble();
-      if (_slideController.isAnimating && _tween?.end == target) {
-        return; // already settling there
-      }
-      _slideTo(target);
+    if (_dragging || widget.index == oldWidget.index) return;
+    if (_expectingIndex == widget.index) {
+      // Our own tap/drag already sprang the lens
+      // there; the parent's echo must not restart it
+      // on the travel spring.
+      _expectingIndex = null;
+      return;
     }
+    _springLensTo(widget.index.toDouble(), _travelSpring);
   }
 
   @override
   void dispose() {
-    _slideCurve.dispose();
-    _slideController.dispose();
-    _pressController.dispose();
+    _lens.removeListener(_onLens);
+    _lens.dispose();
+    _press.dispose();
     super.dispose();
   }
 
-  void _slideTo(double target) {
-    _tween = Tween<double>(begin: _pos, end: target);
-    _slideController
-      ..reset()
-      ..forward();
+  void _springLensTo(double target, SpringDescription spring) {
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _lens.value = target;
+      return;
+    }
+    if ((_pos - target).abs() < 0.001 && _lens.velocity.abs() < 0.01) {
+      return;
+    }
+    _lens.animateWith(SpringSimulation(spring, _pos, target, _lens.velocity));
   }
 
-  int get _nearest =>
-      _pos.round().clamp(0, widget.destinations.length - 1);
+  void _springPressTo(double target) {
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _press.value = target;
+      return;
+    }
+    _press.animateWith(
+      SpringSimulation(_pressSpring, _press.value, target, _press.velocity),
+    );
+  }
+
+  int get _nearest => _pos.round().clamp(0, widget.destinations.length - 1);
+
+  // prism_ui's rubber band, verbatim shape: past the
+  // ends the lens keeps only a fraction of the pull.
+  double _rubber(double over) {
+    const limit = 0.22;
+    final p = 1 - 1 / (over.abs() * 0.55 / limit + 1);
+    return limit * p * over.sign;
+  }
+
+  double _banded(double x) {
+    final hi = (widget.destinations.length - 1).toDouble();
+    if (x < 0) return _rubber(x);
+    if (x > hi) return hi + _rubber(x - hi);
+    return x;
+  }
+
+  void _select(int target, SpringDescription spring) {
+    _springLensTo(target.toDouble(), spring);
+    if (target != widget.index) {
+      _expectingIndex = target;
+      HapticFeedback.selectionClick();
+      widget.onTap(target);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).colorScheme.brightness == Brightness.dark;
     return AnimatedBuilder(
-      animation: _pressController,
+      animation: Listenable.merge([_lens, _press]),
       builder: (context, _) {
-        final press = Curves.easeOut.transform(_pressController.value);
+        final press = _press.value;
         return _GlassShell(
-          pressGlow: press,
+          pressGlow: press.clamp(0.0, 1.0).toDouble(),
           child: LayoutBuilder(
             builder: (context, constraints) {
               final itemWidth =
@@ -3656,39 +3721,32 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
                       widget.destinations.length;
               return GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onHorizontalDragStart: (_) {
+                onHorizontalDragStart: (details) {
                   _dragging = true;
-                  _slideController.stop();
-                  _pressController.forward();
+                  _dragTarget = _pos;
+                  _pressedItem =
+                      (details.localPosition.dx / itemWidth).floor().clamp(
+                            0,
+                            widget.destinations.length - 1,
+                          );
+                  _springPressTo(1);
                 },
                 onHorizontalDragUpdate: (details) {
-                  setState(() {
-                    _pos = (_pos + details.delta.dx / itemWidth)
-                        .clamp(-0.15, widget.destinations.length - 0.85);
-                  });
+                  _dragTarget += details.delta.dx / itemWidth;
+                  _springLensTo(_banded(_dragTarget), _followSpring);
                 },
                 onHorizontalDragEnd: (_) {
                   _dragging = false;
-                  _pressController.reverse();
-                  final target = _nearest;
-                  if (target != widget.index) {
-                    HapticFeedback.selectionClick();
-                    // No local slide: the parent's index
-                    // change drives the settle through
-                    // didUpdateWidget. Sliding here as
-                    // well ran it twice - the extra
-                    // bounce after a pill drag.
-                    widget.onTap(target);
-                  } else {
-                    _slideTo(target.toDouble());
-                  }
+                  _pressedItem = null;
+                  _springPressTo(0);
+                  _select(_nearest, _settleSpring);
                 },
-                onLongPressStart: (_) {
-                  HapticFeedback.selectionClick();
-                  _pressController.forward();
+                onHorizontalDragCancel: () {
+                  _dragging = false;
+                  _pressedItem = null;
+                  _springPressTo(0);
+                  _select(_nearest, _settleSpring);
                 },
-                onLongPressEnd: (_) => _pressController.reverse(),
-                onLongPressCancel: () => _pressController.reverse(),
                 child: Stack(
                   children: [
                     Positioned(
@@ -3697,11 +3755,12 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
                       bottom: 5,
                       width: itemWidth,
                       child: Transform.scale(
-                        scale: 1 + press * 0.10,
+                        scaleX: 1 + _stretch.abs(),
+                        scaleY: 1 - _stretch.abs() * 0.25,
                         child: Container(
                           decoration: BoxDecoration(
                             color: _accent.withValues(
-                              alpha: (dark ? 0.26 : 0.15) + press * 0.07,
+                              alpha: dark ? 0.26 : 0.15,
                             ),
                             borderRadius: BorderRadius.circular(26),
                           ),
@@ -3714,13 +3773,25 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
                           Expanded(
                             child: GestureDetector(
                               behavior: HitTestBehavior.opaque,
-                              onTapDown: (_) => _pressController.forward(),
-                              onTapUp: (_) => _pressController.reverse(),
-                              onTapCancel: () => _pressController.reverse(),
-                              onTap: () => widget.onTap(i),
-                              child: _NavItemContent(
-                                destination: widget.destinations[i],
-                                selected: _nearest == i,
+                              onTapDown: (_) {
+                                _pressedItem = i;
+                                _springPressTo(1);
+                              },
+                              onTapUp: (_) {
+                                _pressedItem = null;
+                                _springPressTo(0);
+                              },
+                              onTapCancel: () {
+                                _pressedItem = null;
+                                _springPressTo(0);
+                              },
+                              onTap: () => _select(i, _travelSpring),
+                              child: Transform.scale(
+                                scale: _itemScale(i, itemWidth),
+                                child: _NavItemContent(
+                                  destination: widget.destinations[i],
+                                  selected: _nearest == i,
+                                ),
                               ),
                             ),
                           ),
@@ -3735,7 +3806,18 @@ class _SlidingGlassNavBarState extends State<_SlidingGlassNavBar>
       },
     );
   }
+
+  // An item swells as the lens passes under it (the
+  // dock's goo lift) and again under its own press by
+  // growthOf(itemWidth) on the press spring's value.
+  double _itemScale(int i, double itemWidth) {
+    final prox = (1 - (_pos - i).abs()).clamp(0.0, 1.0).toDouble();
+    final lift = _pressedItem == i ? _press.value : 0.0;
+    final growth = math.min(0.25, 16 / itemWidth);
+    return (1 + prox * 0.10) * (1 + lift * growth);
+  }
 }
+
 
 class _PageFrame extends StatelessWidget {
   const _PageFrame({required this.title, required this.child, this.action});
@@ -5124,7 +5206,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.72.0-beta10 · app.flbox · Xray 内核',
+              'FlBox 0.72.0-beta11 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),

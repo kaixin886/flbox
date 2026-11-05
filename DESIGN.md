@@ -571,3 +571,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.72.0-beta10：动画批次1——ElasticPress（构建号 96）
 - 新增 _ElasticPress：Listener 听按压、弹簧模拟驱动 scale 膨胀（按下膨起、松手回弹带果冻感），减动效时跳变。启停钮撤掉 beta8 的 0.94 线性收缩改用它；节点卡（_NodeTile 调用点）与订阅卡（_subCard 调用点）各裹一层。
 - 待真机验收：按压启停钮/节点卡/订阅卡时有弹性膨起感、不影响点击与滚动。
+
+## 0.72.0-beta11：动画批次2——导航栏换 FlClash dock 弹簧（构建号 97）
+- 用户真机反馈 beta10 按压「感觉差的远」，并点名把 FlClash 导航栏移植过来。_SlidingGlassNavBar 内部重写为 prism dock 的行为集：透镜位置由无界控制器＋弹簧驱动（travel 400ms/bounce 0.15、settle 500ms/0.32、follow 1024/0.9、press 311/0.593，全部取自 navigation_dock.dart）；透镜按自身速度横向拉伸＋纵向收窄（goo）；拖动时透镜以 follow 弹簧追手指、两端橡皮筋（其 _rubberBand 公式）；条目被透镜经过时膨起 10%、被按压时按 growthOf 再膨；选中回声防重启（_expectingIndex）。旧实现的 280ms easeOutCubic 补间与整条 pressGlow 退役；_GlassShell 玻璃外观与 NavStyle 设置不变。
+- 批次1 的卡片按压（_ElasticPress）保留，但用户已明确其手感不达标，后续批次视 dock 验收情况再校准。
+- 待真机验收：点按/拖动导航时透镜弹性滑动、拉伸自然、页面切换不重复弹跳；四页内容与状态保持正常。
