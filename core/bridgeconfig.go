@@ -35,8 +35,14 @@ const (
 // mode follows the bridge policy contract: 2 global,
 // 0 blacklist (uids bypass), 1 whitelist (only uids are
 // proxied). uids are Android app uids resolved by the app
-// from the per-app package preferences.
-func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
+// from the per-app package preferences. selfUID is the
+// app's own uid, force-bypassed in every mode
+// (AsteriskNG's forcedBypassUids): the app's own cores -
+// the speed-test process above all - must never be
+// captured by the bridge, or their node dials loop back
+// into the running daemon and every measurement times
+// out while real traffic is fine (2026-11-05).
+func bridgeFileConfig(ipv6 bool, mode int, uids []int, selfUID int) (string, error) {
 	if mode < 0 || mode > 2 {
 		return "", fmt.Errorf("bridge policy mode %d out of range", mode)
 	}
@@ -46,6 +52,10 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 			return "", fmt.Errorf("bridge uid %d out of range", u)
 		}
 		uidList = append(uidList, u)
+	}
+	bypassList := make([]any, 0, 1)
+	if selfUID >= 0 {
+		bypassList = append(bypassList, selfUID)
 	}
 	cfg := map[string]any{
 		"version":             1,
@@ -87,7 +97,7 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 		"policy": map[string]any{
 			"mode":       mode,
 			"uids":       uidList,
-			"bypassUids": []any{},
+			"bypassUids": bypassList,
 		},
 	}
 	out, err := json.Marshal(cfg)
@@ -100,12 +110,12 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 // bridgeXrayConfigs returns the JSON envelope the app
 // writes to disk: {"core": "<xray config>", "bridge":
 // "<bpf2socks config>"}.
-func bridgeXrayConfigs(clashYAML, selectedNode string, ipv6 bool, mode int, uids []int, routeMode int, logOff bool, directDNS string) (string, error) {
+func bridgeXrayConfigs(clashYAML, selectedNode string, ipv6 bool, mode int, uids []int, routeMode int, logOff bool, directDNS string, selfUID int) (string, error) {
 	core, err := rootXrayConfig(clashYAML, selectedNode, routeMode, ipv6, logOff, directDNS)
 	if err != nil {
 		return "", err
 	}
-	bridge, err := bridgeFileConfig(ipv6, mode, uids)
+	bridge, err := bridgeFileConfig(ipv6, mode, uids, selfUID)
 	if err != nil {
 		return "", err
 	}

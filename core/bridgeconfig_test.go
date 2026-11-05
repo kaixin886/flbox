@@ -6,7 +6,7 @@ import (
 )
 
 func TestBridgeXrayConfigsShape(t *testing.T) {
-	out, err := bridgeXrayConfigs(rootTestYAML, "node-a", true, 1, []int{10123, 10456}, routeGlobal, false, "")
+	out, err := bridgeXrayConfigs(rootTestYAML, "node-a", true, 1, []int{10123, 10456}, routeGlobal, false, "", 10999)
 	if err != nil {
 		t.Fatalf("bridgeXrayConfigs: %v", err)
 	}
@@ -36,6 +36,10 @@ func TestBridgeXrayConfigsShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(envelope["bridge"]), &bridge); err != nil {
 		t.Fatal(err)
 	}
+	bypass := bridge["policy"].(map[string]any)["bypassUids"].([]any)
+	if len(bypass) != 1 || bypass[0] != float64(10999) {
+		t.Errorf("bridge bypassUids = %v, want [10999] (the app itself)", bypass)
+	}
 	if bridge["socksPort"] != float64(bridgeSocksPort) ||
 		bridge["bridgePort"] != float64(bridgeListenPort) ||
 		bridge["enableDnsHijack"] != true ||
@@ -52,7 +56,7 @@ func TestBridgeXrayConfigsShape(t *testing.T) {
 	if policy["mode"] != float64(1) || len(policy["uids"].([]any)) != 2 {
 		t.Errorf("bridge policy wrong: %v", policy)
 	}
-	if _, err := bridgeFileConfig(false, 3, nil); err == nil {
+	if _, err := bridgeFileConfig(false, 3, nil, -1); err == nil {
 		t.Errorf("mode 3 must be rejected")
 	}
 }

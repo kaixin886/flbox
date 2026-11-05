@@ -19,6 +19,7 @@ typedef _BridgeConfigNative = Pointer<Utf8> Function(
   Int32,
   Int32,
   Pointer<Utf8>,
+  Int32,
 );
 typedef _BridgeConfigDart = Pointer<Utf8> Function(
   Pointer<Utf8>,
@@ -29,6 +30,7 @@ typedef _BridgeConfigDart = Pointer<Utf8> Function(
   int,
   int,
   Pointer<Utf8>,
+  int,
 );
 typedef _StartNative = Pointer<Utf8> Function(Pointer<Utf8>, Int32);
 typedef _StartDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
@@ -203,13 +205,24 @@ class CoreBridge {
     required int routeMode,
     required bool logOff,
     required String directDns,
+    required int selfUid,
   }) {
     final a = clashYaml.toNativeUtf8();
     final b = selectedNode.toNativeUtf8();
     final c = jsonEncode(uids).toNativeUtf8();
     final d = directDns.toNativeUtf8();
     final out = _take(
-      _bridgeConfig(a, b, ipv6 ? 1 : 0, mode, c, routeMode, logOff ? 1 : 0, d),
+      _bridgeConfig(
+        a,
+        b,
+        ipv6 ? 1 : 0,
+        mode,
+        c,
+        routeMode,
+        logOff ? 1 : 0,
+        d,
+        selfUid,
+      ),
     );
     malloc.free(a);
     malloc.free(b);

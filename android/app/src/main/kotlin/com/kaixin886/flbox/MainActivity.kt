@@ -16,6 +16,7 @@ import android.os.Build
 import android.system.Os
 import android.system.OsConstants
 import android.os.Handler
+import android.os.Process
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
@@ -481,6 +482,9 @@ class MainActivity : FlutterActivity() {
                             result.success(mapOf("lines" to lines, "done" to done))
                         }
                     }.start()
+                }
+                "ownUid" -> {
+                    result.success(Process.myUid())
                 }
                 "systemDnsServers" -> {
                     // DNS servers of the underlying network,
