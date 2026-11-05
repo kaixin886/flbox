@@ -202,27 +202,8 @@ func FlboxRootTunConfig(clashYAML, selectedNode *C.char, ipv6 C.int, includePkgs
 	return C.CString(cfg)
 }
 
-//export FlboxEbpfConfig
-func FlboxEbpfConfig(clashYAML, selectedNode *C.char, ipv6 C.int, includePkgs, excludePkgs *C.char) (out *C.char) {
-	defer func() {
-		if r := recover(); r != nil {
-			noteErr(fmt.Errorf("core panic recovered: %v", r))
-			out = nil
-		}
-	}()
-	// Same FFI shape as FlboxRootTunConfig for bridge
-	// uniformity; the steering layer (not the config) owns
-	// the ipv6 and per-package decisions in this mode.
-	cfg, err := ebpfConfig(C.GoString(clashYAML), C.GoString(selectedNode))
-	if err != nil {
-		noteErr(err)
-		return nil
-	}
-	return C.CString(cfg)
-}
-
-//export FlboxBridgeConfig
-func FlboxBridgeConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, uidsJSON *C.char) (out *C.char) {
+//export FlboxBridgeXrayConfig
+func FlboxBridgeXrayConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, uidsJSON *C.char) (out *C.char) {
 	defer func() {
 		if r := recover(); r != nil {
 			noteErr(fmt.Errorf("core panic recovered: %v", r))
@@ -236,7 +217,7 @@ func FlboxBridgeConfig(clashYAML, selectedNode *C.char, ipv6 C.int, mode C.int, 
 			return nil
 		}
 	}
-	cfg, err := bridgeConfigs(
+	cfg, err := bridgeXrayConfigs(
 		C.GoString(clashYAML),
 		C.GoString(selectedNode),
 		ipv6 != 0,

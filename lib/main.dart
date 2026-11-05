@@ -773,14 +773,20 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   /// Appends a lifecycle line to the core log file, so the log page
   /// can show why a session was adopted, cleaned up, or restarted.
+  /// Writes queue on a future chain instead of hitting the disk
+  /// synchronously: the bulk speed test logs two lines per node,
+  /// and 40+ sync appends on the UI isolate visibly hitched it.
+  Future<void> _eventWriteChain = Future<void>.value();
+
   void _logEvent(String msg) {
-    try {
-      if (_logPath.isEmpty) return;
-      File(_logPath).writeAsStringSync(
-        '${DateTime.now().toIso8601String()} [flbox] $msg\n',
-        mode: FileMode.append,
-      );
-    } catch (_) {}
+    if (_logPath.isEmpty) return;
+    final line = '${DateTime.now().toIso8601String()} [flbox] $msg\n';
+    final path = _logPath;
+    _eventWriteChain = _eventWriteChain.then((_) async {
+      try {
+        await File(path).writeAsString(line, mode: FileMode.append);
+      } catch (_) {}
+    });
   }
 
   /// Reconciles Dart's session state with reality at startup
@@ -2103,7 +2109,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         uids = res?.whereType<int>().toList() ?? <int>[];
       }
       final envelope = await Isolate.run(
-        () => CoreBridge().bridgeConfig(
+        () => CoreBridge().bridgeXrayConfig(
           yaml,
           node,
           ipv6: ipv6,
@@ -2129,20 +2135,20 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await cfgFile.writeAsString(config);
     }
     if (await statusFile.exists()) await statusFile.delete();
-    // The daemon log now appends across restarts (Kotlin
-    // side uses >>): keep a session marker per launch and
-    // reset the file once it grows past ~1MB so a failure
-    // window stays findable instead of being truncated
-    // away or buried.
+    // One log file per daemon session (0.66): the previous
+    // session rotates to root-daemon.prev.log instead of
+    // being appended to or wiped at a size threshold, so
+    // the log page opens on exactly this session and the
+    // last failure stays one tap away. The banner still
+    // heads the file - other readers find sessions by it.
     final daemonLog = File('${docs.path}/root-daemon.log');
     try {
-      if (await daemonLog.exists() && await daemonLog.length() > 1048576) {
-        await daemonLog.delete();
-      }
+      final prevLog = File('${docs.path}/root-daemon.prev.log');
+      if (await prevLog.exists()) await prevLog.delete();
+      if (await daemonLog.exists()) await daemonLog.rename(prevLog.path);
       await daemonLog.writeAsString(
-        '\n===== flboxd session ${DateTime.now().toIso8601String()} '
+        '===== flboxd session ${DateTime.now().toIso8601String()} '
         'mode=$_runMode node=$node ipv6=$ipv6 =====\n',
-        mode: FileMode.append,
       );
     } catch (_) {}
     final ok =
@@ -2823,6 +2829,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         for (final l in (res['lines'] as String? ?? '').split('\n'))
           if (l.trim().isNotEmpty) l,
       ];
+      final batch = <String, int?>{};
       while (consumed < lines.length) {
         final line = lines[consumed++];
         lastProgress = DateTime.now();
@@ -2834,10 +2841,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           final raw = (m['ms'] as num?)?.toInt() ?? -1;
           final ms = raw >= 0 ? raw : null;
           _logEvent('speed test done: $name ${ms ?? 'timeout'}');
-          if (mounted) {
-            setState(() => _delays = {..._delays, name: ms});
-          }
+          batch[name] = ms;
         } catch (_) {}
+      }
+      if (batch.isNotEmpty && mounted) {
+        setState(() => _delays = {..._delays, ...batch});
       }
       if (done) break;
       if (DateTime.now().difference(lastProgress) >
@@ -2860,6 +2868,25 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     List<MapEntry<String, String>> entries,
   ) async {
     var next = 0;
+    // Results land in a pending map and flush to the UI at
+    // most every 300ms: one setState per finished node (44
+    // for a big profile, times eight workers) rebuilt the
+    // whole page each time and made the grid stutter while
+    // the test ran. The delays still appear progressively,
+    // just in small batches.
+    final pending = <String, int?>{};
+    Timer? flushTimer;
+    void flush() {
+      if (pending.isEmpty || !mounted) return;
+      final batch = Map<String, int?>.of(pending);
+      pending.clear();
+      setState(() => _delays = {..._delays, ...batch});
+    }
+
+    flushTimer = Timer.periodic(
+      const Duration(milliseconds: 300),
+      (_) => flush(),
+    );
     Future<void> worker() async {
       while (next < entries.length) {
         final entry = entries[next++];
@@ -2875,13 +2902,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ms = null;
         }
         _logEvent('speed test done: ${entry.key} ${ms ?? 'timeout'}');
-        if (mounted) {
-          setState(() => _delays = {..._delays, entry.key: ms});
-        }
+        pending[entry.key] = ms;
       }
     }
 
-    await Future.wait([for (var i = 0; i < 8; i++) worker()]);
+    try {
+      await Future.wait([for (var i = 0; i < 8; i++) worker()]);
+    } finally {
+      flushTimer.cancel();
+      flush();
+    }
   }
 
   Future<void> _pickFastest() async {
@@ -3681,9 +3711,9 @@ class _DashboardPage extends StatelessWidget {
     final String statusDetail;
     if (running) {
       statusDetail = rootMode
-          ? 'sing-box 守护进程 · Root TUN 模式'
+          ? 'sing-box 核心 · Root TUN 模式'
           : ebpfMode
-              ? 'sing-box 守护进程 · eBPF 模式'
+              ? 'Xray 核心 · bpf2socks 桥 · eBPF 模式'
               : 'Xray 核心 · sing-box 数据通路 · VPN 模式';
     } else if (!hasProfile) {
       statusDetail = '先到「配置」页导入一个 Clash 配置';
@@ -4493,7 +4523,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.65.0 · app.flbox · Xray 内核',
+              'FlBox 0.66.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -5964,14 +5994,48 @@ class LogsPage extends StatefulWidget {
 }
 
 class _LogsPageState extends State<LogsPage> {
+  // Three log sources (0.66): the in-process core log
+  // (Xray plus the app's own [flbox] lifecycle lines) and
+  // the root daemon's per-session files - current session
+  // and the rotated previous one. The page opens on
+  // whichever file changed most recently, which is the
+  // one the user is almost certainly here for.
+  static const _sourceNames = ['核心', '守护·本次', '守护·上次'];
+  static const _sourceFiles = [
+    'xray-error.log',
+    'root-daemon.log',
+    'root-daemon.prev.log',
+  ];
+
   String? _status;
   String _logTail = '';
   String _logMeta = '';
   bool _loading = false;
+  int _source = 0;
 
   @override
   void initState() {
     super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      var newest = -1;
+      var newestTime = DateTime.fromMillisecondsSinceEpoch(0);
+      for (var i = 0; i < _sourceFiles.length; i++) {
+        final f = File('${docs.path}/${_sourceFiles[i]}');
+        if (await f.exists()) {
+          final t = (await f.stat()).modified;
+          if (t.isAfter(newestTime)) {
+            newestTime = t;
+            newest = i;
+          }
+        }
+      }
+      if (newest >= 0 && mounted) setState(() => _source = newest);
+    } catch (_) {}
     _loadLog();
   }
 
@@ -5979,10 +6043,10 @@ class _LogsPageState extends State<LogsPage> {
     setState(() => _loading = true);
     try {
       final docs = await getApplicationDocumentsDirectory();
-      final file = File('${docs.path}/xray-error.log');
+      final file = File('${docs.path}/${_sourceFiles[_source]}');
       if (await file.exists()) {
         final size = await file.length();
-        _logMeta = '日志文件 $size 字节';
+        _logMeta = '${_sourceNames[_source]}日志 · $size 字节';
         // Tail read only: the file grows to megabytes, and a
         // whole-file strict UTF-8 decode throws on any damaged byte
         // - which left this page blank while the file kept growing.
@@ -6006,7 +6070,7 @@ class _LogsPageState extends State<LogsPage> {
           await raf.close();
         }
       } else {
-        _logMeta = '日志文件尚不存在（核心启动后创建）';
+        _logMeta = '${_sourceNames[_source]}日志尚不存在';
         _logTail = '';
       }
     } catch (_) {
@@ -6018,12 +6082,12 @@ class _LogsPageState extends State<LogsPage> {
   Future<void> _clearLog() async {
     try {
       final docs = await getApplicationDocumentsDirectory();
-      final file = File('${docs.path}/xray-error.log');
+      final file = File('${docs.path}/${_sourceFiles[_source]}');
       // Truncate, never delete: the core keeps the file open, and
       // deleting the path would send all later lines to an unlinked
       // inode (the page would show "no logs" until a core restart).
       if (await file.exists()) await file.writeAsString('');
-      _logMeta = '日志文件已清空（截断）';
+      _logMeta = '${_sourceNames[_source]}日志已清空（截断）';
     } catch (_) {}
     if (mounted) setState(() => _logTail = '');
   }
@@ -6039,6 +6103,18 @@ class _LogsPageState extends State<LogsPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          SegmentedButton<int>(
+            segments: [
+              for (var i = 0; i < _sourceNames.length; i++)
+                ButtonSegment(value: i, label: Text(_sourceNames[i])),
+            ],
+            selected: {_source},
+            onSelectionChanged: (sel) {
+              setState(() => _source = sel.first);
+              _loadLog();
+            },
+          ),
+          const SizedBox(height: 12),
           Row(
             children: [
               FilledButton.tonal(
@@ -6074,7 +6150,10 @@ class _LogsPageState extends State<LogsPage> {
           const SizedBox(height: 16),
           Expanded(
             child: _logTail.isEmpty
-                ? Text('暂无日志。启动一次内核后，Xray 的运行日志会写到这里。',
+                ? Text(
+                    _source == 0
+                        ? '暂无日志。启动一次内核后，Xray 的运行日志会写到这里。'
+                        : '暂无守护日志。用 Root 模式启动一次后，守护进程的日志会写到这里。',
                     style: TextStyle(color: muted))
                 : SingleChildScrollView(
                     child: SelectableText(

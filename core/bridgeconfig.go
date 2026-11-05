@@ -18,44 +18,18 @@ import (
 // are intercepted at the socket layer before netd's cache
 // answers can pin a domain to a polluted address.
 //
-// The sing-box side is the 0.62 daemon config with the
-// redirect/tproxy inbounds swapped for one SOCKS inbound
-// the bridge dials. flboxd supervises the bridge process
-// (see cmd/flboxd): it probes first, then runs it with
-// --pid /dev/null, and both share one group id so the
-// bridge's built-in self-GID bypass also covers the box's
-// own egress - the loop prevention asteriskd relies on.
+// Behind the bridge sits an Xray core (0.66, see
+// rootxray.go) - AsteriskNG's exact pairing. flboxd
+// supervises the bridge process (see cmd/flboxd): it
+// probes first, then runs it with --pid /dev/null, and
+// both children share one group id so the bridge's
+// built-in self-GID bypass also covers the core's own
+// egress - the loop prevention asteriskd relies on.
 const (
 	bridgeSocksPort  = 7891
 	bridgeListenPort = 65534
 	bridgePinnedDir  = "/sys/fs/bpf/flbox/bpf2socks"
 )
-
-// bridgeCoreConfig returns the sing-box config for bridge
-// mode: the ebpf daemon config with a SOCKS inbound.
-func bridgeCoreConfig(clashYAML, selectedNode string) (string, error) {
-	raw, err := ebpfConfig(clashYAML, selectedNode)
-	if err != nil {
-		return "", err
-	}
-	var root map[string]any
-	if err := json.Unmarshal([]byte(raw), &root); err != nil {
-		return "", err
-	}
-	root["inbounds"] = []any{
-		map[string]any{
-			"type":        "socks",
-			"tag":         "socks-in",
-			"listen":      "127.0.0.1",
-			"listen_port": bridgeSocksPort,
-		},
-	}
-	out, err := json.Marshal(root)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
 
 // bridgeFileConfig returns the bpf2socks JSON config.
 // mode follows the bridge policy contract: 2 global,
@@ -109,11 +83,11 @@ func bridgeFileConfig(ipv6 bool, mode int, uids []int) (string, error) {
 	return string(out), nil
 }
 
-// bridgeConfigs returns the JSON envelope the app writes
-// to disk: {"core": "<sing-box config>", "bridge":
+// bridgeXrayConfigs returns the JSON envelope the app
+// writes to disk: {"core": "<xray config>", "bridge":
 // "<bpf2socks config>"}.
-func bridgeConfigs(clashYAML, selectedNode string, ipv6 bool, mode int, uids []int) (string, error) {
-	core, err := bridgeCoreConfig(clashYAML, selectedNode)
+func bridgeXrayConfigs(clashYAML, selectedNode string, ipv6 bool, mode int, uids []int) (string, error) {
+	core, err := rootXrayConfig(clashYAML, selectedNode)
 	if err != nil {
 		return "", err
 	}

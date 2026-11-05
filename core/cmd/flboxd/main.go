@@ -1,9 +1,11 @@
-// flboxd is FlBox's root daemon: a standalone sing-box
-// process the app launches through su for the root modes.
+// flboxd is FlBox's root daemon: a standalone process
+// the app launches through su for the root modes.
 // The app process itself can never hold root, so everything
 // that needs it (creating a TUN device and installing routes
 // for TUN mode; running the core beside the bpf2socks bridge
-// for eBPF mode) lives here.
+// for eBPF mode) lives here. The core flavor follows the
+// config file: sing-box JSON for TUN mode, Xray JSON for
+// bridge mode (0.66, AsteriskNG's bridge-plus-Xray pairing).
 //
 // Usage:
 //   flboxd <config.json> <status-file>
@@ -28,6 +30,7 @@ package main
 
 import (
 	"context"
+	stdjson "encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +44,8 @@ import (
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
+	xcore "github.com/xtls/xray-core/core"
+	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
 // bridgeGID is the shared group id of the core and bridge
@@ -83,6 +88,55 @@ func runBox(configPath, readyPath, readyText string) error {
 	<-sig
 	_ = instance.Close()
 	return nil
+}
+
+// configIsXray tells the two core config flavors apart:
+// Xray inbounds carry a "protocol", sing-box inbounds a
+// "type". The app generates exactly one flavor per mode,
+// so the first inbound settles it.
+func configIsXray(raw []byte) bool {
+	var probe struct {
+		Inbounds []struct {
+			Protocol string `json:"protocol"`
+		} `json:"inbounds"`
+	}
+	if err := stdjson.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return len(probe.Inbounds) > 0 && probe.Inbounds[0].Protocol != ""
+}
+
+// runXray is runBox's Xray twin: start the instance,
+// signal readiness, block until SIGTERM/SIGINT.
+func runXray(configPath, readyPath, readyText string) error {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	inst, err := xcore.StartInstance("json", raw)
+	if err != nil {
+		return fmt.Errorf("start xray: %w", err)
+	}
+	if readyPath != "" {
+		writeStatus(readyPath, readyText)
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	<-sig
+	_ = inst.Close()
+	return nil
+}
+
+// runCore dispatches on the config flavor.
+func runCore(configPath, readyPath, readyText string) error {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	if configIsXray(raw) {
+		return runXray(configPath, readyPath, readyText)
+	}
+	return runBox(configPath, readyPath, readyText)
 }
 
 func bridgeBinaryPath() (string, error) {
@@ -199,13 +253,13 @@ func main() {
 	args := os.Args[1:]
 	switch {
 	case len(args) == 3 && args[0] == "--core":
-		if err := runBox(args[1], args[2], "ready\n"); err != nil {
+		if err := runCore(args[1], args[2], "ready\n"); err != nil {
 			fmt.Fprintln(os.Stderr, "flboxd core:", err)
 			os.Exit(1)
 		}
 	case len(args) == 2:
 		running := fmt.Sprintf("running\n%d\n", os.Getpid())
-		if err := runBox(args[0], args[1], running); err != nil {
+		if err := runCore(args[0], args[1], running); err != nil {
 			fail(args[1], err)
 		}
 		writeStatus(args[1], "stopped\n")

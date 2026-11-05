@@ -387,3 +387,11 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 实现落点（0.64 已落地待真机）：core/bridgeconfig.go（FlboxBridgeConfig 信封 core+bridge、SOCKS 7891、bridgePort 65534、policy 映射分应用三档、包名→uid 由 Kotlin packageUids 解析）；flboxd 监督者模式（--core 子进程＋Credential gid 55991＋Pdeathsig）；Kotlin bridgeBinary/bridgeCheck＋rootStart 第三参；Dart _launchRootDaemon 的 ebpf 分支改走桥、netRules 三方法已删、ebpf 不再调 flushDns。工作流需用户手贴一步：在守护进程构建行后加 bridge/bpf2socks 的 make android 并把 libbpf2socks.so 拷进 jniLibs。
 - DNS 依据：bpf2socks 的 cgroup 程序对未标记 DNS 有强制代理路径（绕过 CIDR 策略、跟随 UID 选择），桥内含 DNS 事务跟踪与 fast path——即 AS 不踩 netd 缓存坑的本体机制（无须 Enhance 模块）。
 - 0.65 修复：0.64 真机起得来但零代理——bridgeListenAddress 误填 127.0.0.1，令牌地址池（127.128.0.0/9）的连接无监听可落；改 0.0.0.0（与官方示例一致），测试加断言。探针实证本机 supported=true（tcRedirect/reuseport 为 false 不影响 cgroup 路径）。
+
+## 0.66：eBPF 桥后换 Xray（AS 原配）＋日志与流畅度优化
+- 背景：0.65 桥模式已全通，但 Muse 客户端在桥＋sing-box 与 TUN＋sing-box 下皆败、网页端正常、AS（桥＋Xray）日常正常——A/B 指向核心差异，用户拍板「把 AS 的移植过来」。桥已是 AS 的 bpf2socks 本体，本版补齐其原配核心。
+- 核心替换：新增 core/rootxray.go——以 xraytranslate 的单节点配置为底，入站换桥面 SOCKS 127.0.0.1:7891（udp 开、sniff 开）；DNS 两段式与 sing-box root 配置同构：节点域名走直连 bootstrap 223.5.5.5（生成器按选中节点注入 full: 域名）、其余经节点到 8.8.8.8，DNS 客户端查询带 "dns" 入站标签由路由钉死（bootstrap 直连、其余走 proxy）；桥送来的 53 端口流量按 inboundTag＋port 路由到 dns 出站作答（hijack-dns 的 Xray 形态）；私网直连、其余走节点，全局模式与其它 root 模式齐平。flboxd 的 --core 按配置风味分发（入站带 protocol＝Xray、带 type＝sing-box），TUN 不动。原 sing-box 桥核心与 ebpfconfig（iptables 时代）一并删除，FlboxBridgeConfig FFI 换名 FlboxBridgeXrayConfig。
+- 验证：rootxray_test 断言配置形状（域名节点有 bootstrap、IP 节点无）并真启 Xray 实例验监听；全量 Go 测试与 flutter analyze 绿。真机验收点：eBPF 模式下 Muse 客户端冷启连通（本版的立项理由）、其余应用不退化。
+- 日志优化：守护日志改每会话一文件——启动时旧文件轮转为 root-daemon.prev.log、新会话独占 root-daemon.log（弃 1MB 阈值删除，失败窗口不再被截断或埋没）；日志页新增三源切换（核心／守护·本次／守护·上次），打开时自动落到最近修改的一源，守护日志从此不必再用文件管理器外捞。仪表盘状态行标注模式与内核（eBPF 显示「Xray 核心 · bpf2socks 桥」）。
+- 流畅度：_logEvent 改异步队列写（原为 UI 线程同步落盘；全量测速每节点两行、44 节点近百次同步追加）；测速结果回填改批量——进程内路径 300ms 合并一次 setState、测试服务路径按轮询批次合并（原为每节点一次整页重建）。
+- 附带定案（非本版代码）：同日「两模式用一会谷歌也不能」经飞行模式开关恢复，定案为切模式空档写回的 netd 污染缓存（09:28 同机制），与数据面无关；IPv6 开关打开后 Muse 仍败，IPv6 黑洞假设证伪。

@@ -109,12 +109,9 @@ class CoreBridge {
         .lookupFunction<_RootConfigNative, _RootConfigDart>(
           'FlboxRootTunConfig',
         );
-    _ebpfConfig = lib.lookupFunction<_RootConfigNative, _RootConfigDart>(
-      'FlboxEbpfConfig',
-    );
     _bridgeConfig = lib
         .lookupFunction<_BridgeConfigNative, _BridgeConfigDart>(
-          'FlboxBridgeConfig',
+          'FlboxBridgeXrayConfig',
         );
     _xrayStart = lib.lookupFunction<_StartNative, _StartDart>(
       'FlboxXrayStart',
@@ -182,7 +179,6 @@ class CoreBridge {
   late final _ParseLinksNative _convertImport;
   late final _TranslateNative _xrayTranslate;
   late final _RootConfigDart _rootTunConfig;
-  late final _RootConfigDart _ebpfConfig;
   late final _BridgeConfigDart _bridgeConfig;
   late final _StartDart _xrayStart;
   late final _NodeDetailNative _xrayMeasureDelay;
@@ -232,40 +228,14 @@ class CoreBridge {
 
   /// Builds the sing-box configuration for eBPF mode: the
   /// same pinned single node as the daemon modes, but the
-  /// inbounds are a redirect (TCP) and a tproxy (UDP)
-  /// listener on loopback; netfilter rules the app installs
-  /// steer traffic into them. The ipv6/package arguments
-  /// keep the FFI shape uniform - the steering layer owns
-  /// those decisions in this mode.
-  String ebpfConfig(
-    String clashYaml,
-    String selectedNode, {
-    required bool ipv6,
-    required List<String> includePkgs,
-    required List<String> excludePkgs,
-  }) {
-    final a = clashYaml.toNativeUtf8();
-    final b = selectedNode.toNativeUtf8();
-    final c = jsonEncode(includePkgs).toNativeUtf8();
-    final d = jsonEncode(excludePkgs).toNativeUtf8();
-    final out = _take(_ebpfConfig(a, b, ipv6 ? 1 : 0, c, d));
-    malloc.free(a);
-    malloc.free(b);
-    malloc.free(c);
-    malloc.free(d);
-    if (out == null) {
-      throw CoreException(_lastErrorText() ?? 'ebpf config failed');
-    }
-    return out;
-  }
-
-  /// Builds the 0.64 bridge-mode configuration pair as one
-  /// JSON envelope: {"core": sing-box config with a SOCKS
-  /// inbound, "bridge": bpf2socks config}. mode is the
-  /// bridge policy (2 global, 0 blacklist, 1 whitelist) and
-  /// uids the resolved Android uids for the package split
+  /// Builds the bridge-mode configuration pair as one
+  /// JSON envelope: {"core": Xray config with a SOCKS
+  /// inbound (0.66, AsteriskNG's pairing), "bridge":
+  /// bpf2socks config}. mode is the bridge policy
+  /// (2 global, 0 blacklist, 1 whitelist) and uids the
+  /// resolved Android uids for the package split
   /// preferences.
-  String bridgeConfig(
+  String bridgeXrayConfig(
     String clashYaml,
     String selectedNode, {
     required bool ipv6,
