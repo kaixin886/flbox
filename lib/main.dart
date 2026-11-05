@@ -2546,15 +2546,39 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
     final prefs = await SharedPreferences.getInstance();
     if (mode != 'ebpf' && _rootBootStart) {
-      // The boot script only makes sense for the root mode;
-      // leaving it behind would resurrect a daemon in a
-      // mode the user no longer runs.
+      // The boot script only makes sense for the root
+      // mode; leaving it installed would resurrect a
+      // daemon in a mode the user no longer runs. The
+      // preference itself survives the switch (the
+      // user asked for that): only the script is
+      // uninstalled, and coming back reinstalls it.
       await _applyRootBootScript(false);
-      await prefs.setBool('root_boot_start', false);
-      _rootBootStart = false;
+      _logEvent('root boot script uninstalled for mode switch (preference kept)');
     }
     await prefs.setString('run_mode', mode);
     setState(() => _runMode = mode);
+    if (mode == 'ebpf' && _rootBootStart) {
+      if (await _tryInstallRootBootScript()) {
+        _logEvent('root boot script reinstalled on return to eBPF mode');
+      }
+    }
+  }
+
+  /// Quietly republishes the daemon configs and
+  /// installs the boot script. Used when the run mode
+  /// returns to eBPF with the preference still on; the
+  /// explicit settings toggle keeps its loud failure
+  /// toasts in _setRootBootStart.
+  Future<bool> _tryInstallRootBootScript() async {
+    if (_selectedNode == null || _profileYaml == null) return false;
+    final check = await _vpnChannel.invokeMethod<String>('rootCheck');
+    if (check != 'ok') return false;
+    try {
+      await _writeRootDaemonConfigs();
+    } catch (_) {
+      return false;
+    }
+    return _applyRootBootScript(true);
   }
 
   Future<void> _stopCore() async {
@@ -4741,7 +4765,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.70.4-beta · app.flbox · Xray 内核',
+              'FlBox 0.70.5-beta · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
@@ -6451,6 +6475,7 @@ class _LogsPageState extends State<LogsPage> {
 
   String? _status;
   String _logTail = '';
+  List<String> _logLines = const [];
   String _logMeta = '';
   bool _loading = false;
   int _source = 0;
@@ -6508,15 +6533,18 @@ class _LogsPageState extends State<LogsPage> {
               ? lines.sublist(lines.length - 200)
               : lines;
           _logTail = tail.join('\n').trim();
+          _logLines = tail;
         } finally {
           await raf.close();
         }
       } else {
         _logMeta = '${_sourceNames[_source]}日志尚不存在';
         _logTail = '';
+        _logLines = const [];
       }
     } catch (_) {
       _logTail = '';
+      _logLines = const [];
     }
     if (mounted) setState(() => _loading = false);
   }
@@ -6531,7 +6559,12 @@ class _LogsPageState extends State<LogsPage> {
       if (await file.exists()) await file.writeAsString('');
       _logMeta = '${_sourceNames[_source]}日志已清空（截断）';
     } catch (_) {}
-    if (mounted) setState(() => _logTail = '');
+    if (mounted) {
+      setState(() {
+        _logTail = '';
+        _logLines = const [];
+      });
+    }
   }
 
   @override
@@ -6604,9 +6637,10 @@ class _LogsPageState extends State<LogsPage> {
                         ? '暂无日志。启动一次内核后，Xray 的运行日志会写到这里。'
                         : '暂无守护日志。用 Root 模式启动一次后，守护进程的日志会写到这里。',
                     style: TextStyle(color: muted))
-                : SingleChildScrollView(
-                    child: Text(
-                      _logTail,
+                : ListView.builder(
+                    itemCount: _logLines.length,
+                    itemBuilder: (context, i) => Text(
+                      _logLines[i],
                       style: const TextStyle(
                         fontSize: 11,
                         height: 1.45,

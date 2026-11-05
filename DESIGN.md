@@ -452,3 +452,8 @@ Go core（core/，c-shared 导出 libflbox.so）
 ## 0.70.4-beta：普通模式 UDP 全灭修复（构建号 75）
 - 用户报普通模式下 IPCheck 的 WebRTC/STUN 四项全「连接错误」，AS 正常。定案在 Xray 源码：mixed 就是 socks 服务的别名，其 UDP associate 仅在入站 settings 带 `"udp": true` 时启用（infra/conf/socks.go 的 UDP 字段默认 false、proxy/socks 按 UdpEnabled 决定是否处理）；FlBox 的 7890 混合入站从 0.23 转发器架构起就没带 settings，转发器送来的 UDP 在核心门口被拒——TCP 一切正常，所以日常浏览毫无症状，只有 STUN/游戏/语音这类纯 UDP 暴露。eBPF 模式的桥面入站一直有 udp:true，未中招。
 - 出站侧核过：Xray 本版 VLESS 出站对 vision 流量的 UDP 会转 mux 经 TCP 连接送达（仅 UDP/443 被 XTLS 拒，STUN 端口 3478/19302 不受影响），故入口开 UDP 即全线通。修法：入站补 `"settings": {"udp": true}` 一行。
+
+## 0.70.5-beta：开机自启偏好跨模式保留、日志页逐行渲染（构建号 76）
+- 用户报切运行模式会把「开机自启动」关掉：原 _setRunMode 离开 eBPF 时连偏好一起清。改为偏好保留、只拆脚本；切回 eBPF 时静默重装（_tryInstallRootBootScript，无节点/无 root 时静默跳过，偏好不动）。显式拨开关的报错路径不变。
+- 日志页在 0.70 去 SelectableText 后仍「进去不到一秒变黑」（整页黑、正文红字带下划线，按钮正常）：正文此前是单个 Text 承载 200 行长行、随异步加载落地——是全应用最大的单块文本。本版改 ListView.builder 逐行渲染。是否为该 ROM 的文本层问题仍待真机验证：若逐行后仍黑，则需区分「手指不碰也黑」与「滑动才黑」。
+- 附带实证：用户 15:25 的日志截图里 15:22 的核心日志反复出现 `proxy/socks: UDP is not enabled`——正是 0.70.4 所修入站缺 udp 的真机回执（普通模式核心所写）。
