@@ -12,8 +12,10 @@ import (
 // sing-box as root TUN mode, but no TUN device exists.
 // Traffic is steered in by netfilter rules the app installs
 // (see MainActivity.netRules): TCP is REDIRECTed to the
-// redirect inbound below, UDP is TPROXY'd to the tproxy
-// inbound, both on loopback. The handshake with an app
+// redirect inbound below; UDP is MARKed in OUTPUT, routed
+// back over loopback and TPROXY'd in PREROUTING into the
+// tproxy inbound (TPROXY is invalid in OUTPUT). The
+// handshake with an app
 // completes locally against the listener - it is never held
 // hostage to the outbound dial the way the gVisor TUN stack
 // holds it (the 0.58 "report handshake success: connection

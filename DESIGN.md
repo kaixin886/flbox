@@ -356,3 +356,11 @@ Go core（core/，c-shared 导出 libflbox.so）
 - **报错弹窗（用户指定照 AsteriskNG 样式）**：三种模式的启动失败统一走弹窗——标题「代理启动失败」＋模式＋时间＋错误详情＋设备与系统（Kotlin deviceInfo：app 版本/机型/Android/build/abi/内核/页大小/SELinux）＋启动日志（netRules 输出和/或 daemon 日志尾 6KB），按钮「关闭／复制日志」（复制全文）。原 toast 仅保留前置提示（如先选节点）。
 - **netRules 诊断化**：回执改 {ok, log}；脚本分 nat/mangle/route/v6 四段带 echo 标记；成败不再信 -C 退出码（0.59 疑似在此误判），改 grep 实时规则列表（-S OUTPUT 含 FLBOX_NAT 与 FLBOX_MNG 才打 FLBOX_ALL_OK），且无论成败都 dump OUTPUT 与两条链的实际规则进 log——失败长什么样，弹窗里直接可见。
 - **回滚补洞**：eBPF 规则安装失败时先停守护进程、再执行一次规则清除，杜绝半成品残留；停止流程与 resync 的既有清除不变。
+
+## 0.61：eBPF 转向改 MARK＋PREROUTING TPROXY，弃 addrtype
+- 0.60 真机（2026-11-05 08:19，弹窗日志一次定案）：nat 段实际装上（verify dump 里 FLBOX_NAT 挂在 OUTPUT、REDIRECT 规则在位），但 mangle 的 OUTPUT 挂钩失败——`iptables: Invalid argument`；三处 `-m addrtype --dst-type LOCAL` 全部报 `Extension addrtype revision 0 not supported, missing kernel module`；v6 段同因 addrtype 失败。
+- 定案一：**TPROXY 目标不能用于 OUTPUT**（sing-tun 源码注释亦明言 tproxy is not available in output）。0.59/0.60 把 TPROXY 规则放进 OUTPUT 跳转的链，插跳转时内核 EINVAL——建链与加规则本身能过、挂钩过不了，正对上「链都在、OUTPUT 里没有 FLBOX_MNG」的 dump。
+- 定案二：本机内核**没有 xt_addrtype**，本地豁免不能用 addrtype。
+- 修法：FLBOX_MNG 只做 `-p udp -j MARK --set-xmark 0x2B2C`（OUTPUT 合法）；新增 mangle PREROUTING 链 FLBOX_PRE，仅对 mark 0x2B2C 的 UDP 做 TPROXY --on-port 7893；ip rule/table 100 不变（marked 包经 lo 回环进 PREROUTING）。本地豁免改显式 CIDR 段（0/8、10/8、100.64/10、127/8、169.254/16、172.16/12、192.168/16、224/4、255.255.255.255/32）；v6 链本地豁免改 `-d ::1/128`。
+- verify 升级：FLBOX_ALL_OK 须同时 grep 到 nat OUTPUT 的 FLBOX_NAT、mangle OUTPUT 的 FLBOX_MNG、mangle PREROUTING 的 FLBOX_PRE 与 ip rule 的 0x2b2c，并 dump FLBOX_PRE 与 ip rule 全表；清除脚本同步拆 FLBOX_PRE。
+- 顺手：selinuxState 只接受 enforcing/permissive/disabled 单词答案，不再把 getenforce 的报错文本当状态显示（0.60 弹窗里露出的那串 permission denied）。

@@ -69,14 +69,20 @@ class MainActivity : FlutterActivity() {
 
     // Builds the su script for the eBPF mode netfilter
     // steering. Ports and marks mirror core/ebpfconfig.go:
-    // TCP lands on the redirect listener at 7892, UDP is
-    // TPROXY-marked 0x2B2C into the local-route table 100
-    // and the tproxy listener at 7893, and the daemon's own
-    // sockets carry mark 0x2B2B, which every chain exempts
-    // first - self-capture is impossible. The IPv6 chain
-    // drops non-local v6 instead of leaking it (this stage
-    // steers IPv4 only). Clearing unhooks and deletes all
-    // three chains and is safe to run anytime.
+    // TCP lands on the redirect listener at 7892; UDP is
+    // MARKed 0x2B2C in OUTPUT, routed by table 100 back
+    // over loopback, and TPROXY'd in PREROUTING into the
+    // listener at 7893 (the TPROXY target is invalid in
+    // OUTPUT - the 0.60 build learned this from a kernel
+    // EINVAL when the OUTPUT jump was inserted). The
+    // daemon's own sockets carry mark 0x2B2B, which every
+    // chain exempts first - self-capture is impossible.
+    // Local destinations are exempted with explicit CIDR
+    // ranges, never the addrtype match: this kernel has
+    // no xt_addrtype (0.60 log: revision 0 not supported).
+    // The IPv6 chain drops non-local v6 instead of
+    // leaking it (this stage steers IPv4 only). Clearing
+    // unhooks and deletes all chains and is safe anytime.
     private fun buildNetRulesScript(
         install: Boolean,
         includePkgs: List<String>,
@@ -90,6 +96,9 @@ class MainActivity : FlutterActivity() {
             lines += "iptables -t mangle -D OUTPUT -j FLBOX_MNG 2>/dev/null"
             lines += "iptables -t mangle -F FLBOX_MNG 2>/dev/null"
             lines += "iptables -t mangle -X FLBOX_MNG 2>/dev/null"
+            lines += "iptables -t mangle -D PREROUTING -j FLBOX_PRE 2>/dev/null"
+            lines += "iptables -t mangle -F FLBOX_PRE 2>/dev/null"
+            lines += "iptables -t mangle -X FLBOX_PRE 2>/dev/null"
             lines += "ip6tables -D OUTPUT -j FLBOX_6 2>/dev/null"
             lines += "ip6tables -F FLBOX_6 2>/dev/null"
             lines += "ip6tables -X FLBOX_6 2>/dev/null"
@@ -100,9 +109,21 @@ class MainActivity : FlutterActivity() {
         }
         val includeUids = includePkgs.mapNotNull { uidFor(it) }
         val excludeUids = excludePkgs.mapNotNull { uidFor(it) }
+        // Destinations that must never be steered: this
+        // host, loopback, private LANs, CGNAT, link-local,
+        // multicast and broadcast. Explicit ranges stand
+        // in for the addrtype LOCAL match this kernel
+        // cannot provide (see the header comment).
+        val localRanges = listOf(
+            "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10",
+            "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+            "192.168.0.0/16", "224.0.0.0/4", "255.255.255.255/32",
+        )
         fun steer(chain: String, table: String, action: String) {
             lines += "iptables -t $table -A $chain -m mark --mark 0x2B2B -j RETURN"
-            lines += "iptables -t $table -A $chain -m addrtype --dst-type LOCAL -j RETURN"
+            for (range in localRanges) {
+                lines += "iptables -t $table -A $chain -d $range -j RETURN"
+            }
             if (includeUids.isNotEmpty()) {
                 for (uid in includeUids) {
                     lines += "iptables -t $table -A $chain -m owner --uid-owner $uid $action"
@@ -123,8 +144,13 @@ class MainActivity : FlutterActivity() {
         lines += "echo == mangle =="
         lines += "iptables -t mangle -N FLBOX_MNG 2>/dev/null"
         lines += "iptables -t mangle -F FLBOX_MNG"
-        steer("FLBOX_MNG", "mangle", "-p udp -j TPROXY --on-port 7893 --tproxy-mark 0x2B2C")
+        steer("FLBOX_MNG", "mangle", "-p udp -j MARK --set-xmark 0x2B2C")
         lines += "iptables -t mangle -C OUTPUT -j FLBOX_MNG 2>/dev/null || iptables -t mangle -A OUTPUT -j FLBOX_MNG"
+        lines += "echo == prerouting =="
+        lines += "iptables -t mangle -N FLBOX_PRE 2>/dev/null"
+        lines += "iptables -t mangle -F FLBOX_PRE"
+        lines += "iptables -t mangle -A FLBOX_PRE -p udp -m mark --mark 0x2B2C -j TPROXY --on-port 7893 --on-ip 0.0.0.0 --tproxy-mark 0x2B2C"
+        lines += "iptables -t mangle -C PREROUTING -j FLBOX_PRE 2>/dev/null || iptables -t mangle -A PREROUTING -j FLBOX_PRE"
         lines += "echo == route =="
         lines += "ip rule del fwmark 0x2B2C lookup 100 2>/dev/null"
         lines += "ip rule add fwmark 0x2B2C lookup 100 pref 8000"
@@ -133,7 +159,7 @@ class MainActivity : FlutterActivity() {
         lines += "ip6tables -N FLBOX_6 2>/dev/null"
         lines += "ip6tables -F FLBOX_6"
         lines += "ip6tables -A FLBOX_6 -m mark --mark 0x2B2B -j RETURN"
-        lines += "ip6tables -A FLBOX_6 -m addrtype --dst-type LOCAL -j RETURN"
+        lines += "ip6tables -A FLBOX_6 -d ::1/128 -j RETURN"
         lines += "ip6tables -A FLBOX_6 -p tcp -j DROP"
         lines += "ip6tables -A FLBOX_6 -p udp -j DROP"
         lines += "ip6tables -C OUTPUT -j FLBOX_6 2>/dev/null || ip6tables -A OUTPUT -j FLBOX_6"
@@ -143,11 +169,14 @@ class MainActivity : FlutterActivity() {
         // then dumps the ground truth either way so the
         // error dialog can show exactly what the kernel has.
         lines += "echo == verify =="
-        lines += "iptables -t nat -S OUTPUT | grep FLBOX_NAT && iptables -t mangle -S OUTPUT | grep FLBOX_MNG && echo FLBOX_ALL_OK"
+        lines += "iptables -t nat -S OUTPUT | grep FLBOX_NAT && iptables -t mangle -S OUTPUT | grep FLBOX_MNG && iptables -t mangle -S PREROUTING | grep FLBOX_PRE && ip rule | grep -i 0x2b2c && echo FLBOX_ALL_OK"
         lines += "iptables -t nat -S OUTPUT"
         lines += "iptables -t mangle -S OUTPUT"
+        lines += "iptables -t mangle -S PREROUTING"
         lines += "iptables -t nat -S FLBOX_NAT"
         lines += "iptables -t mangle -S FLBOX_MNG"
+        lines += "iptables -t mangle -S FLBOX_PRE"
+        lines += "ip rule"
         return lines.joinToString("\n")
     }
 
@@ -167,7 +196,16 @@ class MainActivity : FlutterActivity() {
                 .start()
             val out = proc.inputStream.bufferedReader().readText().trim()
             proc.waitFor()
-            if (out.isNotEmpty()) return out.lowercase()
+            // getenforce merges its stderr into the reply
+            // when the state is unreadable as the app uid
+            // (0.60 dialog showed the raw error text); only
+            // a real one-word answer is a state.
+            val word = out.lowercase()
+            if (word == "enforcing" || word == "permissive" ||
+                word == "disabled"
+            ) {
+                return word
+            }
         } catch (e: Exception) {
         }
         return "unknown"

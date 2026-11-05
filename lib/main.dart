@@ -2143,8 +2143,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   /// Installs or clears the eBPF mode netfilter steering
-  /// (Kotlin side, via su): the TCP REDIRECT and UDP TPROXY
-  /// chains scoped by the split-routing package selection,
+  /// (Kotlin side, via su): the TCP REDIRECT chain, the
+  /// UDP MARK-in-OUTPUT plus TPROXY-in-PREROUTING chains
+  /// scoped by the split-routing package selection,
   /// plus the IPv6 drop chain. The result carries the
   /// script's own output - on failure it says which section
   /// died and what the kernel actually holds. Clearing is
@@ -4490,7 +4491,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           const SizedBox(height: 28),
           Center(
             child: Text(
-              'FlBox 0.60.0 · app.flbox · Xray 内核',
+              'FlBox 0.61.0 · app.flbox · Xray 内核',
               style: TextStyle(color: muted, fontSize: 12),
             ),
           ),
