@@ -33,6 +33,20 @@ import (
 // routed by port to the dns outbound and answered by
 // that client: the Xray form of hijack-dns. Global
 // mode only, like the other root modes.
+//
+// Two Xray mechanics this shape depends on, both
+// learned the hard way (0.66 shipped without the first
+// and nothing flowed): the system dialer resolves an
+// outbound's server domain through the DNS client ONLY
+// when the outbound's sockopt carries a domainStrategy
+// - otherwise it falls to Go's system resolver, whose
+// queries on Android go to netd at [::1]:53, and netd
+// refuses the bridge-bypassed core's unmarked sockets
+// ("lookup ... on [::1]:53: connection refused"). And
+// the DNS client ranks domain-matched servers first but
+// still admits them to the fallback order, so the
+// bootstrap server must sit behind the remote one and
+// carry skipFallback, or it answers every query itself.
 const rootXraySocksTag = "socks-in"
 
 var rootXrayPrivateCIDRs = []string{
@@ -98,14 +112,14 @@ func rootXrayConfig(clashYAML, selectedNode string) (string, error) {
 		},
 	}
 	serverIsDomain := serverHost != "" && net.ParseIP(serverHost) == nil
-	dnsServers := []any{}
+	dnsServers := []any{"8.8.8.8"}
 	if serverIsDomain {
 		dnsServers = append(dnsServers, map[string]any{
-			"address": "223.5.5.5",
-			"domains": []string{"full:" + serverHost},
+			"address":      "223.5.5.5",
+			"domains":      []string{"full:" + serverHost},
+			"skipFallback": true,
 		})
 	}
-	dnsServers = append(dnsServers, "8.8.8.8")
 	cfg["dns"] = map[string]any{
 		"tag":           "dns",
 		"queryStrategy": "UseIP",
@@ -149,6 +163,27 @@ func rootXrayConfig(clashYAML, selectedNode string) (string, error) {
 		"rules":          rules,
 	}
 	outbounds, _ := cfg["outbounds"].([]any)
+	// The proxy outbound must resolve the node's server
+	// domain through the DNS client (see the header
+	// comment): merge sockopt.domainStrategy into
+	// whatever streamSettings the translator produced.
+	for _, ob := range outbounds {
+		o, _ := ob.(map[string]any)
+		if o["tag"] != "proxy" {
+			continue
+		}
+		stream, _ := o["streamSettings"].(map[string]any)
+		if stream == nil {
+			stream = map[string]any{}
+			o["streamSettings"] = stream
+		}
+		sockopt, _ := stream["sockopt"].(map[string]any)
+		if sockopt == nil {
+			sockopt = map[string]any{}
+			stream["sockopt"] = sockopt
+		}
+		sockopt["domainStrategy"] = "UseIPv4"
+	}
 	cfg["outbounds"] = append(outbounds, map[string]any{
 		"tag":      "dns",
 		"protocol": "dns",

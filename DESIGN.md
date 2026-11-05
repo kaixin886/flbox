@@ -395,3 +395,9 @@ Go core（core/，c-shared 导出 libflbox.so）
 - 日志优化：守护日志改每会话一文件——启动时旧文件轮转为 root-daemon.prev.log、新会话独占 root-daemon.log（弃 1MB 阈值删除，失败窗口不再被截断或埋没）；日志页新增三源切换（核心／守护·本次／守护·上次），打开时自动落到最近修改的一源，守护日志从此不必再用文件管理器外捞。仪表盘状态行标注模式与内核（eBPF 显示「Xray 核心 · bpf2socks 桥」）。
 - 流畅度：_logEvent 改异步队列写（原为 UI 线程同步落盘；全量测速每节点两行、44 节点近百次同步追加）；测速结果回填改批量——进程内路径 300ms 合并一次 setState、测试服务路径按轮询批次合并（原为每节点一次整页重建）。
 - 附带定案（非本版代码）：同日「两模式用一会谷歌也不能」经飞行模式开关恢复，定案为切模式空档写回的 netd 污染缓存（09:28 同机制），与数据面无关；IPv6 开关打开后 Muse 仍败，IPv6 黑洞假设证伪。
+
+## 0.67：修复 0.66 eBPF 全灭——出站域名解析走错解析器
+- 0.66 真机（11:49 两会话、两节点同症）：桥与 DNS 出站都活、app/dns 能答问，但一切经节点的连接死于 `lookup aws-linkX.lxyun.xyz on [::1]:53: read: connection refused`——节点域名根本没解析出来。
+- 定案（Xray 源码 transport/internet/dialer.go）：系统拨号器只在出站 sockopt 带 domainStrategy 时才经内置 DNS 客户端解析出站服务器域名（LookupForIP），否则落到 Go 系统解析器；Android 上系统解析走 netd 的 [::1]:53，而守护核心被桥按 gid 豁免、其未标记套接字被 netd 拒答。VPN 模式在 App 进程里系统解析可用，故从未暴露；AS 的配置带了这个旋钮。
+- 修法（rootxray.go）：proxy 出站的 streamSettings 合并 sockopt.domainStrategy=UseIPv4；顺带修 DNS 客户端排序——域名命中的服务器优先但仍进 fallback 轮换，0.66 的 bootstrap（223.5.5.5）因此把所有查询都答了（日志实证 hatch-api 等均由它作答，CN 解析器答外国域名有地理分裂风险）：改为远程 8.8.8.8 在前、bootstrap 在后且 skipFallback=true（只服务节点域名）。
+- 本地实证：探针测试真启实例并经 SOCKS 发起连接，日志出现 `app/dns: UDP:223.5.5.5:53 querying DNS for: a.example.com`——出站解析已走内置客户端的目标路径；全量 Go 测试绿。

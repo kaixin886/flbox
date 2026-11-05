@@ -43,15 +43,24 @@ func TestRootXrayShapeDomainNode(t *testing.T) {
 	}
 	servers := dns["servers"].([]any)
 	if len(servers) != 2 {
-		t.Fatalf("dns servers = %v, want bootstrap + remote", servers)
+		t.Fatalf("dns servers = %v, want remote + bootstrap", servers)
 	}
-	boot := servers[0].(map[string]any)
+	if servers[0] != "8.8.8.8" {
+		t.Errorf("first server = %v, want the remote 8.8.8.8", servers[0])
+	}
+	boot := servers[1].(map[string]any)
 	if boot["address"] != "223.5.5.5" ||
-		boot["domains"].([]any)[0] != "full:a.example.com" {
-		t.Errorf("bootstrap server wrong: %v", boot)
+		boot["domains"].([]any)[0] != "full:a.example.com" ||
+		boot["skipFallback"] != true {
+		t.Errorf("bootstrap server wrong (must serve only the node domain): %v", boot)
 	}
-	if servers[1] != "8.8.8.8" {
-		t.Errorf("remote server = %v, want 8.8.8.8", servers[1])
+	// Without sockopt.domainStrategy the core resolves
+	// the node domain through the OS resolver and the
+	// daemon dies on netd's refused [::1]:53 (0.66).
+	proxy := cfg["outbounds"].([]any)[0].(map[string]any)
+	sockopt := proxy["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
+	if sockopt["domainStrategy"] != "UseIPv4" {
+		t.Errorf("proxy outbound sockopt = %v, want domainStrategy UseIPv4", sockopt)
 	}
 	rules := cfg["routing"].(map[string]any)["rules"].([]any)
 	first := rules[0].(map[string]any)
